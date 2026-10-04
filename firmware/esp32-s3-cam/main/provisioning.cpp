@@ -6,7 +6,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-#include <driver/uart_vfs.h>
+#include <esp_console.h>
 #include <esp_log.h>
 #include <esp_timer.h>
 
@@ -221,49 +221,40 @@ void provisioning_clear_credentials(void)
 /* Serial re-provisioning command                                             */
 /* ------------------------------------------------------------------------- */
 
-static void serial_console_task(void *arg)
+static int cmd_clearwifi(int argc, char **argv)
 {
-    (void)arg;
-    char line[64];
-
-    ESP_LOGI(TAG, "Serial console ready. Type 'clearwifi' + Enter to erase the "
-                  "saved network and re-enter provisioning mode.");
-
-    while (true) {
-        if (fgets(line, sizeof(line), stdin) == NULL) {
-            vTaskDelay(pdMS_TO_TICKS(200));
-            continue;
-        }
-
-        char *nl = strpbrk(line, "\r\n");
-        if (nl != NULL) {
-            *nl = '\0';
-        }
-        if (line[0] == '\0') {
-            continue;
-        }
-
-        if (strcmp(line, "clearwifi") == 0) {
-            ESP_LOGW(TAG, "'clearwifi' received");
-            provisioning_clear_credentials();
-        } else if (strcmp(line, "help") == 0) {
-            ESP_LOGI(TAG, "commands: clearwifi, help");
-        } else {
-            ESP_LOGW(TAG, "unknown command \"%s\" (try 'help')", line);
-        }
-    }
+    (void)argc;
+    (void)argv;
+    ESP_LOGW(TAG, "'clearwifi' requested");
+    provisioning_clear_credentials();
+    return 0;
 }
 
 void provisioning_start_serial_console(void)
 {
     /*
-     * Route stdin/stdout through the UART driver so that fgets() blocks until a
-     * line arrives. Without this the console VFS is non-blocking and the task
-     * would spin.
+     * Use the ESP-IDF console component rather than poking the UART VFS by
+     * hand. A hand-rolled "uart_vfs_dev_use_driver(0) + fgets(stdin)" is only
+     * half the setup - esp_console_new_repl_uart() also drains stdout, sets the
+     * line endings, installs the UART driver and switches the port to
+     * non-blocking polling. Skipping that panicked in newlib's stdio lock.
      */
-    uart_vfs_dev_use_driver(0);
+    esp_console_repl_config_t repl_cfg = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
+    repl_cfg.prompt = "parking> ";
+    repl_cfg.max_cmdline_length = 64;
 
-    if (xTaskCreate(serial_console_task, "serial_cmd", 3072, NULL, 3, NULL) != pdPASS) {
-        ESP_LOGE(TAG, "could not start the serial console task");
-    }
+    esp_console_dev_uart_config_t uart_cfg = ESP_CONSOLE_DEV_UART_CONFIG_DEFAULT();
+
+    esp_console_cmd_t cmd = {};
+    cmd.command = "clearwifi";
+    cmd.help = "Erase the saved Wi-Fi network and re-enter provisioning mode";
+    cmd.func = cmd_clearwifi;
+
+    esp_console_repl_t *repl = NULL;
+    ESP_ERROR_CHECK(esp_console_new_repl_uart(&uart_cfg, &repl_cfg, &repl));
+    ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    ESP_ERROR_CHECK(esp_console_start_repl(repl));
+
+    ESP_LOGI(TAG, "Serial console ready: type 'clearwifi' + Enter to erase the "
+                  "saved network and re-enter provisioning mode.");
 }

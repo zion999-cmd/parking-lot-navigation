@@ -303,10 +303,17 @@ clearwifi
 通过 UART0 输入即可：清空 NVS 里的全部凭据并立即进入配网模式。
 输入 `help` 看命令列表。
 
+`idf.py monitor` 打开后会出现 `parking> ` 提示符，敲 `clearwifi` 回车即可；也可以直接写串口：
+
 ```zsh
-# 直接往串口写（也可以直接用 idf.py monitor 手动敲）
 printf 'clearwifi\n' > /dev/cu.usbserial-14220
 ```
+
+实现在 `main/provisioning.cpp`，用的是 ESP-IDF 的 `esp_console` 组件
+（`esp_console_new_repl_uart`）—— 它负责排空 stdout、设置行尾、安装 UART 驱动并切换到
+非阻塞轮询。**不要**自己调 `uart_vfs_dev_use_driver()` 再 `fgets(stdin)`：
+那只做了一半初始化，会在 newlib 的 stdio 锁上触发
+`assert failed: xQueueSemaphoreTake (pxQueue->uxItemSize == 0)` 并无限重启。
 
 ---
 
