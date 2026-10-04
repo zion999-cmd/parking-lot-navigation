@@ -65,3 +65,9 @@ CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
 # snprintf() are on the path, so give it room.
 # ---------------------------------------------------------------------------
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+
+# ---------------------------------------------------------------------------
+# Compiler optimisation is left at the ESP-IDF default (-Og). Only this small
+# application is compiled with it; esp32-camera ships its own -O3 setting, so
+# the frame path is unaffected. Change it here if you ever want -Os or -O2.
+# ---------------------------------------------------------------------------

@@ -171,10 +171,11 @@ conda activate esp32
 # 2. 进入固件目录
 cd /Users/bx/Esp32/parking-lot-navigation/firmware/esp32-s3-cam
 
-# 3. 首次配置目标芯片（只需一次；之后 sdkconfig 会记住）
-idf.py set-target esp32s3
-
-# 4. 编译
+# 3. 编译
+#    目标芯片不用手动选 —— sdkconfig.defaults 里有 CONFIG_IDF_TARGET，
+#    IDF 会自己认出来：
+#    "IDF_TARGET is not set, guessed 'esp32s3' from sdkconfig .../sdkconfig.defaults"
+#    只在你确实想改目标芯片时才需要 idf.py set-target esp32s3
 idf.py build
 
 # 5. 查串口（CH340 会同时出现 usbserial-* 和 wchusbserial* 两种命名）
@@ -188,6 +189,10 @@ idf.py -p /dev/cu.usbserial-14220 flash
 # 只看串口：
 idf.py -p /dev/cu.usbserial-14220 monitor
 ```
+
+> 从零复现只需要上面这一串。实测：删掉 `sdkconfig` 和 `build/` 后直接
+> `idf.py build` 就能成功（已验证，产物大小 `0xdd1a0` 与首次构建一致）。
+> `sdkconfig` 故意不提交，`sdkconfig.defaults` + `dependencies.lock` 才是配置的来源。
 
 退出 monitor 用 `Ctrl+]`。
 
