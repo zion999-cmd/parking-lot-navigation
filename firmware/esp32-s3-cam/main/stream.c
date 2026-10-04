@@ -1,0 +1,251 @@
+#include "stream.h"
+
+#include <stdio.h>
+#include <string.h>
+
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
+#include <esp_camera.h>
+#include <esp_http_server.h>
+#include <esp_log.h>
+#include <esp_timer.h>
+
+#include "camera.h"
+#include "wifi.h"
+
+static const char *TAG = "stream";
+
+#define PART_BOUNDARY "parkinglotcamboundary"
+
+static const char *STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=" PART_BOUNDARY;
+static const char *STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n";
+static const char *STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
+
+/* Stack for the per-client streaming task. */
+#define STREAM_TASK_STACK 4096
+#define STREAM_TASK_PRIO 5
+
+static httpd_handle_t s_server = NULL;
+static uint32_t s_frames_sent = 0;
+static volatile float s_fps = 0.0f;
+static int64_t s_last_frame_us = 0;
+static volatile int s_clients = 0;
+
+/* ------------------------------------------------------------------------- */
+/* Status page                                                                */
+/* ------------------------------------------------------------------------- */
+
+static esp_err_t index_handler(httpd_req_t *req)
+{
+    char page[1536];
+
+    int n = snprintf(page, sizeof(page),
+        "<!DOCTYPE html>\n"
+        "<html><head><meta charset=\"utf-8\">"
+        "<title>Parking Lot Camera</title>"
+        "<style>body{font-family:system-ui,sans-serif;margin:1.5em;}"
+        "img{max-width:100%%;height:auto;border:1px solid #ccc;}"
+        "td{padding:2px 12px 2px 0;}</style></head>\n"
+        "<body>\n"
+        "<h1>Parking Lot Camera</h1>\n"
+        "<table>\n"
+        "<tr><td>IP</td><td>%s</td></tr>\n"
+        "<tr><td>Sensor</td><td>%s</td></tr>\n"
+        "<tr><td>Resolution</td><td>%s</td></tr>\n"
+        "<tr><td>Format</td><td>%s (quality %d)</td></tr>\n"
+        "<tr><td>Stream</td><td><a href=\"%s\">%s</a></td></tr>\n"
+        "<tr><td>FPS</td><td>%.1f</td></tr>\n"
+        "<tr><td>Uptime</td><td>%u s</td></tr>\n"
+        "<tr><td>Clients</td><td>%d</td></tr>\n"
+        "<tr><td>WiFi RSSI</td><td>%d dBm</td></tr>\n"
+        "</table>\n"
+        "<p><img src=\"%s\" alt=\"live stream\"></p>\n"
+        "</body></html>\n",
+        wifi_ip_string(),
+        camera_sensor_name(),
+        camera_resolution_name(),
+        camera_pixel_format_name(),
+        camera_jpeg_quality(),
+        STREAM_PATH,
+        STREAM_PATH,
+        (double)stream_fps(),
+        (unsigned)(esp_timer_get_time() / 1000000),
+        s_clients,
+        wifi_rssi(),
+        STREAM_PATH);
+
+    if (n <= 0 || (size_t)n >= sizeof(page)) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "page too long");
+    }
+
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, page, n);
+}
+
+/* ------------------------------------------------------------------------- */
+/* MJPEG stream                                                               */
+/* ------------------------------------------------------------------------- */
+
+static void stream_task(void *arg)
+{
+    httpd_req_t *req = (httpd_req_t *)arg;
+    esp_err_t res;
+
+    res = httpd_resp_set_type(req, STREAM_CONTENT_TYPE);
+    if (res == ESP_OK) {
+        httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+        httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    }
+
+    ESP_LOGI(TAG, "client connected (%d active)", s_clients);
+
+    while (res == ESP_OK) {
+        camera_fb_t *fb = esp_camera_fb_get();
+        if (fb == NULL) {
+            ESP_LOGE(TAG, "esp_camera_fb_get() failed, closing stream");
+            res = ESP_FAIL;
+            break;
+        }
+
+        if (fb->format != PIXFORMAT_JPEG) {
+            ESP_LOGE(TAG, "unexpected pixel format %d, closing stream", fb->format);
+            esp_camera_fb_return(fb);
+            res = ESP_FAIL;
+            break;
+        }
+
+        char part_hdr[64];
+        int hlen = snprintf(part_hdr, sizeof(part_hdr), STREAM_PART, (unsigned)fb->len);
+
+        res = httpd_resp_send_chunk(req, STREAM_BOUNDARY, strlen(STREAM_BOUNDARY));
+        if (res == ESP_OK) {
+            res = httpd_resp_send_chunk(req, part_hdr, hlen);
+        }
+        if (res == ESP_OK) {
+            res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
+        }
+
+        esp_camera_fb_return(fb);
+
+        if (res != ESP_OK) {
+            /* Client went away; this is the normal way a stream ends. */
+            break;
+        }
+
+        s_frames_sent++;
+
+        int64_t now = esp_timer_get_time();
+        if (s_last_frame_us != 0) {
+            float dt = (float)(now - s_last_frame_us) / 1000000.0f;
+            if (dt > 5.0f) {
+                s_fps = 0.0f;              /* long gap: restart the average */
+            } else if (dt > 0.0001f) {
+                float inst = 1.0f / dt;
+                s_fps = (s_fps <= 0.0f) ? inst : (0.9f * s_fps + 0.1f * inst);
+            }
+        }
+        s_last_frame_us = now;
+    }
+
+    ESP_LOGI(TAG, "client disconnected (0x%x), stream task stack high-water mark %u bytes",
+             res, (unsigned)(STREAM_TASK_STACK - uxTaskGetStackHighWaterMark(NULL)));
+
+    /* Finish the chunked response and release the async request / socket. */
+    httpd_resp_send_chunk(req, NULL, 0);
+    httpd_req_async_handler_complete(req);
+
+    s_clients--;
+    s_last_frame_us = 0;
+    s_fps = 0.0f;
+
+    vTaskDelete(NULL);
+}
+
+static esp_err_t stream_handler(httpd_req_t *req)
+{
+    /*
+     * Hand the request to a dedicated task and return immediately. The HTTP
+     * server worker is then free to serve the status page (and further stream
+     * clients) while this task pushes frames. This is the pattern used by the
+     * official Espressif camera_web_server example.
+     */
+    httpd_req_t *copy = NULL;
+    esp_err_t res = httpd_req_async_handler_begin(req, &copy);
+    if (res != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_req_async_handler_begin failed: %s", esp_err_to_name(res));
+        return res;
+    }
+
+    s_clients++;
+
+    if (xTaskCreatePinnedToCore(stream_task, "mjpeg_stream", STREAM_TASK_STACK,
+                                copy, STREAM_TASK_PRIO, NULL, tskNO_AFFINITY) != pdPASS) {
+        s_clients--;
+        ESP_LOGE(TAG, "failed to create stream task");
+        httpd_resp_send_err(copy, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        httpd_req_async_handler_complete(copy);
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Server                                                                     */
+/* ------------------------------------------------------------------------- */
+
+esp_err_t stream_server_start(void)
+{
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.server_port = 80;
+    config.max_uri_handlers = 4;
+    config.stack_size = 8192;
+    /* Recycle the least recently used connection instead of refusing new ones. */
+    config.lru_purge_enable = true;
+    config.recv_wait_timeout = 10;
+    config.send_wait_timeout = 10;
+
+    esp_err_t err = httpd_start(&s_server, &config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_start failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    httpd_uri_t index_uri = {
+        .uri = "/",
+        .method = HTTP_GET,
+        .handler = index_handler,
+        .user_ctx = NULL,
+    };
+    httpd_uri_t stream_uri = {
+        .uri = STREAM_PATH,
+        .method = HTTP_GET,
+        .handler = stream_handler,
+        .user_ctx = NULL,
+    };
+
+    ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &index_uri));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &stream_uri));
+
+    ESP_LOGI(TAG, "Stream server started");
+    ESP_LOGI(TAG, "Stream server listening on port 80");
+
+    return ESP_OK;
+}
+
+uint32_t stream_frames_sent(void)
+{
+    return s_frames_sent;
+}
+
+float stream_fps(void)
+{
+    return s_fps;
+}
+
+int stream_client_count(void)
+{
+    return s_clients;
+}

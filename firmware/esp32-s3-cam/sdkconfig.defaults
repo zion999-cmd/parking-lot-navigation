@@ -1,0 +1,67 @@
+# Hardware: ESP32-S3-CAM (KZB V2.0 baseboard + ESP32-S3-CAM core board)
+#
+# Every value below that touches the hardware was copied from the already
+# proven reference project and/or verified against the schematic:
+#   firmware source : /Users/bx/Esp32/xiaozhi-esp32-224/main/boards/bread-compact-wifi-s3cam/config.h
+#   schematic       : ESP32S3-CAM-KZB-V2_0.pdf (14/14 camera signals match)
+#   runtime proof   : serial monitor log, Apr 23 2026
+#                     "octal_psram: Found 8MB PSRAM device / Speed: 80MHz"
+#                     "spi_flash: detected chip: boya"
+#                     "camera: Detected OV3660 camera"
+#
+# ---------------------------------------------------------------------------
+# Target
+# ---------------------------------------------------------------------------
+CONFIG_IDF_TARGET="esp32s3"
+
+# ---------------------------------------------------------------------------
+# Flash: 16 MB, DIO, 80 MHz  (same as the proven build)
+# ---------------------------------------------------------------------------
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# ---------------------------------------------------------------------------
+# PSRAM: 8 MB embedded, OCTAL, 80 MHz
+# Proven by the boot log: "octal_psram: density: 0x03 (64 Mbit)",
+# "esp_psram: Found 8MB PSRAM device", "esp_psram: Speed: 80MHz".
+# Camera frame buffers are allocated here.
+# ---------------------------------------------------------------------------
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+
+# ---------------------------------------------------------------------------
+# CPU: 240 MHz (reference used CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240)
+# ---------------------------------------------------------------------------
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# ---------------------------------------------------------------------------
+# Console on UART0 @ 115200.
+# The proven build logged: "cpu_start: GPIO 44 and 43 are used as console UART
+# I/O pins". The board exposes TXD0/RXD0 through a CH34x USB-UART bridge, so
+# UART0 is the port that actually works. Do not move the console to
+# USB-Serial-JTAG: GPIO19/20 are wired to the LCD on this board.
+# ---------------------------------------------------------------------------
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_UART_NUM=0
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+
+# ---------------------------------------------------------------------------
+# esp32-camera
+# ---------------------------------------------------------------------------
+# We stream the sensor's own JPEG output, so the RGB<->YUV converter and the
+# hardware JPEG codec are not needed.
+# CONFIG_CAMERA_CONVERTER_ENABLED is not set
+# CONFIG_CAMERA_HW_JPEG_ENABLE is not set
+
+# ---------------------------------------------------------------------------
+# HTTP server: default 4096-byte task stack is too small once camera calls and
+# snprintf() are on the path, so give it room.
+# ---------------------------------------------------------------------------
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024

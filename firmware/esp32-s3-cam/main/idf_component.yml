@@ -1,0 +1,10 @@
+## Managed component dependencies.
+##
+## esp32-camera is pinned to 2.1.5 on purpose: that is the exact version that
+## already ran on this piece of hardware (see
+## /Users/bx/Esp32/xiaozhi-esp32-224/dependencies.lock and its runtime log
+## "camera: Detected OV3660 camera"). Do not bump it without re-running the
+## acceptance test.
+dependencies:
+  idf: ">=5.5.2"
+  espressif/esp32-camera: "2.1.5"
