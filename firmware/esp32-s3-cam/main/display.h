@@ -49,6 +49,16 @@ void display_show_ota_progress(const char *version_from, const char *version_to,
 /** ok == true: "Update complete / Rebooting..."; false: "Update failed". */
 void display_show_ota_result(bool ok);
 
+/**
+ * Put the last steady-state screen back, undoing any transient OTA overlay.
+ *
+ * OTA checks must call this on every path that does not end in a reboot
+ * (fetch failure, invalid manifest, already up to date, download or SHA256
+ * failure), otherwise the panel stays stuck on "Checking update..." and the
+ * device IP becomes invisible.
+ */
+void display_restore(void);
+
 /** Escape hatch for anything not covered above. */
 void display_show_error(const char *title, const char *hint);
 

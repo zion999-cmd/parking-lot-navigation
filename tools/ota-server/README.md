@@ -22,11 +22,16 @@ cd tools/ota-server
 ./run.sh --port 9000     # or a different port
 ```
 
-The startup banner prints the LAN URL to put into the firmware:
+The startup banner prints the LAN URL to put into the firmware. Take the
+`device ` line verbatim and paste it into the firmware's single OTA address:
 
 ```
-  device   : http://192.168.1.100:8000/manifest.json
+cd ../../firmware/esp32-s3-cam
+idf.py menuconfig      # Parking Lot Camera -> OTA manifest URL
 ```
+
+(each launch prints one or more `device   : http://<lan-ip>:8000/manifest.json`
+lines, one per local interface - pick the address the ESP32 can reach)
 
 ## Publish a firmware
 

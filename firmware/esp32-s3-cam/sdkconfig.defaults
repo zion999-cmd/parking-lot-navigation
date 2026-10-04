@@ -82,9 +82,10 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 # PKI / self-signed-CA work in this project.
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
 
-# Where the thin OTA server lives. Change this to your PC's LAN address, or run
-# `idf.py menuconfig` -> Parking Lot Camera -> OTA manifest URL.
-CONFIG_OTA_MANIFEST_URL="http://192.168.1.100:8000/manifest.json"
+# The OTA server address is deliberately NOT repeated here. Its single source of
+# truth is main/Kconfig.projbuild (config OTA_MANIFEST_URL); edit it with
+# `idf.py menuconfig` -> Parking Lot Camera -> OTA manifest URL. Having the
+# literal in two files is exactly how a stale address got flashed once already.
 
 # ---------------------------------------------------------------------------
 # HTTP server: default 4096-byte task stack is too small once camera calls and

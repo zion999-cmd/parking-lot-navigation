@@ -12,6 +12,7 @@
 #include <esp_log.h>
 #include <esp_ota_ops.h>
 #include <esp_timer.h>
+#include <sdkconfig.h>
 
 #include "camera.h"
 #include "ota.h"
@@ -42,7 +43,7 @@ static volatile int s_clients = 0;
 
 static esp_err_t index_handler(httpd_req_t *req)
 {
-    static char page[2560];
+    static char page[3072];
 
     const esp_partition_t *running = esp_ota_get_running_partition();
 
@@ -69,6 +70,7 @@ static esp_err_t index_handler(httpd_req_t *req)
         "<tr><td>Firmware</td><td>%s (slot %s)</td></tr>\n"
         "<tr><td>Net state</td><td>%s</td></tr>\n"
         "<tr><td>OTA</td><td>%s%s</td></tr>\n"
+        "<tr><td>OTA server</td><td>%s</td></tr>\n"
         "</table>\n"
         "<p><img src=\"%s\" alt=\"live stream\"></p>\n"
         "<p><button onclick=\"fetch('%s',{method:'POST'})\">Check for firmware update</button></p>\n"
@@ -88,6 +90,9 @@ static esp_err_t index_handler(httpd_req_t *req)
         provisioning_state_name(),
         ota_in_progress() ? "checking... " : "",
         ota_last_result(),
+        /* Shown on purpose: a wrong OTA server address is then obvious from the
+         * status page instead of only showing up as a timeout in the log. */
+        CONFIG_OTA_MANIFEST_URL,
         STREAM_PATH,
         STREAM_OTA_CHECK_PATH);
 

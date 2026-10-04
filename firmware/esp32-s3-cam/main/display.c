@@ -92,6 +92,22 @@ typedef enum {
     MSG_ERROR,
 } msg_kind_t;
 
+/*
+ * OTA screens are *transient overlays*: they cover whatever the device was
+ * showing and are expected to be undone. Everything else is a "base" screen -
+ * the steady state a human should see.
+ *
+ * This exists because every way an OTA check can end (fetch failure, invalid
+ * manifest, already up to date, download or SHA256 failure) has to put the base
+ * screen back. Otherwise the panel stays stuck on "Checking update..." forever
+ * and the one thing it must always show - the device IP - disappears.
+ */
+static bool msg_is_transient(msg_kind_t kind)
+{
+    return kind == MSG_OTA_CHECKING || kind == MSG_OTA_PROGRESS ||
+           kind == MSG_OTA_OK || kind == MSG_OTA_FAIL;
+}
+
 typedef struct {
     msg_kind_t kind;
     char a[40];
@@ -100,8 +116,10 @@ typedef struct {
 } disp_msg_t;
 
 static QueueHandle_t s_queue = NULL;
+static disp_msg_t s_base;
+static bool s_base_valid = false;
 
-static void post(const disp_msg_t *m)
+static void enqueue(const disp_msg_t *m)
 {
     if (s_queue == NULL) {
         return;
@@ -112,6 +130,23 @@ static void post(const disp_msg_t *m)
         disp_msg_t dropped;
         xQueueReceive(s_queue, &dropped, 0);
         xQueueSend(s_queue, m, 0);
+    }
+}
+
+static void post(const disp_msg_t *m)
+{
+    if (!msg_is_transient(m->kind)) {
+        s_base = *m;
+        s_base_valid = true;
+    }
+    enqueue(m);
+}
+
+/* Put the last steady-state screen back after a transient overlay. */
+void display_restore(void)
+{
+    if (s_base_valid) {
+        enqueue(&s_base);
     }
 }
 

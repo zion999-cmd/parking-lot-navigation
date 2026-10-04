@@ -113,6 +113,10 @@ void ota_log_boot_info(void)
     ESP_LOGI(TAG, "running slot=%s (%s) state=%s, next OTA target=%s",
              running->label, ota_running_version(), ota_state_name(state),
              next ? next->label : "none");
+
+    /* Print the configured server up front. A wrong address here used to be
+     * invisible until an OTA check timed out 30 s after boot. */
+    ESP_LOGI(TAG, "manifest URL  = %s", CONFIG_OTA_MANIFEST_URL);
 }
 
 void ota_mark_current_valid(void)
@@ -416,21 +420,21 @@ static void check_once(void)
 
     if (!wifi_is_connected()) {
         set_result("skipped: no network");
-        return;
+        return;                     /* no overlay was shown, nothing to undo */
     }
 
     ESP_LOGI(TAG, "checking %s (running %s)", CONFIG_OTA_MANIFEST_URL, ota_running_version());
     display_show_ota_checking();
 
     if (!fetch_manifest(&manifest)) {
-        return;
+        goto done;                  /* reason is already in s_last_result */
     }
     snprintf(s_available_version, sizeof(s_available_version), "%s", manifest.version);
 
     if (version_cmp(manifest.version, ota_running_version()) <= 0) {
         set_result("up to date (running %s, server %s)",
                    ota_running_version(), manifest.version);
-        return;
+        goto done;
     }
 
     ESP_LOGI(TAG, "update available: %s -> %s", ota_running_version(), manifest.version);
@@ -441,12 +445,27 @@ static void check_once(void)
     if (download_and_flash(url, &manifest)) {
         display_show_ota_result(true);
         ESP_LOGW(TAG, "rebooting into %s", manifest.version);
-        vTaskDelay(pdMS_TO_TICKS(1200));
+        vTaskDelay(pdMS_TO_TICKS(1500));
         esp_restart();
     }
-    /* On any failure we simply keep running the current firmware. Tell the
-     * person looking at the device that nothing was lost. */
+
+    /*
+     * Download, SHA256 or esp_ota_* failed. The running firmware is untouched,
+     * so tell the person looking at the device that nothing was lost, give them
+     * a moment to read it, and then go back to the normal screen. The detailed
+     * reason stays in the serial log.
+     */
     display_show_ota_result(false);
+    vTaskDelay(pdMS_TO_TICKS(4000));
+
+ done:
+    /*
+     * Every non-reboot exit restores the previous screen. Without this the panel
+     * would sit on "Checking update..." indefinitely and hide the device IP -
+     * which is the one thing the status display exists to show.
+     */
+    vTaskDelay(pdMS_TO_TICKS(800));
+    display_restore();
 }
 
 static void ota_task(void *arg)

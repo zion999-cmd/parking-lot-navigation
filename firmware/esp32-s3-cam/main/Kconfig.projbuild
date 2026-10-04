@@ -2,11 +2,23 @@ menu "Parking Lot Camera"
 
     config OTA_MANIFEST_URL
         string "OTA manifest URL"
-        default "http://192.168.1.100:8000/manifest.json"
+        default "http://192.168.3.102:8000/manifest.json"
         help
-            URL of the thin OTA server's manifest.json, for example
-            http://192.168.1.100:8000/manifest.json where 192.168.1.100 is the
-            PC running tools/ota-server.
+            Full URL of the thin OTA server's manifest.json.
+
+            THIS IS THE ONLY PLACE IN THE FIRMWARE THAT CONTAINS AN OTA SERVER
+            ADDRESS. Do not add a second copy anywhere else: no source file,
+            no sdkconfig.defaults, no README snippet that people copy from.
+            tools/ota-server/run.sh prints the correct value for this machine
+            when it starts.
+
+            The address is baked in at build time, so moving the OTA server to a
+            different host or network means rebuilding. That is accepted
+            deliberately - the alternative would be a discovery mechanism, and
+            the device pull model is meant to stay this thin.
+
+            To make a mismatch easy to spot, the value is logged at startup
+            ("ota: manifest URL = ...") and shown on the device status page.
 
             Plain http:// is the intended sandbox-LAN setting. The downloaded
             image is always SHA256-verified against the manifest before it is
