@@ -1,4 +1,20 @@
 dependencies:
+  78/esp-wifi-connect:
+    component_hash: 2774077ebdc43a871ad134b9048aaeb59b10d4599e839be2b5a634f5b2a023e9
+    dependencies:
+    - matches:
+      - if: idf_version >=6.0
+      name: espressif/cjson
+      registry_url: https://components.espressif.com
+      require: private
+      version: ^1.7.19
+    - name: idf
+      require: private
+      version: '>=5.3'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 3.1.5
   espressif/esp32-camera:
     component_hash: ac4228c825b891378bc0806869170d4ebc5d45ba8ebc519b4f8886a56ad2d123
     dependencies:
@@ -28,8 +44,9 @@ dependencies:
       type: idf
     version: 5.5.3
 direct_dependencies:
+- 78/esp-wifi-connect
 - espressif/esp32-camera
 - idf
-manifest_hash: 4fda6d6b79220dc9b3d909493fd66c43858d00b94c1f0b827b82a42ad0ee7560
+manifest_hash: c957e1ab773edb9002cccaee0b5c7f204105f1c42ca9843951c951987421da9b
 target: esp32s3
 version: 2.0.0

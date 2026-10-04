@@ -1,0 +1,16 @@
+menu "Parking Lot Camera"
+
+    config OTA_MANIFEST_URL
+        string "OTA manifest URL"
+        default "http://192.168.1.100:8000/manifest.json"
+        help
+            URL of the thin OTA server's manifest.json, for example
+            http://192.168.1.100:8000/manifest.json where 192.168.1.100 is the
+            PC running tools/ota-server.
+
+            Plain http:// is the intended sandbox-LAN setting. The downloaded
+            image is always SHA256-verified against the manifest before it is
+            committed, so HTTP is not trusted blindly. An https:// URL also
+            works and is validated against the ESP x509 root bundle.
+
+endmenu

@@ -6,12 +6,16 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include <esp_app_desc.h>
 #include <esp_camera.h>
 #include <esp_http_server.h>
 #include <esp_log.h>
+#include <esp_ota_ops.h>
 #include <esp_timer.h>
 
 #include "camera.h"
+#include "ota.h"
+#include "provisioning.h"
 #include "wifi.h"
 
 static const char *TAG = "stream";
@@ -38,7 +42,9 @@ static volatile int s_clients = 0;
 
 static esp_err_t index_handler(httpd_req_t *req)
 {
-    char page[1536];
+    static char page[2560];
+
+    const esp_partition_t *running = esp_ota_get_running_partition();
 
     int n = snprintf(page, sizeof(page),
         "<!DOCTYPE html>\n"
@@ -46,7 +52,8 @@ static esp_err_t index_handler(httpd_req_t *req)
         "<title>Parking Lot Camera</title>"
         "<style>body{font-family:system-ui,sans-serif;margin:1.5em;}"
         "img{max-width:100%%;height:auto;border:1px solid #ccc;}"
-        "td{padding:2px 12px 2px 0;}</style></head>\n"
+        "td{padding:2px 12px 2px 0;}td:first-child{color:#666;}"
+        "button{padding:6px 12px;}</style></head>\n"
         "<body>\n"
         "<h1>Parking Lot Camera</h1>\n"
         "<table>\n"
@@ -58,22 +65,31 @@ static esp_err_t index_handler(httpd_req_t *req)
         "<tr><td>FPS</td><td>%.1f</td></tr>\n"
         "<tr><td>Uptime</td><td>%u s</td></tr>\n"
         "<tr><td>Clients</td><td>%d</td></tr>\n"
-        "<tr><td>WiFi RSSI</td><td>%d dBm</td></tr>\n"
+        "<tr><td>WiFi</td><td>%s, RSSI %d dBm</td></tr>\n"
+        "<tr><td>Firmware</td><td>%s (slot %s)</td></tr>\n"
+        "<tr><td>Net state</td><td>%s</td></tr>\n"
+        "<tr><td>OTA</td><td>%s%s</td></tr>\n"
         "</table>\n"
         "<p><img src=\"%s\" alt=\"live stream\"></p>\n"
+        "<p><button onclick=\"fetch('%s',{method:'POST'})\">Check for firmware update</button></p>\n"
         "</body></html>\n",
         wifi_ip_string(),
         camera_sensor_name(),
         camera_resolution_name(),
         camera_pixel_format_name(),
         camera_jpeg_quality(),
-        STREAM_PATH,
-        STREAM_PATH,
+        STREAM_PATH, STREAM_PATH,
         (double)stream_fps(),
         (unsigned)(esp_timer_get_time() / 1000000),
         s_clients,
+        wifi_ssid(),
         wifi_rssi(),
-        STREAM_PATH);
+        esp_app_get_description()->version, running->label,
+        provisioning_state_name(),
+        ota_in_progress() ? "checking... " : "",
+        ota_last_result(),
+        STREAM_PATH,
+        STREAM_OTA_CHECK_PATH);
 
     if (n <= 0 || (size_t)n >= sizeof(page)) {
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "page too long");
@@ -82,6 +98,29 @@ static esp_err_t index_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "text/html");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, page, n);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Manual OTA trigger                                                         */
+/* ------------------------------------------------------------------------- */
+
+static esp_err_t ota_check_handler(httpd_req_t *req)
+{
+    /*
+     * Only wakes the OTA worker; the download happens there so this request
+     * returns immediately. 202 = accepted, 409 = a check is already running.
+     */
+    bool accepted = ota_request_check();
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_status(req, accepted ? "202 Accepted" : "409 Conflict");
+
+    char body[160];
+    int n = snprintf(body, sizeof(body),
+                     "{\"accepted\":%s,\"running_version\":\"%s\",\"last_result\":\"%s\"}\n",
+                     accepted ? "true" : "false", ota_running_version(), ota_last_result());
+    return httpd_resp_send(req, body, n);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -198,9 +237,13 @@ static esp_err_t stream_handler(httpd_req_t *req)
 
 esp_err_t stream_server_start(void)
 {
+    if (s_server != NULL) {
+        return ESP_OK;
+    }
+
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_uri_handlers = 4;
+    config.max_uri_handlers = 8;
     config.stack_size = 8192;
     /* Recycle the least recently used connection instead of refusing new ones. */
     config.lru_purge_enable = true;
@@ -210,6 +253,7 @@ esp_err_t stream_server_start(void)
     esp_err_t err = httpd_start(&s_server, &config);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_start failed: %s", esp_err_to_name(err));
+        s_server = NULL;
         return err;
     }
 
@@ -225,14 +269,39 @@ esp_err_t stream_server_start(void)
         .handler = stream_handler,
         .user_ctx = NULL,
     };
+    httpd_uri_t ota_uri = {
+        .uri = STREAM_OTA_CHECK_PATH,
+        .method = HTTP_POST,
+        .handler = ota_check_handler,
+        .user_ctx = NULL,
+    };
 
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &index_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &stream_uri));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &ota_uri));
 
     ESP_LOGI(TAG, "Stream server started");
     ESP_LOGI(TAG, "Stream server listening on port 80");
 
     return ESP_OK;
+}
+
+void stream_server_stop(void)
+{
+    if (s_server == NULL) {
+        return;
+    }
+
+    ESP_LOGW(TAG, "Stopping stream server to release port 80 for the portal");
+    httpd_stop(s_server);
+    s_server = NULL;
+    s_fps = 0.0f;
+    s_last_frame_us = 0;
+}
+
+bool stream_server_is_running(void)
+{
+    return s_server != NULL;
 }
 
 uint32_t stream_frames_sent(void)

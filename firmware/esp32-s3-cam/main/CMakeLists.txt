@@ -2,13 +2,21 @@ idf_component_register(
     SRCS
         "main.c"
         "camera.c"
-        "wifi.c"
         "stream.c"
+        "ota.c"
+        "version.c"
+        "wifi.cpp"
+        "provisioning.cpp"
     INCLUDE_DIRS "."
-    REQUIRES
+    PRIV_REQUIRES
         esp_wifi
         esp_netif
         esp_http_server
+        esp_http_client
         esp_timer
         nvs_flash
+        app_update
+        json
+        mbedtls
+        console
 )

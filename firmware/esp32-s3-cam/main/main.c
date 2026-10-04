@@ -1,6 +1,7 @@
 #include <stdio.h>
 
 #include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <freertos/task.h>
 
 #include <esp_heap_caps.h>
@@ -8,9 +9,10 @@
 #include <esp_log.h>
 #include <esp_system.h>
 #include <esp_timer.h>
-#include <nvs_flash.h>
 
 #include "camera.h"
+#include "ota.h"
+#include "provisioning.h"
 #include "stream.h"
 #include "wifi.h"
 
@@ -22,41 +24,40 @@ static const char *TAG = "app";
 /* Pause before rebooting when a mandatory subsystem could not be brought up. */
 #define FAILURE_RESTART_DELAY_MS 5000
 
-static void diagnostics_task(void *arg)
+/*
+ * Boot order, and why it is this order:
+ *
+ *   wifi_init + provisioning_start   -> the node is either on the LAN or
+ *                                       offering its configuration portal
+ *   camera + stream server           -> started by network_task once an IPv4
+ *                                       address exists, so the camera and the
+ *                                       PSRAM frame buffers are not powered
+ *                                       while the device is merely waiting to
+ *                                       be configured, and so port 80 is free
+ *                                       for the captive portal.
+ *
+ * That keeps the P0001 startup log contract intact:
+ *   WiFi connected / IP address / Camera initialized / Stream server started
+ */
+
+static SemaphoreHandle_t s_connected_sem = NULL;
+static SemaphoreHandle_t s_disconnected_sem = NULL;
+
+/* These three run in the Wi-Fi event task, so they only signal. */
+static void on_connected(void)
 {
-    const TickType_t period = pdMS_TO_TICKS(DIAGNOSTICS_PERIOD_MS);
-    TickType_t last_wake = xTaskGetTickCount();
-
-    while (true) {
-        vTaskDelayUntil(&last_wake, period);
-
-        /*
-         * One line, every 10 s, with everything the P0001 stability test asks
-         * for: uptime (did it restart?), FPS, frame count (did output stop?),
-         * clients, RSSI (did Wi-Fi drop?), and free/min heap (memory growth?).
-         */
-        ESP_LOGI(TAG, "uptime=%us fps=%.1f frames=%u clients=%d rssi=%d dBm "
-                      "heap_internal=%u heap_psram=%u heap_min=%u",
-                 (unsigned)(esp_timer_get_time() / 1000000),
-                 (double)stream_fps(),
-                 (unsigned)stream_frames_sent(),
-                 stream_client_count(),
-                 wifi_rssi(),
-                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
-                 (unsigned)esp_get_minimum_free_heap_size());
-    }
+    xSemaphoreGive(s_connected_sem);
 }
 
-static esp_err_t init_nvs(void)
+static void on_disconnected(void)
 {
-    esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS needs to be erased (%s), erasing", esp_err_to_name(err));
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        err = nvs_flash_init();
-    }
-    return err;
+    xSemaphoreGive(s_disconnected_sem);
+}
+
+static void on_before_config_ap(void)
+{
+    /* The captive portal needs port 80; the MJPEG server owns it right now. */
+    stream_server_stop();
 }
 
 static void restart_after_failure(const char *what)
@@ -67,35 +68,109 @@ static void restart_after_failure(const char *what)
     esp_restart();
 }
 
+static void network_task(void *arg)
+{
+    (void)arg;
+    bool camera_up = false;
+
+    while (true) {
+        xSemaphoreTake(s_connected_sem, portMAX_DELAY);
+
+        if (!camera_up) {
+            if (camera_init() != ESP_OK) {
+                restart_after_failure("Camera");
+            }
+            camera_up = true;
+
+            /*
+             * Rollback confirmation. This is the first point at which the new
+             * image has proven it can do its job, so cancel the pending
+             * rollback here (see README "OTA and rollback").
+             */
+            ota_mark_current_valid();
+        }
+
+        if (stream_server_start() != ESP_OK) {
+            restart_after_failure("HTTP stream server");
+        }
+
+        ESP_LOGI(TAG, "Status page : http://%s/", wifi_ip_string());
+        ESP_LOGI(TAG, "MJPEG stream: http://%s%s", wifi_ip_string(), STREAM_PATH);
+
+        /* Drop any stale disconnect signal from the association phase. */
+        xSemaphoreTake(s_disconnected_sem, 0);
+        xSemaphoreTake(s_disconnected_sem, portMAX_DELAY);
+
+        ESP_LOGW(TAG, "Not reachable any more; waiting for the network to come back");
+    }
+}
+
+static void diagnostics_task(void *arg)
+{
+    (void)arg;
+    const TickType_t period = pdMS_TO_TICKS(DIAGNOSTICS_PERIOD_MS);
+    TickType_t last_wake = xTaskGetTickCount();
+
+    while (true) {
+        vTaskDelayUntil(&last_wake, period);
+
+        /*
+         * One line, every 10 s, with everything the stability test asks for:
+         * uptime (did it restart?), FPS, frame count (did output stop?), clients,
+         * RSSI (did Wi-Fi drop?), free/min heap (memory growth?), plus the
+         * firmware version and slot so an OTA reboot is obvious in the log.
+         */
+        ESP_LOGI(TAG, "uptime=%us fw=%s fps=%.1f frames=%u clients=%d rssi=%d dBm "
+                      "net=%s ip=%s heap_internal=%u heap_psram=%u heap_min=%u",
+                 (unsigned)(esp_timer_get_time() / 1000000),
+                 ota_running_version(),
+                 (double)stream_fps(),
+                 (unsigned)stream_frames_sent(),
+                 stream_client_count(),
+                 wifi_rssi(),
+                 provisioning_state_name(),
+                 wifi_ip_string(),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                 (unsigned)esp_get_minimum_free_heap_size());
+    }
+}
+
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Parking Lot Navigation - ESP32-S3-CAM network camera (P0001)");
-    ESP_LOGI(TAG, "Built with ESP-IDF %s", esp_get_idf_version());
+    ESP_LOGI(TAG, "Parking Lot Navigation - ESP32-S3-CAM network camera");
+    ESP_LOGI(TAG, "Firmware %s, ESP-IDF %s", ota_running_version(), esp_get_idf_version());
 
-    ESP_ERROR_CHECK(init_nvs());
+    ota_log_boot_info();
 
-    if (wifi_sta_start() != ESP_OK) {
-        /*
-         * Wi-Fi is the only external dependency, so a failure here is not fatal:
-         * the driver keeps retrying in the background and the stream server
-         * binds to 0.0.0.0, so the node becomes reachable the moment a lease is
-         * obtained. Being reachable-later beats a reboot loop, and it keeps the
-         * camera diagnostics below visible.
-         */
-        ESP_LOGW(TAG, "WiFi not connected yet - continuing anyway, the driver "
-                      "keeps retrying in the background");
+    s_connected_sem = xSemaphoreCreateBinary();
+    s_disconnected_sem = xSemaphoreCreateBinary();
+    if (s_connected_sem == NULL || s_disconnected_sem == NULL) {
+        ESP_LOGE(TAG, "could not create the network semaphores");
+        esp_restart();
     }
 
-    if (camera_init() != ESP_OK) {
-        restart_after_failure("Camera");
+    /* Does NVS, netif, the default event loop and the Wi-Fi driver. */
+    ESP_ERROR_CHECK(wifi_init());
+
+    provisioning_set_hooks(on_connected, on_disconnected, on_before_config_ap);
+    provisioning_start_serial_console();
+    provisioning_start();
+
+    /*
+     * Rollback confirmation for the case where the node is healthy but has no
+     * network to join yet: offering the provisioning portal is a working state.
+     * The other confirmation point is in network_task(), after the camera is up.
+     */
+    if (provisioning_in_config_mode()) {
+        ota_mark_current_valid();
     }
 
-    if (stream_server_start() != ESP_OK) {
-        restart_after_failure("HTTP stream server");
+    ota_start();
+
+    if (xTaskCreate(network_task, "network_app", 6144, NULL, 5, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "could not start the network task");
+        esp_restart();
     }
-
-    ESP_LOGI(TAG, "Status page : http://%s/", wifi_ip_string());
-    ESP_LOGI(TAG, "MJPEG stream: http://%s%s", wifi_ip_string(), STREAM_PATH);
-
     xTaskCreate(diagnostics_task, "diagnostics", 4096, NULL, 3, NULL);
 }

@@ -1,10 +1,18 @@
 # Partition table for Parking Lot Navigation - ESP32-S3-CAM camera node.
 #
-# Deliberately minimal: this node only captures and streams video.
-# No OTA slot, no assets partition, no filesystem.
-# See README "Known limitations" for what that means.
+# Layout follows the reference project's OTA A/B scheme
+# (/Users/bx/Esp32/xiaozhi-esp32-224/partitions/v2/16m.csv), minus the `assets`
+# partition: this node does not download any runtime content, so reserving 8 MB
+# for it would be waste. The remaining ~8 MB of the 16 MB flash is left
+# unpartitioned as growth headroom.
+#
+# Slot sizing: the P0001 firmware was 905,632 bytes. 0x3f0000 (4,128,768 bytes)
+# per slot is the same size the reference project uses and leaves a 4.3x growth
+# margin, which is plenty for P0001.1 and the later phases.
 #
 # Name,     Type, SubType, Offset,   Size,     Flags
-nvs,        data, nvs,     0x9000,   0x6000,
+nvs,        data, nvs,     0x9000,   0x4000,
+otadata,    data, ota,     0xd000,   0x2000,
 phy_init,   data, phy,     0xf000,   0x1000,
-factory,    app,  factory, 0x10000,  0x400000,
+ota_0,      app,  ota_0,   0x20000,  0x3f0000,
+ota_1,      app,  ota_1,   ,         0x3f0000,

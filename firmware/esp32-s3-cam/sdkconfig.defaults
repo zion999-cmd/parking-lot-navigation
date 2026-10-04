@@ -57,8 +57,34 @@ CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
 # ---------------------------------------------------------------------------
 # We stream the sensor's own JPEG output, so the RGB<->YUV converter and the
 # hardware JPEG codec are not needed.
-# CONFIG_CAMERA_CONVERTER_ENABLED is not set
-# CONFIG_CAMERA_HW_JPEG_ENABLE is not set
+# CONFIG_CAMERA_CONVERTER_ENABLED is not set (the sensor emits JPEG itself)
+
+# ---------------------------------------------------------------------------
+# WiFi provisioning (78/esp-wifi-connect)
+# ---------------------------------------------------------------------------
+# The reused provisioning component is C++ and uses std::function / std::string
+# throughout. The reference project builds it with C++ exceptions enabled.
+CONFIG_COMPILER_CXX_EXCEPTIONS=y
+CONFIG_COMPILER_CXX_EXCEPTIONS_EMG_POOL_SIZE=1024
+
+# ---------------------------------------------------------------------------
+# OTA
+# ---------------------------------------------------------------------------
+# Native ESP-IDF rollback: an image uploaded by OTA starts as PENDING_VERIFY and
+# is rolled back automatically if it never calls
+# esp_ota_mark_app_valid_cancel_rollback(). See README "OTA and rollback".
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+# Anti-rollback (downgrade protection) is not wanted here: the sandbox must
+# always be able to go back to an older build.
+# CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK is not set
+
+# Root CA bundle, so an https:// OTA URL works against public CAs without any
+# PKI / self-signed-CA work in this project.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+
+# Where the thin OTA server lives. Change this to your PC's LAN address, or run
+# `idf.py menuconfig` -> Parking Lot Camera -> OTA manifest URL.
+CONFIG_OTA_MANIFEST_URL="http://192.168.1.100:8000/manifest.json"
 
 # ---------------------------------------------------------------------------
 # HTTP server: default 4096-byte task stack is too small once camera calls and
