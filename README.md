@@ -25,6 +25,7 @@ ESP32-S3-CAM
 |---|---|
 | Wi-Fi 配网（SoftAP + 网页 + NVS） | 配网 App / BLE 配网 |
 | A/B OTA + SHA256 + 原生回滚 | 云平台 / 设备管理 / 用户系统 |
+| 板载 TFT 作**状态面板**（IP / 配网 / OTA / 错误） | 屏幕上的复杂 UI、动画、地图、视频预览、触摸、菜单 |
 | 摄像头初始化（沿用已验证配置） | 视觉算法 / AI 推理 |
 | HTTP MJPEG 视频流 | 私有视频协议 / 云端视频 |
 | 状态页 + 串口健康日志 | 停车场业务逻辑 |
@@ -562,7 +563,106 @@ curl -o /dev/null --max-time 3600 http://<device-ip>/stream
 
 ---
 
-## 12. 目录结构
+## 12. 状态显示（P0001.2）
+
+板载 TFT 只做一件事：**把设备自身状态和“下一步要干什么”显示给人看**。
+不是 UI，不做动画、地图、视频预览、触摸、菜单。
+
+保留这块屏的核心理由：**设备 IP 肉眼可见**。换 Wi-Fi 之后不用开串口找 IP，
+比赛现场和老师同学都能直接用。
+
+### 12.1 屏幕硬件（来自参考工程实跑配置，与原理图 14/14 吐合）
+
+| 项 | 值 |
+|---|---|
+| controller | **ST7789**，`esp_lcd_new_panel_st7789`（esp_lcd，不走 LVGL 驱动） |
+| 分辨率 | **240x240**（参考工程 `CONFIG_LCD_ST7789_240X240=y`） |
+| 总线 | **SPI3_HOST** @ 40 MHz，SPI mode 0，cmd/param 8bit，16bpp，queue depth 10 |
+| 引脚 | CS=**45**，DC=**47**，RST=**21**，SCLK=**19**，MOSI=**20** |
+| 背光 | **LEDC PWM** on GPIO**38**，`OUTPUT_INVERT=false`（高电平点亮） |
+| 面板参数 | `invert_color=true`，`mirror(false,false)`，`swap_xy=false`，offset 0,0，RGB 元素顺序 |
+| 初始化序列 | `reset` → `init` → `invert_color` → `swap_xy` → `mirror` → `disp_on_off`（与参考工程一致） |
+
+⚠️ **LEDC 资源注意**：`camera.c` 已占用 `LEDC_TIMER_0`/`LEDC_CHANNEL_0` 产生摄像头 XCLK，
+所以背光故意用 `LEDC_TIMER_1`/`LEDC_CHANNEL_1`。
+
+### 12.2 屏幕内容
+
+| 时机 | 显示 |
+|---|---|
+| 上电 | `Parking Camera` / `Booting...` / `v0.2.1` |
+| 配网模式 | `Wi-Fi Setup` / `Connect to:` / `ParkingCam-XXXX` / `Then open:` / `192.168.4.1` |
+| 连接中 | `Connecting Wi-Fi...` / SSID（**密码永不显示**） |
+| 正常运行 | `Camera Ready` / `Wi-Fi: Connected` / `IP: 192.168.3.105` / `/stream` |
+| 摄像头故障 | `Camera ERROR` / `Check camera cable` |
+| Wi-Fi 不可用 | `Wi-Fi unavailable` / `Starting setup mode...` |
+| OTA | `Checking update...` / `Updating... 0.2.1 -> 0.2.2 [##----] 35%` / `Update complete` / `Update failed` + `Current firmware safe` |
+
+原则：**屏幕告诉人“该怎么办”，串口记录“程序为什么失败”。**
+版本号从 `esp_app_get_description()->version` 读，没有第二份硬编码。
+
+配网页会自动弹出，但屏幕仍然显示 `192.168.4.1`，方便现场异常时手输。
+
+### 12.3 架构：模块只报告，不画屏
+
+```
+camera.c / wifi.cpp / provisioning.cpp / ota.c / stream.c
+        │  只调用 display_show_*()
+        v
+display.c   ← 唯一碰 esp_lcd / SPI / LEDC 的文件
+        ├─ 消息队列（定长，满了丢最旧）
+        └─ display 任务：渲染 → esp_lcd_panel_draw_bitmap
+```
+
+`display_show_*()` 只往队列里投一条小消息，**任何任务都能安全调用**，
+包括 Wi-Fi 事件回调。渲染、SPI 传输、背光都在 display 任务里。
+屏幕是 best-effort：面板坏了、分配不到内存，固件照常做摄像头节点（SC-9）。
+
+### 12.4 字体
+
+`main/font8x16.h`：8x16 单色点阵，1bpp，每行 1 字节（bit7 = 最左），ASCII 0x20-0x7E。
+
+**是光栅化出来的，不是手写的** —— 用 Pillow 把 Andale Mono 在 13px 下渲染进 8x16 单元格，
+所以字形一定正确、不需要真机逐字校对。重新生成的办法写在
+`font8x16.h` 头部注释里。
+
+没选 LVGL：本项目只需要“画几行字”，把 LVGL + 显示驱动 + flush 任务拉进来
+代价远大于收益，也更容易影响 streaming（SC-9）。
+
+---
+
+## 13. 真机调试记录（两个只有上机才发现的问题）
+
+这两个问题在代码审阅时都看不出，都是烧到板子上才暴露的 —— 也正是 P0001 的
+“SC-1~SC-7 不得凭代码审查宣称 PASS”这条规则的用处。
+
+### 13.1 串口控制台：newlib stdio 锁断言（已修，commit `3632a87`）
+
+```
+assert failed: xQueueSemaphoreTake queue.c:1713 (pxQueue->uxItemSize == 0)
+_lock_acquire_recursive  newlib/src/locks.c:174
+lock_acquire_generic     newlib/src/locks.c:158
+xQueueTakeMutexRecursive FreeRTOS-Kernel/queue.c:835
+```
+
+原因：手写 `uart_vfs_dev_use_driver(0)` + `fgets(stdin)` 只做了半套初始化。
+修复：改用 IDF 官方 `esp_console`（`esp_console_new_repl_uart`）。
+
+### 13.2 sys_evt 栈溢出（本次修，commit 见下）
+
+```
+***ERROR*** A stack overflow in task sys_evt has been detected.
+```
+
+原因：`provisioning.cpp` 的 Wi-Fi 事件回调里直接 `ESP_LOGI`（printf 机制吃 1~2KB 栈）
+和 `wifi_rssi()`（`esp_wifi_sta_get_ap_info`），而回调跑在 **sys_evt 任务**（默认栈 3584B）里。
+
+修复：所有入口（Wi-Fi 事件、esp_timer 回调、串口命令、公共 API）只投递定长事件，
+真正干活集中到栈充裕的 `prov_task`（6144B）。
+
+---
+
+## 14. 目录结构
 
 ```
 parking-lot-navigation/
@@ -577,6 +677,8 @@ parking-lot-navigation/
 │       ├── partitions.csv             ← OTA A/B 布局
 │       └── main/
 │           ├── main.c                 ← 启动顺序、网络应用任务、健康日志
+│           ├── display.c/.h           ← 状态面板（唯一碰 esp_lcd/SPI/LEDC 的文件）
+│           ├── font8x16.h             ← 生成的点阵字体（8x16, 1bpp）
 │           ├── camera.c/.h            ← 相机（含引脚证据链注释）
 │           ├── stream.c/.h            ← HTTP 状态页 + MJPEG + /api/ota/check
 │           ├── provisioning.cpp/.h    ← 配网状态机 + 串口 clearwifi

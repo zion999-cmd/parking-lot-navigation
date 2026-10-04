@@ -11,6 +11,7 @@
 #include <esp_timer.h>
 
 #include "camera.h"
+#include "display.h"
 #include "ota.h"
 #include "provisioning.h"
 #include "stream.h"
@@ -78,6 +79,7 @@ static void network_task(void *arg)
 
         if (!camera_up) {
             if (camera_init() != ESP_OK) {
+                display_show_camera_error();
                 restart_after_failure("Camera");
             }
             camera_up = true;
@@ -96,6 +98,7 @@ static void network_task(void *arg)
 
         ESP_LOGI(TAG, "Status page : http://%s/", wifi_ip_string());
         ESP_LOGI(TAG, "MJPEG stream: http://%s%s", wifi_ip_string(), STREAM_PATH);
+        display_show_ready(wifi_ip_string());
 
         /* Drop any stale disconnect signal from the association phase. */
         xSemaphoreTake(s_disconnected_sem, 0);
@@ -142,6 +145,15 @@ void app_main(void)
     ESP_LOGI(TAG, "Firmware %s, ESP-IDF %s", ota_running_version(), esp_get_idf_version());
 
     ota_log_boot_info();
+
+    /*
+     * Bring the status panel up first: from here on the device can tell a human
+     * what it is doing and, most importantly, which IP address it ended up with.
+     * The display is best effort - a missing or broken panel never stops the
+     * camera node from working.
+     */
+    display_init();
+    display_show_boot(ota_running_version());
 
     s_connected_sem = xSemaphoreCreateBinary();
     s_disconnected_sem = xSemaphoreCreateBinary();

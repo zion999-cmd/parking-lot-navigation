@@ -19,6 +19,7 @@
 #include <mbedtls/sha256.h>
 #include <sdkconfig.h>
 
+#include "display.h"
 #include "wifi.h"
 #include "version.h"
 
@@ -347,9 +348,10 @@ static bool download_and_flash(const char *url, const ota_manifest_t *m)
             int bucket = (int)((written * 5) / m->size);
             if (bucket != last_logged) {
                 last_logged = bucket;
+                int pct = (int)((written * 100) / m->size);
                 ESP_LOGI(TAG, "downloaded %u / %u bytes (%d%%)",
-                         (unsigned)written, (unsigned)m->size,
-                         (int)((written * 100) / m->size));
+                         (unsigned)written, (unsigned)m->size, pct);
+                display_show_ota_progress(ota_running_version(), m->version, pct);
             }
         }
     }
@@ -418,6 +420,7 @@ static void check_once(void)
     }
 
     ESP_LOGI(TAG, "checking %s (running %s)", CONFIG_OTA_MANIFEST_URL, ota_running_version());
+    display_show_ota_checking();
 
     if (!fetch_manifest(&manifest)) {
         return;
@@ -436,11 +439,14 @@ static void check_once(void)
     make_firmware_url(CONFIG_OTA_MANIFEST_URL, manifest.firmware_url, url, sizeof(url));
 
     if (download_and_flash(url, &manifest)) {
+        display_show_ota_result(true);
         ESP_LOGW(TAG, "rebooting into %s", manifest.version);
-        vTaskDelay(pdMS_TO_TICKS(800));
+        vTaskDelay(pdMS_TO_TICKS(1200));
         esp_restart();
     }
-    /* On any failure we simply keep running the current firmware. */
+    /* On any failure we simply keep running the current firmware. Tell the
+     * person looking at the device that nothing was lost. */
+    display_show_ota_result(false);
 }
 
 static void ota_task(void *arg)

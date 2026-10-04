@@ -5,6 +5,7 @@ idf_component_register(
         "stream.c"
         "ota.c"
         "version.c"
+        "display.c"
         "wifi.cpp"
         "provisioning.cpp"
     INCLUDE_DIRS "."
@@ -14,6 +15,9 @@ idf_component_register(
         esp_http_server
         esp_http_client
         esp_timer
+        esp_lcd
+        esp_driver_spi
+        esp_driver_ledc
         nvs_flash
         app_update
         json
