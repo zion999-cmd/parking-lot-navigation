@@ -8,15 +8,20 @@ ESP32-S3-CAM 192.168.3.118 /stream      (firmware untouched, a pure video sensor
               v
       Python / OpenCV
               |
-      fixed bay ROI  (calibrated by hand)
+      fixed bay ROI  (calibrated by hand, assisted by Auto Detect)
               |
               v
       Spot 38 EMPTY   Spot 39 OCCUPIED   Spot 40 EMPTY
 ```
 
-**Not in this stage:** YOLO or any deep learning, automatic bay detection, road
-detection, ArUco/AprilTag, vehicle identification, navigation, path planning, a
-web front end, WS2812B, MCU communication, perspective transform, OTA.
+**Not in this stage:** YOLO or any deep learning, automatic bay detection *as the
+source of truth*, road detection, ArUco/AprilTag, vehicle identification,
+navigation, path planning, a web front end, WS2812B, MCU communication,
+perspective transform, OTA.
+
+> **P0002.1** turned `calibration.py` into a *calibration assistant*: OpenCV
+> proposes bay candidates from the regular divider lines, a human drags them into
+> place. The occupancy algorithm was not touched. Jump to section 3.
 
 ---
 
@@ -62,45 +67,92 @@ acceptance cases, not by this number.
 
 ## 3. Calibrate the three bays
 
-Coordinates are **not** hardcoded anywhere. Two ways to produce
-`config/parking_spots.json`:
-
-**A. Interactive (preferred)**
+Coordinates are **not** hardcoded anywhere, and nothing has to be drawn from
+scratch: Auto Detect proposes candidates, you correct them.
 
 ```zsh
-$P src/calibration.py --source http://192.168.3.118/stream --start-id 38
+cd vision
+P=/usr/local/Caskroom/miniconda/base/envs/vision-dev/bin/python
+$P src/calibration.py --source http://192.168.3.118/stream --auto
 ```
 
-Click the four corners of a bay; the 4th click commits it. Repeat for the next
-bay. Keys:
+Or calibrate offline from a saved frame with no camera:
+
+```zsh
+$P src/calibration.py --frame data/debug/frame.jpg --auto
+```
+
+### Window
+
+```
+[Auto Detect] [Gen Row] [Save] [Undo] [Reset]      <- clickable, or use the keys
+
+ left click a bay         select it
+ left click a corner      drag that corner
+ left drag inside a bay   move the whole bay
+ right click a corner     snap it to the nearest strong edge
+```
 
 | key | action |
 |---|---|
-| left click | add a corner (4th commits the bay) |
-| `u` | undo the last corner |
-| `d` | delete the last committed spot |
-| `r` | rename the last spot (type the id in the terminal) |
-| `i` | change the inner detection scale for the last spot |
-| `s` | save, `l` reload |
-| `g` | toggle the coordinate grid |
-| `v` | toggle the inner detection polygon |
+| `a` | Auto Detect — **only adds** candidates, never moves or deletes your work |
+| `g` / `G` | generate the next bay in the row to the right / left of the selected one |
+| `n` | add an empty bay at the mouse position |
+| `d` | delete the selected bay |
+| `r` | rename the selected bay (type the id in the terminal) |
+| `i` | set the inner detection scale of the selected bay (terminal) |
+| `s` / `o` | save / load `config/parking_spots.json` |
+| `z` / `c` | undo / reset (clear all) |
+| `l` | toggle the detected-line overlay (edges, dividers, bands) |
+| `v` | toggle the inner detection polygons |
+| `Tab` | cycle the selection |
+| `2`/`4`/`6`/`8` | nudge the selected bay by 5 px |
 | `q` | save and quit |
 
-`r` and `i` ask in the terminal, so the window disappears for a moment — that is
-expected.
+### The workflow that actually works
 
-**B. From the ruler image, by hand**
+1. `a` — see what Auto Detect found. The status line reports how many candidates
+   were added, how many were already present, the row count and the measured bay
+   pitch.
+2. Drag corners of the bays that are close. Bays it missed: `n` to add one, then
+   `g` repeatedly to walk the row (this uses the selected bay's own top edge, so
+   it follows a slanted row too).
+3. `s` to save. Next time the tool loads the JSON and you continue from there.
+
+Auto Detect is deliberately allowed to be imperfect: every corner is draggable,
+and a bay it fails on costs you one `n` plus a few `g` presses, not a redraw of
+the whole row. It also cannot damage anything - one `z` undoes an entire run.
+
+### If Auto Detect finds the wrong thing
+
+The detector looks for rows of parallel, evenly spaced lines. Run it once in
+report mode and read the numbers before clicking anything:
 
 ```zsh
-$P src/calibration.py --frame data/debug/frame.jpg --grid
-open data/debug/calibration_aid.png            # 50 px grid with coordinates
+$P src/calibration.py --source http://192.168.3.118/stream --detect-only
 ```
 
-Then read the corner coordinates off the image and write `config/parking_spots.json`
-with the same schema (see below). Useful when a GUI is inconvenient.
+That prints the bands, each row's divider count and measured pitch, the candidate
+count and their width/height range, and writes an overlay to
+`data/debug/detect_only.png` with every candidate outlined and numbered. Open that
+PNG next to the live image.
 
-**Only calibrate three bays** for this stage, chosen from the clearest, most
-central ones. Use the sandbox's real numbering.
+Then tune, and repeat:
+
+| knob | why |
+|---|---|
+| `--detect-orientation vertical` / `horizontal` | **try this first.** `auto` picks whichever orientation yields more candidates, and on a busy scene that can flip between runs. The overlay makes the right answer obvious. |
+| `--max-width` / `--min-width` | bay size filter. `--detect-only` prints a suggestion derived from the measured pitch (`try --min-width 40 --max-width 142`). This is the single most effective knob. |
+| `--band-threshold` | 0.30 default. Lower it (0.15) if rows are missed because the dividers are faint; raise it (0.5) if unrelated bands appear. |
+| `--grid-tolerance` | 0.18 default. Raise if real bays are not perfectly evenly spaced. |
+| `--min-width` | also the smallest pitch the periodicity search will consider. |
+
+The same options work in the window, so you can iterate without restarting.
+
+### Only calibrate three bays for this stage
+
+They are the point of the exercise; the sandbox numbering wins over any
+convention. Use the sandbox's real numbers.
 
 ### Why there are two polygons per spot
 
@@ -219,15 +271,31 @@ badly calibrated bay is visible.
 ## 8. Tests
 
 ```zsh
-$P tests/test_occupancy.py         # 13 checks, no camera needed
+$P tests/test_occupancy.py    # 13 checks - the occupancy maths (unchanged by P0002.1)
+$P tests/test_detector.py     # 17 checks - the bay candidate detector
+$P tests/test_editor.py       # 31 checks - editing model + GUI wiring
 ```
 
-Synthetic-image tests for: inner-polygon shrink maths, identical frame → EMPTY,
-car inside → OCCUPIED, **bay markings ignored**, **bounding-box corner ignored
-(polygon, not rectangle)**, JPEG-like noise stays EMPTY, partial occupancy lands
-between, thresholds respected, pixel threshold sensitivity, inner-scale effect,
-resolution change refused rather than silently mis-measured, and two bays
-independent.
+61 checks, no camera required.
+
+* **occupancy** - inner-polygon shrink maths, identical frame → EMPTY, car inside
+  → OCCUPIED, **bay markings ignored**, **bounding-box corner ignored (polygon,
+  not rectangle)**, JPEG-like noise stays EMPTY, partial occupancy lands between,
+  thresholds respected, resolution change refused rather than silently
+  mis-measured, two bays independent.
+* **detector** - synthetic car parks where the answer is known exactly: 11
+  layouts (1x4, 1x8, 2x6, 3x8, narrow 2x10, narrow+tall, short, wide, slanted,
+  noisy) must come back with the exact bay count, and the polygons must sit on the
+  drawn lines. Plus: a missing divider is **reconstructed** from the measured
+  pitch, a blank image and a noise-only image must not produce a screenful of
+  false positives, and horizontal rows must be found through the same code path.
+* **editor** - add / drag corner / drag body / nudge / delete / clear / rename
+  (including refusing a duplicate id) / inner scale range check / generate row
+  (pitch, slanted rows, stopping at the frame edge and on overlap) / undo (one
+  undo reverses one drag, and one undo reverses a whole Auto Detect) / save-load
+  round trip / Auto Detect never modifying hand-made bays. The GUI layer is driven
+  with **synthetic mouse and key events** (`on_mouse`, `act`), so button clicks,
+  corner dragging, `Tab` cycling and `q`-to-quit are covered without a display.
 
 ## 9. Layout
 
@@ -243,11 +311,15 @@ vision/
 ├── src/
 │   ├── camera.py                  video input: cv2.VideoCapture + MJPEG reader
 │   ├── spot_config.py             bay polygons, inner-ROI maths, JSON I/O
-│   ├── occupancy.py               the difference algorithm and its parameters
-│   ├── calibration.py             click-the-corners tool + grid ruler
+│   ├── occupancy.py               the difference algorithm (untouched by P0002.1)
+│   ├── detector.py                geometric bay candidate detection (no AI)
+│   ├── spot_editor.py             editing model: drag/add/delete/rename/row/undo
+│   ├── calibration.py             the window, mouse and key map (+ --detect-only)
 │   └── main.py                    live viewer / headless recorder
 └── tests/
-    ├── test_occupancy.py          synthetic tests
+    ├── test_occupancy.py          synthetic occupancy tests
+    ├── test_detector.py           synthetic car park detection tests
+    ├── test_editor.py             editing + GUI wiring tests
     └── fit_threshold.py           threshold from recorded cases
 ```
 
@@ -260,4 +332,6 @@ vision/
 | a bay flickers EMPTY/OCCUPIED | `changed_ratio` sits near the threshold — check the per-spot margins from `fit_threshold.py`, then move that bay's ROI off a shadow/edge or lower `inner_scale` |
 | bay lines or numbers cause changes | lower `inner_scale` for that spot (`i` in the calibrator) |
 | everything drifts slowly | lighting change (sun/clouds), not a bug — re-capture the reference |
+| Auto Detect finds nothing | run `--detect-only` and read the report; usually `--detect-orientation` or `--max-width`. Not fatal: `n` then `g` repeated builds the row by hand |
+| Auto Detect boxes the wrong lines | same: the overlay PNG shows what it locked onto |
 | `frame geometry changed` error | the firmware's stream resolution changed; re-capture the reference |

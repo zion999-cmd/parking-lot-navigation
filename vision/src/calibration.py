@@ -1,36 +1,40 @@
-"""Interactive parking bay calibration.
+"""Parking bay calibration assistant (P0002.1).
 
-Draws the live camera image and lets you click the four corners of a bay. The
-result goes to ``config/parking_spots.json``; nothing else in the project hard
-codes coordinates.
+Auto Detect proposes, a human decides. The window shows the live camera image,
+OpenCV proposes bay candidates from the regular divider lines, and every corner
+is then draggable.
 
-Click order does not matter (any convex quadrilateral works), but go around the
-bay rather than crossing over, or the polygon will be a bow tie.
+    python src/calibration.py --source http://192.168.3.118/stream
+    python src/calibration.py --frame data/debug/frame.jpg      # calibrate offline
+
+Window
+------
+    [Auto Detect] [Gen Row] [Save] [Undo] [Reset]     <- clickable, or use keys
+
+     left click on a bay      select it
+     left click on a corner   drag that corner
+     left drag inside a bay   move the whole bay
+     right click on a corner  snap it to the nearest strong edge
 
 Keys
 ----
-    left click   add one corner (the 4th click commits the spot)
-    u            remove the last corner of the polygon being drawn
-    d            delete the last committed spot
-    r            rename the last committed spot (type the id in the terminal)
-    i            set the inner (detection) scale for the last spot
-    s            save to the JSON file
-    l            reload the JSON file
-    g            toggle the coordinate grid
-    v            toggle showing the inner detection polygon
-    q / ESC      save and quit
+    a  Auto Detect (only ADDS candidates; existing work is never touched)
+    g  generate the next bay in the row from the selected one (right)
+    G  ... same, to the left
+    n  add a new empty bay at the mouse position
+    d  delete the selected bay
+    r  rename the selected bay (type the id in the terminal)
+    i  set the inner detection scale of the selected bay (terminal)
+    s  save to config/parking_spots.json      o  load it
+    z  undo                                   c  reset (clear all)
+    l  toggle the detected lines overlay      v  toggle inner detection polygons
+    Tab cycle selection      2/4/6/8 nudge by 5 px
+    q / ESC  save and quit
 
-The outline is the bay; the dashed-looking second outline inside it is what
-occupancy actually looks at. Keeping the detection area inside the bay is what
-keeps white bay lines, bay numbers and kerb edges out of the difference.
-
-Two ways to work:
-
-* live   - ``python src/calibration.py --source http://192.168.3.118/stream``
-* offline- ``python src/calibration.py --frame data/debug/frame.jpg``
-           ``python src/calibration.py --grid data/debug/frame.jpg``
-           (``--grid`` just writes an annotated ruler image and exits, for when a
-           GUI is not convenient; you can then edit the JSON by hand)
+The status line reports what Auto Detect did: how many candidates were added,
+how many were already present, row count and the measured bay pitch. A detection
+that finds nothing is not a failure - add one bay by hand and press 'g' to
+generate the rest of the row.
 """
 
 from __future__ import annotations
@@ -39,339 +43,456 @@ import argparse
 import os
 import sys
 import time
-from typing import List, Optional, Tuple
-
+from typing import Callable, List, Optional, Tuple
 import cv2
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from camera import CameraError, open_camera            # noqa: E402
-from spot_config import (DEFAULT_INNER_SCALE, Spot, SpotConfigError,  # noqa: E402
-                         load_spots, save_spots, validate)
+from camera import CameraError, open_camera                    # noqa: E402
+from detector import DetectorParams, detect_bays, draw_debug, sort_reading_order  # noqa: E402
+from spot_config import DEFAULT_INNER_SCALE                    # noqa: E402
+from spot_editor import SpotEditor                             # noqa: E402
 
 WINDOW = "Parking bay calibration"
 
-COL_BAY = (0, 255, 255)        # yellow outline: the whole bay
-COL_INNER = (0, 200, 0)        # green: what the detector looks at
-COL_DRAW = (255, 120, 0)       # blue-ish: polygon being drawn
+COL_BAY = (0, 255, 255)
+COL_SEL = (255, 0, 255)
+COL_INNER = (0, 190, 0)
+COL_OK = (120, 255, 120)
+COL_WARN = (0, 210, 255)
+COL_ERR = (80, 80, 255)
 COL_TEXT = (255, 255, 255)
+COL_BTN = (70, 70, 70)
+COL_BTN_HOT = (120, 120, 120)
+
+BAR_H = 34
+NUDGE = 5
 
 
-class Calibrator:
-    def __init__(self, out_path: str, start_id: int, inner_scale: float,
-                 width: int, height: int):
+class CalibrationApp:
+    """Window + input handling on top of SpotEditor (which holds the state)."""
+
+    def __init__(self, editor: SpotEditor, out_path: str):
+        self.ed = editor
         self.out_path = out_path
-        self.next_id = start_id
-        self.inner_scale = inner_scale
-        self.spots: List[Spot] = []
-        self.pending: List[Tuple[int, int]] = []
-        self.cursor: Tuple[int, int] = (0, 0)
-        self.show_grid = False
         self.show_inner = True
-        self.dirty = False
-        self.width = width
-        self.height = height
-
-    # -- input --------------------------------------------------------------
-
-    def on_mouse(self, event, x, y, flags, param) -> None:
-        self.cursor = (x, y)
-        if event == cv2.EVENT_LBUTTONDOWN:
-            if len(self.pending) >= 4:
-                print("  already have 4 corners; press 'u' to undo or 'd' to drop the last spot")
-                return
-            self.pending.append((x, y))
-            print(f"  corner {len(self.pending)}/4 at ({x}, {y})")
-            if len(self.pending) == 4:
-                self.commit()
-
-    def commit(self) -> None:
-        poly = np.asarray(self.pending, dtype=np.float64)
-        spot = Spot(id=str(self.next_id), polygon=poly, inner_scale=self.inner_scale)
-        try:
-            spot.prepare((self.height, self.width))
-        except SpotConfigError as exc:
-            print(f"  rejected: {exc}")
-            return
-        self.spots.append(spot)
-        print(f"  committed spot {spot.id}  bay area={spot.area():.0f}px^2  "
-              f"detect area={spot.inner_area()}px^2 (scale {self.inner_scale:.2f})")
-        self.pending = []
-        self.next_id += 1
-        self.dirty = True
-        if len(self.spots) == 3:
-            print("  (3 spots is the target for this stage - press 's' to save)")
-
-    # -- terminal actions ---------------------------------------------------
-
-    def rename_last(self) -> None:
-        if not self.spots:
-            print("  nothing to rename")
-            return
-        try:
-            new_id = input(f"  new id for spot {self.spots[-1].id}: ").strip()
-        except EOFError:
-            return
-        if new_id:
-            self.spots[-1].id = new_id
-            self.dirty = True
-            print(f"  renamed to {new_id}")
-
-    def set_inner_scale(self) -> None:
-        if not self.spots:
-            print("  nothing to adjust")
-            return
-        try:
-            raw = input(f"  inner detection scale for spot {self.spots[-1].id} "
-                        f"[0.2-0.95, current {self.spots[-1].inner_scale:.2f}]: ").strip()
-        except EOFError:
-            return
-        if not raw:
-            return
-        try:
-            val = float(raw)
-        except ValueError:
-            print("  not a number")
-            return
-        if not 0.2 <= val <= 0.95:
-            print("  refused: keep it in 0.2-0.95")
-            return
-        self.spots[-1].inner_scale = val
-        self.spots[-1].prepare((self.height, self.width))
-        self.dirty = True
-        print(f"  spot {self.spots[-1].id}: inner scale {val:.2f}, "
-              f"detect area {self.spots[-1].inner_area()}px^2")
-
-    # -- persistence --------------------------------------------------------
-
-    def save(self) -> None:
-        save_spots(self.out_path, self.spots, (self.height, self.width))
-        self.dirty = False
-        print(f"  saved {len(self.spots)} spot(s) to {self.out_path}")
-
-    def reload(self) -> None:
-        try:
-            self.spots = load_spots(self.out_path, (self.height, self.width))
-        except SpotConfigError as exc:
-            print(f"  reload failed: {exc}")
-            return
-        self.dirty = False
-        print(f"  reloaded {len(self.spots)} spot(s) from {self.out_path}")
+        self.show_overlay = False
+        self.cursor: Tuple[int, int] = (0, 0)
+        self._buttons: List[Tuple[int, int, int, int, str, str]] = []
+        self._pending_prompt: Optional[str] = None
 
     # -- drawing ------------------------------------------------------------
 
-    def draw(self, frame: np.ndarray) -> np.ndarray:
+    def render(self, frame: np.ndarray) -> np.ndarray:
         canvas = frame.copy()
+        h, w = canvas.shape[:2]
 
-        if self.show_grid:
-            for x in range(0, self.width, 50):
-                cv2.line(canvas, (x, 0), (x, self.height), (90, 90, 90), 1)
-                cv2.putText(canvas, str(x), (x + 2, 14), cv2.FONT_HERSHEY_PLAIN, 1.0,
-                            (200, 200, 200), 1)
-            for y in range(0, self.height, 50):
-                cv2.line(canvas, (0, y), (self.width, y), (90, 90, 90), 1)
-                cv2.putText(canvas, str(y), (2, y + 14), cv2.FONT_HERSHEY_PLAIN, 1.0,
-                            (200, 200, 200), 1)
+        if self.show_overlay and self.ed.detection is not None:
+            canvas = draw_debug(canvas, self.ed.detection)
 
-        for spot in self.spots:
+        for i, spot in enumerate(self.ed.spots):
+            sel = (i == self.ed.selected)
             poly = np.round(spot.polygon).astype(np.int32)
-            cv2.polylines(canvas, [poly], True, COL_BAY, 2)
+            cv2.polylines(canvas, [poly], True, COL_SEL if sel else COL_BAY, 3 if sel else 2)
             if self.show_inner and spot.inner_points is not None:
-                inner = np.round(spot.inner_points).astype(np.int32)
-                cv2.polylines(canvas, [inner], True, COL_INNER, 2)
+                cv2.polylines(canvas, [np.round(spot.inner_points).astype(np.int32)],
+                              True, COL_INNER, 1)
             cx, cy = spot.polygon.mean(axis=0).astype(int)
-            cv2.putText(canvas, f"Spot {spot.id}", (cx - 40, cy),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, COL_BAY, 2)
+            label = f"Spot {spot.id}"
+            cv2.putText(canvas, label, (cx - 34, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        (0, 0, 0), 4)
+            cv2.putText(canvas, label, (cx - 34, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        COL_SEL if sel else COL_BAY, 1)
+            if sel:
+                for px, py in poly:
+                    cv2.circle(canvas, (int(px), int(py)), 6, COL_SEL, -1)
+                    cv2.circle(canvas, (int(px), int(py)), 6, (0, 0, 0), 1)
 
-        if self.pending:
-            pts = np.asarray(self.pending, dtype=np.int32)
-            if len(pts) >= 2:
-                cv2.polylines(canvas, [pts], False, COL_DRAW, 2)
-            for i, (x, y) in enumerate(self.pending):
-                cv2.circle(canvas, (x, y), 4, COL_DRAW, -1)
-                cv2.putText(canvas, str(i + 1), (x + 6, y - 6),
-                            cv2.FONT_HERSHEY_PLAIN, 1.2, COL_DRAW, 1)
+        header = (f"spots {len(self.ed.spots)}   "
+                  f"selected {self.ed.spots[self.ed.selected].id if self.ed.selected is not None else '-'}   "
+                  f"inner {self.ed.inner_scale:.2f}   "
+                  f"{'*unsaved*' if self.ed.dirty else 'saved'}")
+        cv2.putText(canvas, header, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 4)
+        cv2.putText(canvas, header, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, COL_TEXT, 1)
 
-        help_lines = [
-            f"spots: {len(self.spots)}   pending corners: {len(self.pending)}/4   "
-            f"inner scale: {self.inner_scale:.2f}{'  *unsaved*' if self.dirty else ''}",
-            f"cursor: {self.cursor}    click 4 corners | u undo | d delete | r rename | "
-            f"i inner scale | s save | l reload | g grid | v inner | q quit",
-        ]
-        for i, text in enumerate(help_lines):
-            cv2.putText(canvas, text, (10, self.height - 30 + i * 16),
-                        cv2.FONT_HERSHEY_PLAIN, 1.05, (0, 0, 0), 3)
-            cv2.putText(canvas, text, (10, self.height - 30 + i * 16),
-                        cv2.FONT_HERSHEY_PLAIN, 1.05, COL_TEXT, 1)
+        self._buttons = []
+        x = 8
+        for label, key in (("Auto Detect", "a"), ("Gen Row", "g"), ("Save", "s"),
+                           ("Undo", "z"), ("Reset", "c")):
+            bw = 12 + len(label) * 9
+            self._buttons.append((x, h - BAR_H - 8, bw, BAR_H - 8, label, key))
+            x += bw + 8
+
+        msg = self.ed.message
+        colour = {"info": COL_OK, "warn": COL_WARN, "error": COL_ERR}.get(msg.level, COL_TEXT)
+        if msg.text:
+            cv2.putText(canvas, msg.text[:118], (8, h - BAR_H - 50),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 0, 0), 4)
+            cv2.putText(canvas, msg.text[:118], (8, h - BAR_H - 50),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.52, colour, 1)
+
+        hint = ("click 4 corners / drag handles | a auto | g gen row | n add | d del | "
+                "r rename | i inner | s save | o load | z undo | c reset | l lines | "
+                "v inner | Tab next | 2468 nudge | q quit")
+        cv2.putText(canvas, hint[:135], (8, h - BAR_H - 28),
+                    cv2.FONT_HERSHEY_PLAIN, 1.0, (0, 0, 0), 3)
+        cv2.putText(canvas, hint[:135], (8, h - BAR_H - 28),
+                    cv2.FONT_HERSHEY_PLAIN, 1.0, (200, 200, 200), 1)
+
+        for (bx, by, bw, bh, label, _key) in self._buttons:
+            hover = bx <= self.cursor[0] <= bx + bw and by <= self.cursor[1] <= by + bh
+            cv2.rectangle(canvas, (bx, by), (bx + bw, by + bh),
+                          COL_BTN_HOT if hover else COL_BTN, -1)
+            cv2.rectangle(canvas, (bx, by), (bx + bw, by + bh), (200, 200, 200), 1)
+            cv2.putText(canvas, label, (bx + 6, by + bh - 9),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, COL_TEXT, 1)
         return canvas
+
+    # -- input --------------------------------------------------------------
+
+    def _button_at(self, x: int, y: int) -> Optional[str]:
+        for (bx, by, bw, bh, _label, key) in self._buttons:
+            if bx <= x <= bx + bw and by <= y <= by + bh:
+                return key
+        return None
+
+    def on_mouse(self, event, x, y, flags, param) -> None:
+        self.cursor = (x, y)
+
+        if event == cv2.EVENT_LBUTTONDOWN:
+            key = self._button_at(x, y)
+            if key is not None:
+                self.act(key)
+                return
+            self.ed.begin_drag(x, y)
+        elif event == cv2.EVENT_MOUSEMOVE and flags & cv2.EVENT_FLAG_LBUTTON:
+            self.ed.update_drag(x, y)
+        elif event == cv2.EVENT_LBUTTONUP:
+            self.ed.end_drag()
+        elif event == cv2.EVENT_RBUTTONDOWN:
+            if self.snap_corner(x, y):
+                pass
+
+    def snap_corner(self, x: float, y: float, search: int = 9) -> bool:
+        """Pull the nearest corner of the selected bay onto the strongest edge."""
+        spot = self.ed.selected_spot()
+        if spot is None or self.ed.detection is None or self.ed.detection.edges is None:
+            return False
+        edges = self.ed.detection.edges
+        h, w = edges.shape[:2]
+        best = None
+        for c, (px, py) in enumerate(spot.polygon):
+            d = (px - x) ** 2 + (py - y) ** 2
+            if best is None or d < best[0]:
+                best = (d, c)
+        if best is None or best[0] > 20 ** 2:
+            return False
+        c = best[1]
+        px, py = spot.polygon[c]
+        x0, x1 = int(max(px - search, 0)), int(min(px + search + 1, w))
+        y0, y1 = int(max(py - search, 0)), int(min(py + search + 1, h))
+        sub = edges[y0:y1, x0:x1]
+        if sub.size == 0 or sub.max() == 0:
+            self.ed._say("no strong edge nearby to snap to", "warn")
+            return False
+        dy, dx = np.unravel_index(int(np.argmax(sub)), sub.shape)
+        self.ed._push_undo()
+        spot.polygon[c] = [x0 + dx, y0 + dy]
+        self.ed._prepare(spot)
+        self.ed.dirty = True
+        self.ed._say(f"snapped corner {c + 1} of spot {spot.id} to the nearest edge")
+        return True
+
+    def act(self, key: str) -> bool:
+        """Run one action. Returns False when the app should quit."""
+        ed = self.ed
+        if key in ("q", "\x1b"):
+            if ed.dirty and ed.spots:
+                ed.save(self.out_path)
+            return False
+        if key == "a":
+            frame = getattr(self, "_frame", None)
+            if frame is None:
+                ed._say("no frame yet", "warn")
+            else:
+                ed.auto_detect(frame, self.detector_params)
+        elif key == "g":
+            ed.generate_row(+1, 1)
+        elif key == "G":
+            ed.generate_row(-1, 1)
+        elif key == "n":
+            ed.add_at(*self.cursor)
+        elif key in ("d", "x"):
+            ed.delete_selected()
+        elif key == "r":
+            self._pending_prompt = "rename"
+        elif key == "i":
+            self._pending_prompt = "inner"
+        elif key == "s":
+            ed.save(self.out_path)
+        elif key == "o":
+            ed.load(self.out_path)
+        elif key == "z":
+            ed.undo()
+        elif key == "c":
+            ed.clear()
+        elif key == "l":
+            self.show_overlay = not self.show_overlay
+            ed._say(f"line overlay {'on' if self.show_overlay else 'off'}")
+        elif key == "v":
+            self.show_inner = not self.show_inner
+        elif key == "\t":
+            ed.select_next()
+        elif key == "4":
+            ed.nudge(-NUDGE, 0)
+        elif key == "6":
+            ed.nudge(NUDGE, 0)
+        elif key == "8":
+            ed.nudge(0, -NUDGE)
+        elif key == "2":
+            ed.nudge(0, NUDGE)
+        return True
+
+    def prompt(self) -> None:
+        """Terminal prompts run outside the render loop, with the window closed."""
+        kind, self._pending_prompt = self._pending_prompt, None
+        spot = self.ed.selected_spot()
+        try:
+            if kind == "rename" and spot is not None:
+                new_id = input(f"  new id for spot {spot.id}: ").strip()
+                if new_id:
+                    self.ed.rename_selected(new_id)
+            elif kind == "inner" and spot is not None:
+                raw = input(f"  inner detection scale for spot {spot.id} "
+                            f"[0.2-0.95, now {spot.inner_scale:.2f}]: ").strip()
+                if raw:
+                    self.ed.set_inner_scale(float(raw))
+        except (EOFError, ValueError):
+            print("  (cancelled)")
+
+    # -- loop ---------------------------------------------------------------
+
+    def run(self, get_frame: Callable[[], Optional[np.ndarray]],
+            detector_params: DetectorParams) -> int:
+        self.detector_params = detector_params
+        cv2.namedWindow(WINDOW, cv2.WINDOW_AUTOSIZE)
+        cv2.setMouseCallback(WINDOW, self.on_mouse)
+
+        frame = None
+        last_good = None
+        while True:
+            fresh = get_frame()
+            if fresh is not None:
+                frame = fresh
+                last_good = fresh
+            elif frame is None:
+                frame = last_good
+            if frame is None:
+                if cv2.waitKey(30) & 0xFF in (ord("q"), 27):
+                    break
+                continue
+            self._frame = frame
+
+            while self._pending_prompt is not None:
+                cv2.destroyAllWindows()
+                self.prompt()
+                cv2.namedWindow(WINDOW, cv2.WINDOW_AUTOSIZE)
+                cv2.setMouseCallback(WINDOW, self.on_mouse)
+
+            cv2.imshow(WINDOW, self.render(frame))
+            key = cv2.waitKey(20) & 0xFF
+            if key == 255:
+                continue
+            if not self.act(chr(key)):
+                break
+        cv2.destroyAllWindows()
+        return 0
 
 
 def write_grid_aid(frame: np.ndarray, out_path: str, step: int = 50) -> None:
-    """Save the frame with a labelled grid, as a ruler for manual calibration."""
+    """Save the frame with a labelled grid: a ruler for calibrating by hand."""
     h, w = frame.shape[:2]
     canvas = frame.copy()
     for x in range(0, w, step):
         cv2.line(canvas, (x, 0), (x, h), (0, 200, 255), 1)
         for y in range(0, h, 4 * step):
-            cv2.putText(canvas, str(x), (x + 3, y + 18), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5, (0, 0, 0), 3)
-            cv2.putText(canvas, str(x), (x + 3, y + 18), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5, (0, 255, 255), 1)
+            cv2.putText(canvas, str(x), (x + 3, y + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3)
+            cv2.putText(canvas, str(x), (x + 3, y + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
     for y in range(0, h, step):
         cv2.line(canvas, (0, y), (w, y), (0, 200, 255), 1)
         for x in range(0, w, 4 * step):
-            cv2.putText(canvas, str(y), (x + 30, y - 4), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5, (0, 0, 0), 3)
-            cv2.putText(canvas, str(y), (x + 30, y - 4), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5, (0, 255, 255), 1)
+            cv2.putText(canvas, str(y), (x + 30, y - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3)
+            cv2.putText(canvas, str(y), (x + 30, y - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     cv2.imwrite(out_path, canvas)
     print(f"wrote calibration aid to {out_path} ({w}x{h}, grid every {step}px)")
 
 
-def grab_one_frame(source: str, timeout: float = 15.0) -> np.ndarray:
-    cam = open_camera(source)
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        frame = cam.read()
+def grab(get_frame: Callable[[], Optional[np.ndarray]], tries: int = 40,
+         delay: float = 0.05) -> Optional[np.ndarray]:
+    """Read until a frame arrives. An MJPEG reader needs a few reads per frame."""
+    for _ in range(tries):
+        frame = get_frame()
         if frame is not None:
-            cam.close()
             return frame
-    cam.close()
-    raise CameraError(f"no frame from {source!r} within {timeout:.0f}s")
+        time.sleep(delay)
+    return None
+
+
+def detect_only(frame: np.ndarray, params: DetectorParams, out_dir: str,
+                start_id: int) -> int:
+    """Run detection once, print what it found, save an overlay, and exit.
+
+    This is how the tool gets tuned against the real scene without clicking
+    through a window: run it, look at the numbers and the overlay, adjust
+    --min-width / --max-width / --band-threshold / --grid-tolerance, repeat.
+    """
+    res = detect_bays(frame, params)
+    d = res.diagnostics
+    print(f"frame {frame.shape[1]}x{frame.shape[0]}  method={d.get('method')} "
+          f"orientation={d.get('orientation')} bands={d.get('bands')} "
+          f"dividers={d.get('dividers')}")
+    print(f"candidates: {res.count}   rejected pairs: {d.get('rejected_bays')}")
+    for i, row in enumerate(d.get("rows", [])):
+        print(f"  row {i}: {row}")
+    polys = sort_reading_order(res.polygons)
+    pitches = [r.get("grid_spacing") for r in d.get("rows", []) if r.get("grid_spacing")]
+    if pitches:
+        lo, hi = min(pitches), max(pitches)
+        print(f"  measured row pitch: {lo:.0f}-{hi:.0f} px  ->  try "
+              f"--min-width {int(lo * 0.8)} --max-width {int(hi * 1.25)}")
+    if polys:
+        widths = [np.asarray(p)[:, 0].max() - np.asarray(p)[:, 0].min() for p in polys]
+        heights = [np.asarray(p)[:, 1].max() - np.asarray(p)[:, 1].min() for p in polys]
+        print(f"  bay width  min/median/max = {min(widths):.0f}/{np.median(widths):.0f}/{max(widths):.0f}")
+        print(f"  bay height min/median/max = {min(heights):.0f}/{np.median(heights):.0f}/{max(heights):.0f}")
+        for n, p in enumerate(polys[:12]):
+            a = np.asarray(p)
+            print(f"    #{start_id + n}  x {a[:, 0].min():4.0f}..{a[:, 0].max():4.0f}  "
+                  f"y {a[:, 1].min():4.0f}..{a[:, 1].max():4.0f}  "
+                  f"w {a[:, 0].max() - a[:, 0].min():3.0f} h {a[:, 1].max() - a[:, 1].min():3.0f}")
+    os.makedirs(out_dir, exist_ok=True)
+    overlay = draw_debug(frame, res)
+    for n, p in enumerate(polys):
+        cv2.polylines(overlay, [np.round(np.asarray(p)).astype(np.int32)], True, (255, 0, 255), 2)
+        c = np.asarray(p).mean(axis=0).astype(int)
+        cv2.putText(overlay, str(start_id + n), (c[0] - 10, c[1]),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
+    path = os.path.join(out_dir, "detect_only.png")
+    cv2.imwrite(path, overlay)
+    print(f"overlay -> {path}")
+    return 0
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Calibrate parking bay polygons.")
-    ap.add_argument("--source", default="http://192.168.3.118/stream",
-                    help="camera stream URL or video file")
+    ap = argparse.ArgumentParser(description="Auto-detect + hand-correct parking bay calibration.")
+    ap.add_argument("--source", default="http://192.168.3.118/stream")
+    ap.add_argument("--backend", default="auto", choices=("auto", "opencv", "mjpeg"))
     ap.add_argument("--frame", help="use this still image instead of the live stream")
     ap.add_argument("--out", default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                                   "..", "config", "parking_spots.json"))
-    ap.add_argument("--start-id", type=int, default=38,
-                    help="id given to the first spot (default 38)")
-    ap.add_argument("--inner-scale", type=float, default=DEFAULT_INNER_SCALE,
-                    help="detection polygon shrink factor (default 0.62)")
+    ap.add_argument("--start-id", type=int, default=38)
+    ap.add_argument("--inner-scale", type=float, default=DEFAULT_INNER_SCALE)
+    ap.add_argument("--auto", action="store_true", help="run Auto Detect once at startup")
     ap.add_argument("--grid", nargs="?", const="", metavar="IMAGE",
-                    help="write a labelled calibration ruler image and exit "
-                         "(--grid alone uses --frame or grabs one frame)")
+                    help="write a labelled calibration ruler image and exit")
+    ap.add_argument("--detect-only", action="store_true",
+                    help="run detection once, print the report, save an overlay and exit "
+                         "(no window; use this to tune the detector against the real scene)")
+    # detector knobs, exposed so the tool can be tuned against the real scene
+    ap.add_argument("--detect-method", default="profile", choices=("profile", "segments"))
+    ap.add_argument("--detect-orientation", default="auto",
+                    choices=("auto", "vertical", "horizontal"))
+    ap.add_argument("--min-width", type=int, default=DetectorParams.min_width)
+    ap.add_argument("--max-width", type=int, default=DetectorParams.max_width)
+    ap.add_argument("--band-threshold", type=float, default=DetectorParams.band_threshold)
+    ap.add_argument("--grid-tolerance", type=float, default=DetectorParams.grid_tolerance)
     args = ap.parse_args()
 
-    if args.grid is not None:
-        if args.grid:
-            img = cv2.imread(args.grid, cv2.IMREAD_COLOR)
-            if img is None:
-                print(f"error: could not read {args.grid}", file=sys.stderr)
-                return 2
-        elif args.frame:
-            img = cv2.imread(args.frame, cv2.IMREAD_COLOR)
-            if img is None:
-                print(f"error: could not read {args.frame}", file=sys.stderr)
-                return 2
-        else:
-            img = grab_one_frame(args.source)
-        out = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           "..", "data", "debug", "calibration_aid.png")
-        write_grid_aid(img, out)
-        return 0
+    params = DetectorParams(method=args.detect_method, orientation=args.detect_orientation,
+                            min_width=args.min_width, max_width=args.max_width,
+                            band_threshold=args.band_threshold,
+                            grid_tolerance=args.grid_tolerance)
 
+    cam = None
+    still = None
     if args.frame:
-        frame = cv2.imread(args.frame, cv2.IMREAD_COLOR)
-        if frame is None:
+        still = cv2.imread(args.frame, cv2.IMREAD_COLOR)
+        if still is None:
             print(f"error: could not read {args.frame}", file=sys.stderr)
             return 2
-        reuse_still = True
+        get_frame = lambda: still                               # noqa: E731
+        shape = still.shape[:2]
+        print(f"offline: {args.frame} ({shape[1]}x{shape[0]})")
     else:
         try:
-            cam = open_camera(args.source)
+            cam = open_camera(args.source, backend=args.backend)
         except CameraError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
-        frame = None
+        width = 0
+        first = None
         deadline = time.time() + 15
-        while frame is None and time.time() < deadline:
-            frame = cam.read()
-        if frame is None:
-            print("error: no frame received", file=sys.stderr)
+        while first is None and time.time() < deadline:
+            first = cam.read()
+        if first is None:
+            print("error: no frame from the camera", file=sys.stderr)
+            cam.close()
             return 2
-        reuse_still = False
+        get_frame = cam.read
+        shape = first.shape[:2]
+        print(f"live: {args.source} ({shape[1]}x{shape[0]}) backend {cam.name}")
 
-    h, w = frame.shape[:2]
-    cal = Calibrator(os.path.abspath(args.out), args.start_id, args.inner_scale, w, h)
+    editor = SpotEditor(shape, start_id=args.start_id, inner_scale=args.inner_scale)
+    out_path = os.path.abspath(args.out)
+    debug_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "debug")
+
+    if args.grid is not None:
+        img = cv2.imread(args.grid, cv2.IMREAD_COLOR) if args.grid else (
+            still if still is not None else get_frame())
+        if img is None:
+            print("error: no image to draw the grid on", file=sys.stderr)
+            return 2
+        write_grid_aid(img, os.path.join(debug_dir, "calibration_aid.png"))
+        if cam is not None:
+            cam.close()
+        return 0
+
+    if args.detect_only:
+        img = still if still is not None else grab(get_frame)
+        if img is None:
+            print("error: no frame", file=sys.stderr)
+            return 2
+        rc = detect_only(img, params, debug_dir, args.start_id)
+        if cam is not None:
+            cam.close()
+        return rc
+
+    if os.path.exists(out_path):
+        editor.load(out_path)
+    else:
+        editor._say("no calibration yet: press 'a' to auto detect, or add bays by hand (n)")
+
+    app = CalibrationApp(editor, out_path)
+    if args.auto:
+        frame = still if still is not None else grab(get_frame)
+        if frame is not None:
+            editor.auto_detect(frame, params)
+        else:
+            editor._say("auto detect skipped: no frame yet", "warn")
+
     try:
-        if os.path.exists(cal.out_path):
-            cal.reload()
-    except Exception:
-        pass
+        rc = app.run(get_frame, params)
+    finally:
+        if cam is not None:
+            cam.close()
 
-    print(f"calibrating {w}x{h}. Existing spots: {len(cal.spots)}")
-    print("click the four corners of a bay; the 4th click commits it.")
-    print("press 's' when done - nothing is written until you save.")
-
-    cv2.namedWindow(WINDOW, cv2.WINDOW_AUTOSIZE)
-    cv2.setMouseCallback(WINDOW, cal.on_mouse)
-
-    while True:
-        if not reuse_still:
-            latest = cam.read()
-            if latest is not None:
-                frame = latest
-            elif frame is None:
-                continue
-
-        cv2.imshow(WINDOW, cal.draw(frame))
-        key = cv2.waitKey(20) & 0xFF
-
-        if key in (ord('q'), 27):
-            if cal.dirty:
-                cal.save()
-            break
-        elif key == ord('u'):
-            if cal.pending:
-                print(f"  removed corner {cal.pending.pop()}")
-            elif cal.spots:
-                print("  (nothing being drawn - press 'd' to drop the last spot)")
-        elif key == ord('d'):
-            if cal.spots:
-                print(f"  deleted spot {cal.spots.pop().id}")
-                cal.dirty = True
-        elif key == ord('r'):
-            cv2.destroyAllWindows()          # otherwise input() fights the window
-            cal.rename_last()
-            cv2.namedWindow(WINDOW, cv2.WINDOW_AUTOSIZE)
-            cv2.setMouseCallback(WINDOW, cal.on_mouse)
-        elif key == ord('i'):
-            cv2.destroyAllWindows()
-            cal.set_inner_scale()
-            cv2.namedWindow(WINDOW, cv2.WINDOW_AUTOSIZE)
-            cv2.setMouseCallback(WINDOW, cal.on_mouse)
-        elif key == ord('s'):
-            if not cal.spots:
-                print("  nothing to save - click 4 corners first")
-            else:
-                cal.save()
-                problems = validate(cal.spots, (h, w))
-                for p in problems:
-                    print(f"  warning: {p}")
-        elif key == ord('l'):
-            cal.reload()
-        elif key == ord('g'):
-            cal.show_grid = not cal.show_grid
-        elif key == ord('v'):
-            cal.show_inner = not cal.show_inner
-
-    cv2.destroyAllWindows()
-    if not reuse_still:
-        cam.close()
-    if cal.spots:
-        problems = validate(cal.spots, (h, w))
-        if problems:
-            print("warnings:")
-            for p in problems:
-                print(f"  - {p}")
-        print(f"final: {len(cal.spots)} spot(s) in {cal.out_path}")
-    return 0
+    if editor.spots:
+        print(f"\n{len(editor.spots)} spot(s): {', '.join(s.id for s in editor.spots)}")
+        if editor.dirty:
+            editor.save(out_path)
+    return rc
 
 
 if __name__ == "__main__":
