@@ -123,6 +123,21 @@ Auto Detect is deliberately allowed to be imperfect: every corner is draggable,
 and a bay it fails on costs you one `n` plus a few `g` presses, not a redraw of
 the whole row. It also cannot damage anything - one `z` undoes an entire run.
 
+### Measured defaults for this sandbox
+
+Tuned against the real camera on 2026-10-05 (saved frame and live stream agree):
+
+| setting | value | why |
+|---|---|---|
+| `--detect-method` | `profile` | the Hough/`segments` path reads the two edges of each white line as two dividers, so the lower row came back with a bogus 21 px pitch, and on a noise frame it chained 1367 segments into 204 "dividers" |
+| `--detect-orientation` | `vertical` | `auto` picked `horizontal` on one run and `vertical` on another for the same scene, which changed the result completely |
+| `--band-threshold` | `0.05` | 0.30 missed the upper row of bays entirely |
+| periodicity confidence | autocorr >= 0.25 | measured: **0.53-0.67** on the real scene, 0.85 on a clean synthetic row, **0.068-0.128** on a noise-only frame — so the threshold sits a factor of two from both sides. This is what stops a random image producing ~100 bogus bays. |
+
+Result on this scene: two rows at y 35..133 and y 196..390, **bay pitch 46-47 px in
+both rows**, 30-31 candidates, bay width median 48 px. The consistent pitch across
+two independent rows is the strongest sign it is reading real bays.
+
 ### If Auto Detect finds the wrong thing
 
 The detector looks for rows of parallel, evenly spaced lines. Run it once in
@@ -132,10 +147,22 @@ report mode and read the numbers before clicking anything:
 $P src/calibration.py --source http://192.168.3.118/stream --detect-only
 ```
 
-That prints the bands, each row's divider count and measured pitch, the candidate
-count and their width/height range, and writes an overlay to
-`data/debug/detect_only.png` with every candidate outlined and numbered. Open that
-PNG next to the live image.
+That prints each row's divider count and measured pitch, the candidate count,
+their width/height range, a suggested width filter, and **a text picture of the
+edge profile with the fitted comb underneath it**:
+
+```
+band 0  y=36..133  pitch=46.2px  peaks=18  comb=17
+  | =:     =:     =.     +      *.     # ...  :   .  @    . .     =    ... |
+  | ^      ^      ^      ^      ^      ^      ^      ^      ^      ^     ... |
+       ^ matched peak   + reconstructed   o ignored peak
+```
+
+If the `^` marks do not sit under the tall bars, the pitch or the phase is wrong -
+and that is checkable from a log, without opening an image.
+
+It also writes `data/debug/detect_only.png` with every candidate outlined and
+numbered; open that next to the live image.
 
 Then tune, and repeat:
 

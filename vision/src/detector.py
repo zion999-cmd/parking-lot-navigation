@@ -60,6 +60,11 @@ class DetectorParams:
     min_height: int = 20
     min_aspect: float = 0.15        # width / height
     max_aspect: float = 4.5
+    # A divider cannot be taller than this fraction of the frame, and a row cannot
+    # hold more dividers than could physically fit across the frame. Both are
+    # sanity caps for noisy images, where Hough segments chain into one giant
+    # cluster (204 "dividers" 1.9 px apart, observed on a noise-only frame).
+    max_divider_height_frac: float = 0.6
 
     # Regularity is the strongest signal a car park has: dividers sit on an
     # even grid. A row is only turned into bays when its dividers fit such a
@@ -68,15 +73,33 @@ class DetectorParams:
     grid_tolerance: float = 0.18    # fraction of the spacing
     min_aligned: int = 3
 
-    orientation: str = "auto"       # auto | vertical | horizontal
-    method: str = "profile"         # profile (energy + autocorrelation) | segments (Hough)
+    orientation: str = "vertical"   # vertical | horizontal | auto
+    # Defaults verified against the real sandbox on 2026-10-05:
+    #   method=profile, orientation=vertical, band_threshold=0.05
+    # finds two rows at y 36..133 and y 197..390 with a consistent pitch of
+    # 46-47 px, matching the rows that were visually confirmed in the camera image.
+    # "segments" needs the same rows but reads the two edges of each white line as
+    # two dividers, so it reports a bogus ~21 px pitch in the lower row, and on a
+    # noisy frame it chains 1367 segments into 204 "dividers".
+    method: str = "profile"         # profile (energy+autocorr) | segments (Hough)
 
     # profile method
     band_smooth_sigma: float = 6.0     # smooths the row-energy curve before banding
-    band_threshold: float = 0.30       # fraction between mean and max energy
+    # 0.05, not 0.30: with 0.30 the upper row of the real sandbox was missed
+    # entirely. Bands are refined later by the pitch fit, so being inclusive here
+    # costs little and missing a row costs a whole row of bays.
+    band_threshold: float = 0.05       # fraction between mean and max energy
     min_band_height: int = 26
     peak_prominence: float = 0.35      # fraction of the profile's std
-    autocorr_min: float = 0.12         # minimum normalised autocorrelation peak
+    # Periodicity confidence. Measured on 2026-10-05: the normalised
+    # autocorrelation peak of the band profile is 0.53-0.67 on the real sandbox
+    # and 0.85 on a clean synthetic row, but 0.068-0.128 on a noise-only frame. A
+    # threshold of 0.25 therefore sits about a factor of two away from both, and
+    # it is what keeps a random image from producing a hundred bogus bays once
+    # band_threshold is permissive enough to find real rows.
+    autocorr_min: float = 0.25
+    # A comb must also explain a decent share of the peaks it was fitted to.
+    min_aligned_fraction: float = 0.5
 
 
 @dataclass
@@ -183,7 +206,8 @@ def fit_grid(xs: Sequence[float], min_spacing: float, tolerance: float) -> Optio
                    dropped=dropped, score=len(kept_final) / len(sorted_x))
 
 
-def comb_from_spacing(peaks: Sequence[float], spacing: float, tolerance: float
+def comb_from_spacing(peaks: Sequence[float], spacing: float, tolerance: float,
+                      max_fill_fraction: float = 0.4
                       ) -> Tuple[List[float], int, int]:
     """Phase-align a comb of known pitch to the peaks, and fill in the gaps.
 
@@ -191,41 +215,103 @@ def comb_from_spacing(peaks: Sequence[float], spacing: float, tolerance: float
     detected, the comb still knows where it should have been, so the bay is
     reconstructed instead of being merged with its neighbour.
 
-    Returns (positions, n_aligned, n_missing).
+    The phase is fitted by least squares over the peaks that matched, not just
+    taken from whichever peak happened to tie first. Taking a peak as the origin
+    left the whole comb shifted by up to half a bay on real images - visible as
+    boxes that were "slightly off".
+
+    A comb that would have to invent more than ``max_fill_fraction`` of its teeth
+    is rejected outright: at that point the "pitch" is fiction, and returning an
+    empty list makes the caller fall back to the raw peaks instead of generating
+    bays that do not exist.
+
+    Returns (positions, n_aligned, n_missing); positions == [] means rejected.
     """
     if not peaks or spacing <= 0:
         return list(peaks), 0, 0
     tol = max(1.0, tolerance * spacing)
-    best_aligned, best_origin = -1, peaks[0]
-    for origin in peaks:
-        n = sum(1 for x in peaks
-                if abs(((x - origin + spacing / 2.0) % spacing) - spacing / 2.0) <= tol)
-        if n > best_aligned:
-            best_aligned, best_origin = n, origin
-
-    lo, hi = min(peaks), max(peaks)
     xs = np.asarray(sorted(peaks), dtype=np.float64)
 
-    # Derive the comb indices from the peaks themselves rather than from
-    # (hi-lo)/spacing: peak positions carry ~0.5 px of jitter, and a naive floor
-    # would decide the outermost divider is one tooth short and silently drop the
-    # last bay of the row.
-    idx = [int(round((x - best_origin) / spacing)) for x in xs]
+    best_aligned, best_origin = -1, float(xs[0])
+    for origin in xs:
+        n = sum(1 for x in xs
+                if abs(((x - origin + spacing / 2.0) % spacing) - spacing / 2.0) <= tol)
+        if n > best_aligned:
+            best_aligned, best_origin = n, float(origin)
+    if best_aligned <= 0:
+        return [], 0, 0
+
+    # Least-squares phase over the peaks that matched, iterated once so the
+    # matching itself is done with the refined phase.
+    origin = best_origin
+    for _ in range(2):
+        k = np.round((xs - origin) / spacing)
+        near = np.abs(xs - (origin + k * spacing)) <= tol
+        if not near.any():
+            break
+        k_near = np.round((xs[near] - origin) / spacing)
+        origin = float(np.mean(xs[near] - k_near * spacing))
+
+    k_all = np.round((xs - origin) / spacing)
+    aligned_mask = np.abs(xs - (origin + k_all * spacing)) <= tol
+    aligned = int(aligned_mask.sum())
+
+    idx = [int(round((x - origin) / spacing)) for x in xs[aligned_mask]]
+    if not idx:
+        return [], 0, 0
     k0, k1 = min(idx), max(idx)
     if k1 <= k0:
-        return list(peaks), best_aligned, 0
+        return [], 0, 0
 
+    total = k1 - k0 + 1
     positions: List[float] = []
     missing = 0
     for k in range(k0, k1 + 1):
-        nominal = best_origin + k * spacing
+        nominal = origin + k * spacing
         near = xs[np.abs(xs - nominal) <= tol]
         if near.size:
             positions.append(float(near.mean()))
         else:
             positions.append(float(nominal))
             missing += 1
-    return positions, best_aligned, missing
+
+    if missing > max_fill_fraction * total:
+        return [], aligned, missing
+    return positions, aligned, missing
+
+
+def choose_comb(peaks: Sequence[float], base_spacing: float, min_spacing: float,
+                tolerance: float) -> Optional[Tuple[float, List[float], int, int]]:
+    """Pick the pitch that best explains the peaks, allowing a coarser harmonic.
+
+    A finer comb can trivially "align" more points, so counting aligned peaks
+    alone always drifts towards a pitch that is too small and then invents the
+    dividers in between. Reconstructed teeth are therefore charged a penalty, and
+    a comb that would have to invent most of itself is discarded.
+
+    Returns (spacing, positions, aligned, missing) or None.
+    """
+    if not peaks or base_spacing <= 0:
+        return None
+    best = None
+    # Sub-multiples for a missed divider, multiples for the opposite mistake: a
+    # white line has two edges, and if Hough returned both, the median gap is half
+    # the real bay pitch. Whichever pitch explains the peaks better wins.
+    for div in (1, 2, 3, 0.5, 1 / 3.0):
+        s = base_spacing / div
+        if s < min_spacing:
+            continue
+        positions, aligned, missing = comb_from_spacing(peaks, s, tolerance)
+        if not positions:
+            continue
+        score = aligned - 0.35 * missing
+        key = (score, s)
+        if best is None or key > best[0]:
+            best = (key, s, positions, aligned, missing)
+    if best is None:
+        return None
+    _, s, positions, aligned, missing = best
+    return s, positions, aligned, missing
 
 
 @dataclass
@@ -234,6 +320,9 @@ class DetectorResult:
     rows: List[Row] = field(default_factory=list)
     edges: Optional[np.ndarray] = field(default=None, repr=False)
     diagnostics: Dict[str, object] = field(default_factory=dict)
+    # Per-band working data, kept so the whole thing can be rendered as text.
+    # A text overlay is how alignment gets checked when no one can look at a PNG.
+    plot: List[Dict] = field(default_factory=list, repr=False)
 
     @property
     def count(self) -> int:
@@ -270,7 +359,8 @@ def _is_perpendicular(x1, y1, x2, y2, max_angle_deg: float) -> bool:
     return ang <= max_angle_deg
 
 
-def _merge_dividers(segs: np.ndarray, p: DetectorParams) -> List[Divider]:
+def _merge_dividers(segs: np.ndarray, p: DetectorParams,
+                    frame_w: int = 1, frame_h: int = 1) -> List[Divider]:
     """Group near-vertical segments into one line per divider."""
     cands = []
     for x1, y1, x2, y2 in segs:
@@ -314,13 +404,27 @@ def _merge_dividers(segs: np.ndarray, p: DetectorParams) -> List[Divider]:
         dividers.append(Divider(a=float(a), b=float(b),
                                 y0=float(ys_a.min()), y1=float(ys_a.max()),
                                 members=len(cl), strength=float(sum(w))))
+
+    # Drop implausibly tall "dividers" - on a noisy frame many short segments chain
+    # into one cluster spanning half the image.
+    max_h = max(frame_h * p.max_divider_height_frac, p.min_height)
+    dividers = [d for d in dividers if (d.y1 - d.y0) <= max_h]
+    # And a row cannot contain more dividers than fit across the frame.
+    max_per_row = max(int(frame_w / max(p.min_width, 1)), 2)
+    if len(dividers) > max_per_row * 8:
+        # Far beyond anything a car park could hold: treat as noise.
+        return []
     return dividers
 
 
-def _group_rows(dividers: List[Divider], p: DetectorParams) -> List[Row]:
+def _group_rows(dividers: List[Divider], p: DetectorParams,
+                frame_w: int = 0) -> List[Row]:
     """Union dividers that share vertical extent into rows."""
     if not dividers:
         return []
+    # A row cannot hold more dividers than could physically fit across the frame.
+    # Noise frames otherwise chain thousands of segments into one giant row.
+    max_per_row = max(int(frame_w / max(p.min_width, 1)), 4) if frame_w else 10 ** 6
     parent = list(range(len(dividers)))
 
     def find(i):
@@ -351,6 +455,8 @@ def _group_rows(dividers: List[Divider], p: DetectorParams) -> List[Row]:
     for members in buckets.values():
         if len(members) < p.min_row_members:
             continue
+        if len(members) > max_per_row:
+            continue            # impossible for a parking row: treat as noise
         # Use the median extent of the row so one stray short line cannot skew it.
         y0 = float(np.median([m.y0 for m in members]))
         y1 = float(np.median([m.y1 for m in members]))
@@ -393,45 +499,56 @@ def _detect_vertical(frame: np.ndarray, p: DetectorParams) -> DetectorResult:
     h, w = frame.shape[:2]
     gray = _preprocess(frame, p)
     edges, segs = _edges_and_segments(gray, p)
-    dividers = _merge_dividers(segs, p)
-    rows = _group_rows(dividers, p)
+    # The profile is only used for the text overlay, but having it for this method
+    # too is what makes "are the dividers on the real lines?" answerable in text.
+    energy = _vertical_energy(gray)
+    dividers = _merge_dividers(segs, p, w, h)
+    rows = _group_rows(dividers, p, w)
 
     polys: List[List[List[float]]] = []
     rejected = 0
     rowinfo = []
+    plot: List[Dict] = []
 
     for row in rows:
         xs = [d.x_at(row.mid_row_y()) for d in row.dividers]
         med, sd = row.spacing()
 
-        fit = fit_grid(xs, p.min_width, p.grid_tolerance) if p.require_grid else None
-        if fit is not None and len(fit.kept) >= p.min_aligned:
-            kept = sorted((row.dividers[i] for i in fit.kept),
-                          key=lambda d: d.x_at(row.mid_row_y()))
-            spacing = fit.spacing
+        # Same trick as the profile method: measure the pitch, then let it
+        # complete the row. A divider that was never seen as a segment is still
+        # placed by the comb, and the positions are snapped onto the grid, which
+        # is what removes the "slightly offset" jitter of individual segments.
+        chosen = choose_comb(xs, med, p.min_width, p.grid_tolerance) if p.require_grid else None
+        if chosen is not None:
+            spacing, kept_positions, aligned, missing = chosen
         else:
-            # Not regular enough to trust a grid: fall back to every divider, so
-            # a genuinely irregular bay can still be picked up by hand.
-            kept = list(row.dividers)
-            spacing = med
+            spacing, kept_positions, aligned, missing = med, list(xs), len(xs), 0
 
-        if len(kept) < 2:
+        tolerance = max(1.0, p.grid_tolerance * max(spacing, 1.0))
+
+        def divider_for(x: float) -> Optional[Divider]:
+            near = [d for d in row.dividers if abs(d.x_at(row.mid_row_y()) - x) <= tolerance]
+            if not near:
+                return None
+            return min(near, key=lambda d: abs(d.x_at(row.mid_row_y()) - x))
+
+        if len(kept_positions) < 2:
             continue
 
-        # Recompute the row extent from the surviving lines.
-        y0 = float(np.median([d.y0 for d in kept]))
-        y1 = float(np.median([d.y1 for d in kept]))
-        row_kept = Row(dividers=kept, y0=y0, y1=y1)
-
+        y0, y1 = float(row.y0), float(row.y1)
         bays_here = 0
-        for left, right in zip(kept, kept[1:]):
-            gap = right.x_at(row_kept.mid_row_y()) - left.x_at(row_kept.mid_row_y())
-            if spacing > 0 and abs(gap - spacing) > 0.4 * spacing:
-                # A gap in the comb, i.e. a missed divider. A double-width bay is
-                # almost certainly a false positive, so skip it and say so.
-                rejected += 1
+        for px, nx in zip(kept_positions, kept_positions[1:]):
+            if spacing > 0 and abs((nx - px) - spacing) > 0.4 * spacing:
+                rejected += 1        # a gap in the comb: a missed divider
                 continue
-            quad = _row_quad(left, right, row_kept)
+            # Use the real line where one was detected (keeps the slant), and a
+            # straight line at the comb position where one was reconstructed.
+            dl, dr = divider_for(px), divider_for(nx)
+            tl = dl.x_at(y0) if dl is not None else px
+            bl = dl.x_at(y1) if dl is not None else px
+            tr = dr.x_at(y0) if dr is not None else nx
+            br = dr.x_at(y1) if dr is not None else nx
+            quad = [[tl, y0], [tr, y0], [br, y1], [bl, y1]]
             if _plausible(quad, p, w, h):
                 polys.append(quad)
                 bays_here += 1
@@ -445,13 +562,20 @@ def _detect_vertical(frame: np.ndarray, p: DetectorParams) -> DetectorResult:
             "spacing_median": round(med, 1),
             "spacing_std": round(sd, 1),
             "grid_spacing": round(spacing, 1),
-            "grid_kept": len(kept),
-            "grid_dropped": len(row.dividers) - len(kept),
-            "grid_score": round((len(kept) / len(row.dividers)) if row.dividers else 0.0, 2),
+            "grid_aligned": aligned,
+            "grid_filled": missing,
+            "dividers_used": len(kept_positions),
         })
+        by0, by1 = int(max(y0, 0)), int(min(y1, h))
+        if by1 - by0 >= 2:
+            plot.append({"y": (by0, by1),
+                         "profile": energy[by0:by1, :].mean(axis=0),
+                         "peaks": xs, "positions": list(kept_positions),
+                         "pitch": spacing,
+                         "radius": tolerance})
 
     return DetectorResult(
-        polygons=polys, rows=rows, edges=edges,
+        polygons=polys, rows=rows, edges=edges, plot=plot,
         diagnostics={
             "orientation": "vertical",
             "segments": int(len(segs)),
@@ -626,15 +750,24 @@ def _detect_profile(frame: np.ndarray, p: DetectorParams) -> DetectorResult:
     h, w = frame.shape[:2]
     gray = _preprocess(frame, p)
     energy = _vertical_energy(gray)
-
+    # Canny only feeds the debug overlay, but it must be populated or the overlay
+    # comes out as a blank camera frame and looks like a detection failure.
+    edges = cv2.Canny(gray, p.canny_lo, p.canny_hi)
     bands = _find_bands(energy, p)
     polys: List[List[List[float]]] = []
     rowinfo = []
+    plot: List[Dict] = []
     rejected = 0
 
     for (by0, by1) in bands:
-        band = energy[by0:by1 + 1, :]
-        profile = band.mean(axis=0)
+        # Measure the profile over the middle of the band, not all of it. In a
+        # slanted row a divider drifts in x across the band, and averaging the
+        # whole height smears the peak until the pitch is misread (a slanted 2x5
+        # row came back as 2 bays of double width).
+        band_h = by1 - by0 + 1
+        my0 = by0 + band_h // 4
+        my1 = max(by1 - band_h // 4, my0 + 1)
+        profile = energy[my0:my1, :].mean(axis=0)
 
         peaks = _profile_peaks(profile, p)
         if len(peaks) < 2:
@@ -642,36 +775,35 @@ def _detect_profile(frame: np.ndarray, p: DetectorParams) -> DetectorResult:
                             "note": "too few dividers"})
             continue
 
-        spacing, _ = _dominant_period(profile, p.min_width, p.max_width,
-                                      p.autocorr_min)
+        spacing, ac = _dominant_period(profile, p.min_width, p.max_width,
+                                       p.autocorr_min)
         missing = 0
         aligned = len(peaks)
+        chosen = None
         if spacing is not None:
-            # A missed divider can make autocorrelation lock onto 2x or 3x the
-            # real pitch. Try the sub-multiples and keep whichever explains the
-            # most peaks; on a tie prefer the larger spacing so we do not invent
-            # dividers that were never there.
-            best = None
-            for div in (1, 2, 3):
-                s = spacing / div
-                if s < p.min_width:
-                    continue
-                pos, al, mi = comb_from_spacing(peaks, s, p.grid_tolerance)
-                key = (al, s)
-                if best is None or key > best[0]:
-                    best = (key, s, pos, al, mi)
-            if best is None:
-                spacing = None
-            else:
-                _, spacing, kept, aligned, missing = best
-        if spacing is None:
-            fit = fit_grid(peaks, p.min_width, p.grid_tolerance)
-            if fit is not None and len(fit.kept) >= p.min_aligned:
-                kept = sorted(peaks[i] for i in fit.kept)
-                spacing = fit.spacing
-                aligned = len(fit.kept)
-            else:
-                kept, spacing = peaks, float(np.median(np.diff(peaks)))
+            chosen = choose_comb(peaks, spacing, p.min_width, p.grid_tolerance)
+            if chosen is not None and chosen[2] < p.min_aligned_fraction * len(peaks):
+                chosen = None            # the comb only explains a few of the peaks
+        if chosen is None:
+            mid = float(np.median(np.diff(peaks))) if len(peaks) > 1 else 0.0
+            alt = choose_comb(peaks, mid, p.min_width, p.grid_tolerance)
+            if alt is not None and alt[2] >= p.min_aligned_fraction * len(peaks):
+                chosen = alt
+        if chosen is not None:
+            spacing, kept, aligned, missing = chosen
+        elif p.require_grid:
+            # No trustworthy periodic structure here. On a noise-only frame this is
+            # what stops a hundred bogus bays from being proposed: with
+            # band_threshold at 0.05 bands are cheap to find, so the grid is what
+            # decides. A row that really is irregular can still be calibrated by
+            # hand (n, then g).
+            rowinfo.append({"y": [by0, by1], "peaks": len(peaks), "bays": 0,
+                            "note": "no periodic grid - skipped"})
+            continue
+        else:
+            # require_grid off: offer the raw peaks so a hand correction can start.
+            spacing = float(np.median(np.diff(peaks))) if len(peaks) > 1 else 0.0
+            kept = list(peaks)
 
         y0, y1 = by0 + 2, by1 - 2
         if y1 - y0 < p.min_height:
@@ -703,15 +835,68 @@ def _detect_profile(frame: np.ndarray, p: DetectorParams) -> DetectorResult:
             "dividers_used": len(kept),
             "bays": bays_here,
         })
+        plot.append({"y": (by0, by1), "profile": profile, "peaks": peaks,
+                     "positions": kept, "pitch": spacing or 0.0,
+                     "radius": max(1.0, p.grid_tolerance * (spacing or 1.0))})
 
     return DetectorResult(
-        polygons=polys, rows=[], edges=None,
+        polygons=polys, rows=[], edges=edges, plot=plot,
         diagnostics={
             "orientation": "vertical",
             "bands": len(bands),
             "rows": rowinfo,
             "rejected_bays": rejected,
         })
+
+
+def render_profile_ascii(result: DetectorResult, cols: int = 118) -> List[str]:
+    """Draw each band's edge profile with the fitted comb underneath it.
+
+    This is the alignment check in text form: the '|' row is the measured
+    vertical-edge energy, the '^' row marks dividers that matched a real peak,
+    '+' marks teeth where no divider was found (reconstructed from the pitch) and
+    'o' marks a detected peak the comb ignored. If the '^'/'+' marks do not sit
+    under the tall bars, the pitch or the phase is wrong, and that is visible
+    without opening an image.
+    """
+    out: List[str] = []
+    for i, row in enumerate(result.plot or []):
+        prof = np.asarray(row["profile"], dtype=np.float64)
+        if prof.size == 0:
+            continue
+        y0, y1 = row["y"]
+        positions = list(row["positions"])
+        radius = float(row.get("radius", 3.0))
+
+        idx = np.linspace(0, prof.size - 1, cols).astype(int)
+        sampled = prof[idx]
+        base = sampled.min()
+        span = max(sampled.max() - base, 1e-6)
+        levels = " .:-=+*#%@"
+
+        scale = cols / float(prof.size)
+        bars = "".join(levels[int((s - base) / span * (len(levels) - 1))] for s in sampled)
+        comb = [" "] * cols
+        peaks = row.get("peaks", [])
+        for j, x in enumerate(positions):
+            c = int(round(x * scale))
+            if not (0 <= c < cols):
+                continue
+            near = any(abs(p - x) <= radius for p in peaks)
+            comb[c] = "^" if near else "+"
+        for x in peaks:
+            c = int(round(x * scale))
+            if 0 <= c < cols and comb[c] == " " and not any(
+                    abs(x - q) <= radius for q in positions):
+                comb[c] = "o"
+
+        hi = sampled.max()
+        out.append(f"  band {i}  y={y0}..{y1}  pitch={row.get('pitch', 0):.1f}px  "
+                   f"peaks={len(peaks)}  comb={len(positions)}")
+        out.append(f"    energy higher->wider      max={hi:.0f}")
+        out.append(f"    |{bars}|")
+        out.append(f"    |{''.join(comb)}|   ^ matched peak   + reconstructed   o ignored peak")
+    return out
 
 
 def sort_reading_order(polys: List[List[List[float]]]) -> List[List[List[float]]]:
@@ -723,11 +908,17 @@ def sort_reading_order(polys: List[List[List[float]]]) -> List[List[List[float]]
 
 
 def draw_debug(frame: np.ndarray, result: DetectorResult) -> np.ndarray:
-    """Overlay the detected line structure, for the 'why did it find that' view."""
+    """Overlay what the detector locked onto, for the 'why did it find that' view.
+
+    Must work for BOTH methods. It used to draw only ``result.rows``, which the
+    profile method leaves empty, so the overlay came out as a blank camera frame
+    and looked like a total detection failure.
+    """
     canvas = frame.copy()
     if result.edges is not None:
         canvas[result.edges > 0] = (0, 255, 0)
-    for row in result.rows:
+
+    for row in result.rows:                      # segments method
         for d in row.dividers:
             cv2.line(canvas,
                      (int(d.x_at(d.y0)), int(d.y0)),
@@ -737,4 +928,18 @@ def draw_debug(frame: np.ndarray, result: DetectorResult) -> np.ndarray:
                  (255, 0, 255), 1)
         cv2.line(canvas, (0, int(row.y1)), (canvas.shape[1], int(row.y1)),
                  (255, 0, 255), 1)
+
+    for row in result.plot:                      # profile method
+        y0, y1 = int(row["y"][0]), int(row["y"][1])
+        cv2.line(canvas, (0, y0), (canvas.shape[1], y0), (255, 0, 255), 1)
+        cv2.line(canvas, (0, y1), (canvas.shape[1], y1), (255, 0, 255), 1)
+        radius = float(row.get("radius", 3.0))
+        peaks = row.get("peaks", [])
+        for x in row["positions"]:
+            matched = any(abs(p - x) <= radius for p in peaks)
+            colour = (0, 165, 255) if matched else (0, 0, 255)   # orange / red
+            cv2.line(canvas, (int(x), y0), (int(x), y1), colour, 2)
+        for x in peaks:                          # peaks the comb threw away
+            if not any(abs(x - q) <= radius for q in row["positions"]):
+                cv2.circle(canvas, (int(x), (y0 + y1) // 2), 4, (255, 255, 0), 1)
     return canvas

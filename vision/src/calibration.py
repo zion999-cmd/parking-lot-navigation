@@ -50,7 +50,8 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from camera import CameraError, open_camera                    # noqa: E402
-from detector import DetectorParams, detect_bays, draw_debug, sort_reading_order  # noqa: E402
+from detector import (DetectorParams, detect_bays, draw_debug,  # noqa: E402
+                      render_profile_ascii, sort_reading_order)
 from spot_config import DEFAULT_INNER_SCALE                    # noqa: E402
 from spot_editor import SpotEditor                             # noqa: E402
 
@@ -372,6 +373,8 @@ def detect_only(frame: np.ndarray, params: DetectorParams, out_dir: str,
             print(f"    #{start_id + n}  x {a[:, 0].min():4.0f}..{a[:, 0].max():4.0f}  "
                   f"y {a[:, 1].min():4.0f}..{a[:, 1].max():4.0f}  "
                   f"w {a[:, 0].max() - a[:, 0].min():3.0f} h {a[:, 1].max() - a[:, 1].min():3.0f}")
+    for line in render_profile_ascii(res):
+        print(line)
     os.makedirs(out_dir, exist_ok=True)
     overlay = draw_debug(frame, res)
     for n, p in enumerate(polys):
@@ -401,8 +404,9 @@ def main() -> int:
                     help="run detection once, print the report, save an overlay and exit "
                          "(no window; use this to tune the detector against the real scene)")
     # detector knobs, exposed so the tool can be tuned against the real scene
-    ap.add_argument("--detect-method", default="profile", choices=("profile", "segments"))
-    ap.add_argument("--detect-orientation", default="auto",
+    ap.add_argument("--detect-method", default=DetectorParams.method,
+                    choices=("profile", "segments"))
+    ap.add_argument("--detect-orientation", default=DetectorParams.orientation,
                     choices=("auto", "vertical", "horizontal"))
     ap.add_argument("--min-width", type=int, default=DetectorParams.min_width)
     ap.add_argument("--max-width", type=int, default=DetectorParams.max_width)

@@ -348,12 +348,15 @@ def test_key_a_runs_auto_detect():
 def test_mouse_drag_through_the_app_moves_a_corner():
     app = app_with()
     app.act("a")
-    spot = app.ed.spots[0]
+    # Drag the *selected* spot: adjacent detected bays share their corner
+    # coordinates exactly, so hit_test would otherwise grab the selected
+    # neighbour's corner and this test would be measuring the wrong thing.
+    spot = app.ed.spots[app.ed.selected]
     x0, y0 = spot.polygon[0]
     app.on_mouse(cv2.EVENT_LBUTTONDOWN, int(x0), int(y0), 0, None)
     app.on_mouse(cv2.EVENT_MOUSEMOVE, int(x0) + 7, int(y0) + 4, cv2.EVENT_FLAG_LBUTTON, None)
     app.on_mouse(cv2.EVENT_LBUTTONUP, int(x0) + 7, int(y0) + 4, 0, None)
-    assert np.allclose(app.ed.spots[0].polygon[0], [x0 + 7, y0 + 4])
+    assert np.allclose(app.ed.spots[app.ed.selected].polygon[0], [x0 + 7, y0 + 4])
 
 
 def test_clicking_empty_space_clears_the_selection():
