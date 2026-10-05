@@ -1,0 +1,10 @@
+# P0002 parking vision PoC - only two dependencies.
+#
+# The camera reader is standard library (urllib) + cv2.imdecode, so there is no
+# ffmpeg/streamlink/gstreamer dependency and nothing to build.
+#
+# On this machine cv2 4.13.0 + numpy are already present in:
+#   /usr/local/Caskroom/miniconda/base/envs/vision-dev/bin/python
+# and cv2 4.13.0 + numpy 2.0.2 in /usr/bin/python3.
+opencv-python>=4.8
+numpy>=1.24

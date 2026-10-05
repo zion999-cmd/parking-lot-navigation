@@ -631,7 +631,37 @@ display.c   ← 唯一碰 esp_lcd / SPI / LEDC 的文件
 
 ---
 
-## 13. 真机调试记录（两个只有上机才发现的问题）
+## 13. 停车位视觉 PoC（P0002）
+
+PC 端 Python/OpenCV，独立于固件。**不改 ESP32 任何代码 —— 它只是一个视频传感器。**
+
+```
+ESP32-S3-CAM http://192.168.3.118/stream
+        ↓
+Python / OpenCV  →  人工标定的固定车位 ROI  →  Spot 38 EMPTY / Spot 39 OCCUPIED / Spot 40 EMPTY
+```
+
+方法：固定摄像头 + 预标定 ROI + **空车位参考帧差分**（absdiff → 阈值 → 形态学 →
+changed_ratio）。不用 YOLO / 深度学习 / 自动找车位 / 透视变换。
+
+| 实测事实 | 值 |
+|---|---|
+| `cv2.VideoCapture(stream)` | ❌ 打不开（FFmpeg 读不了这条 multipart 流） |
+| `src/camera.py` 自写 multipart 解析 | ✅ 800x600，6 秒 60 帧 ≈ **10 fps**，0 重连 0 解码失败 |
+| 画面质量 | 亮度 146.9 / 对比度 34.4 / 清晰度 Laplacian 方差 **63.5**（偏软）/ 过曝 0% / 欠曝 0% |
+
+完整使用说明、标定步骤、阈值拟合与排错见
+[`vision/README.md`](vision/README.md)。测试：
+
+```zsh
+cd vision
+P=/usr/local/Caskroom/miniconda/base/envs/vision-dev/bin/python
+$P tests/test_occupancy.py        # 13 项合成图测试，无需相机
+```
+
+---
+
+## 14. 真机调试记录（两个只有上机才发现的问题）
 
 这两个问题在代码审阅时都看不出，都是烧到板子上才暴露的 —— 也正是 P0001 的
 “SC-1~SC-7 不得凭代码审查宣称 PASS”这条规则的用处。
@@ -662,7 +692,7 @@ xQueueTakeMutexRecursive FreeRTOS-Kernel/queue.c:835
 
 ---
 
-## 14. 目录结构
+## 15. 目录结构
 
 ```
 parking-lot-navigation/
@@ -688,6 +718,11 @@ parking-lot-navigation/
 │           ├── idf_component.yml      ← 锁定 esp32-camera 2.1.5 + esp-wifi-connect 3.1.x
 │           ├── Kconfig.projbuild      ← OTA_MANIFEST_URL
 │           └── wifi_credentials.h.example  ← 仅 NVS 格式说明，不参与编译
+├── vision/                            ← P0002：PC 端 OpenCV 车位占用 PoC
+│   ├── README.md
+│   ├── config/parking_spots.json      ← 人工标定的车位多边形
+│   ├── src/{camera,spot_config,occupancy,calibration,main}.py
+│   └── tests/{test_occupancy,fit_threshold}.py
 └── tools/
     ├── ota-server/                    ← 薄 OTA 服务（Python 标准库）
     │   ├── server.py
