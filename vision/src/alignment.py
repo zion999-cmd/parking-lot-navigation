@@ -154,6 +154,8 @@ class Aligner:
         scale = working_width / float(reference.shape[1])
         self._work_size = (working_width, max(int(round(reference.shape[0] * scale)), 8))
         self._ref_small = _to_gray(reference, self._work_size)
+        self._hann = cv2.createHanningWindow(
+            (self._work_size[0], self._work_size[1]), cv2.CV_32F)
 
     # -- estimation ---------------------------------------------------------
 
@@ -244,9 +246,8 @@ class Aligner:
     def _phase_correlate(self, ref: np.ndarray, cur: np.ndarray, why: str
                          ) -> Tuple[Optional[np.ndarray], float, str]:
         """Global translation estimate. Jumps far better than ECC, and can overshoot."""
-        hann = cv2.createHanningWindow((ref.shape[1], ref.shape[0]), cv2.CV_32F)
         try:
-            (dx, dy), response = cv2.phaseCorrelate(ref, cur, hann)
+            (dx, dy), response = cv2.phaseCorrelate(ref, cur, self._hann)
         except cv2.error as exc:
             return None, 0.0, f"phase correlation failed ({str(exc)[:60]})"
         # phaseCorrelate reports how far cur is shifted from ref, so mapping cur

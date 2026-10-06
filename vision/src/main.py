@@ -258,20 +258,48 @@ def main() -> int:
     sums = {s.id: [0.0, 0, 0] for s in spots}      # sum, occupied frames, total
     snapshot_done = False
     size_warned = False
+    frame = still_frame
+    last_frame_at = started
+    stall_warned = False
 
     try:
         while True:
-            if use_still:
-                frame = still_frame
-            else:
-                frame = cam.read()
-                if frame is None:
-                    if time.time() - started > 20:
-                        print("error: no frames for 20 s", file=sys.stderr)
-                        break
-                    continue
+            fresh = still_frame if use_still else cam.read()
+            if fresh is not None:
+                frame = fresh
+                last_frame_at = time.time()
+                stall_warned = False
+
+            if frame is None:
+                # Nothing to show yet. Keep the window alive and keep polling the
+                # keyboard: this used to `continue` straight past cv2.waitKey, so a
+                # slow stream froze the window and swallowed every key press.
+                if not args.headless and (cv2.waitKey(30) & 0xFF) in (ord('q'), 27):
+                    break
+                if time.time() - started > 20:
+                    print("error: no frames at all", file=sys.stderr)
+                    break
+                if args.headless:
+                    time.sleep(0.01)
+                continue
+
             frames += 1
             elapsed = time.time() - started
+
+            # A drought is measured from the last frame that actually arrived, not
+            # from process start. Measuring from process start made the viewer exit by
+            # itself: past the 20 s mark the very next read() that returned no complete
+            # frame yet - which happens several times per frame - ended the run. In
+            # windowed mode it now says so and carries on.
+            stall = time.time() - last_frame_at
+            if stall > 20.0:
+                if args.headless:
+                    print(f"error: no frames for {stall:.0f} s", file=sys.stderr)
+                    break
+                if not stall_warned:
+                    print(f"WARNING: no new frame for {stall:.0f} s - the camera or Wi-Fi "
+                          f"is not delivering. Still listening; press q to quit.")
+                    stall_warned = True
 
             if declared_size is not None and frame.shape[:2] != declared_size \
                     and not size_warned:
@@ -335,7 +363,8 @@ def main() -> int:
                              f"@{align_result.correlation:.2f}")
                     else:
                         a = f"align=FAILED"
-                    print(f"t={elapsed:5.1f}s fps={fps:4.1f} thr={threshold:.2f} {a} "
+                    src = f" src={cam.stats.fps():4.1f}" if cam is not None else ""
+                    print(f"t={elapsed:5.1f}s fps={fps:4.1f}{src} thr={threshold:.2f} {a} "
                           f"{status_line(spots, results)}")
                 else:
                     print(f"t={elapsed:5.1f}s  waiting for a reference (press 'r')")
@@ -350,10 +379,14 @@ def main() -> int:
                     align_text = (f"align dx={align_result.dx:+.0f} "
                                   f"dy={align_result.dy:+.0f} corr={align_result.correlation:.2f}")
                 else:
-                    align_text = f"align FAILED ({align_result.reason})"
+                    align_text = f"align FAILED: view no longer matches the reference"
+                src_fps = cam.stats.fps() if cam is not None else 0.0
+                stall_note = f"  NO FRAMES {time.time() - last_frame_at:.0f}s" \
+                    if time.time() - last_frame_at > 3 else ""
                 header = (f"threshold {threshold:.2f}  pixel {detector.params.pixel_threshold}  "
                           f"ref {'OK' if have_reference else 'MISSING - press r'}  "
-                          f"{align_text}  {frames / max(elapsed, 1e-6):.1f} fps")
+                          f"{align_text}  loop {frames / max(elapsed, 1e-6):.1f} fps"
+                          f" (source {src_fps:.1f}){stall_note}")
                 cv2.putText(canvas, header, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                             (0, 0, 0), 3)
                 cv2.putText(canvas, header, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
@@ -417,12 +450,20 @@ def main() -> int:
     print(f"\nran {elapsed:.1f}s, {frames} frames ({frames / max(elapsed, 1e-6):.1f} fps)")
     if cam is not None:
         print(f"stream stats: {cam.stats.summary()}")
+        if cam.stats.fps() < 4.0:
+            print("  NOTE: the source itself is slow. The frame rate above is what the "
+                  "camera/Wi-Fi delivered, not a limit of this program.")
     if aligner is not None:
         print(f"alignment: {align_stats['ok']} ok, {align_stats['failed']} failed")
         if align_stats["failed"]:
-            print("  WARNING: alignment failed on some frames - the ROIs may not sit "
-                  "on the bays. Check for a large camera move, and see the notes on "
-                  "why (estimator scores) in the log above.")
+            print("  WARNING: alignment failed on some frames - the ROIs may not sit on "
+                  "the bays.")
+            print("    The camera has moved further than a pan/tilt/zoom can explain "
+                  "(translation/rotation/affine all scored below the gate), or the view "
+                  "itself changed.")
+            print("    Check config/parking_spots.json -> image_size against the live "
+                  "frame, then re-capture the base frame with 'r' from the current view "
+                  "and confirm the bays still land on the bays.")
         if align_result is not None:
             print(f"  last: {align_result.describe()}")
 
