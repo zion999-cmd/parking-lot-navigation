@@ -140,49 +140,87 @@ def touches_border(bbox: Sequence[int], shape: Sequence[int],
             or x + w >= shape[1] - margin or y + h >= shape[0] - margin)
 
 
+# To turn the front round, the evidence for the other end has to be much stronger than the
+# evidence needed to keep the one already known, and it has to hold for several frames.
+#
+# The reason is the one physical fact in this file: a car cannot swap ends in a few frames.
+# The smoothed taper's noise is about 0.02, so it can never reach 0.10 by accident, while a real
+# 180 degree turn crosses it immediately and stays there. This is a Schmitt trigger: the gate
+# for *keeping* a front is MIN_TAPER, the gate for *changing* one is FLIP_TAPER.
+FLIP_TAPER = 0.10
+FLIP_FRAMES = 3
+# A brief loss - an occlusion, motion blur, a hand across the lens - must not erase what is
+# known. Only a run of misses means it is a different situation.
+MAX_MISSES = 5
+
+
 class VehicleTracker:
-    """Smooth the readings a little, because a car does not turn instantly.
+    """Smooth the readings, and refuse to believe the car has turned round without cause.
 
-    Measured on the real car, 30 frames: the axis is steady to 0.0 degrees, and the taper sits
-    at -0.12 with a spread of 0.05 - so it dips below the 0.04 gate in about one frame in six.
-    Those dips are not the car changing shape; they are the colour mask shifting a pixel at its
-    edges and the JPEG wobbling. Gating on a single frame therefore made the front appear and
-    disappear several times in thirty frames while the car never moved.
+    Two separate problems, and it took measuring the car driving to see the second one.
 
-    Averaging is safe here for the same reason it is dangerous in general: the quantity being
-    averaged cannot change quickly. A car's shape, and so its taper, changes only when the car
-    does. With alpha 0.3 the smoothed taper comes out at -0.12 +- 0.02, six times the gate away
-    from crossing, while a genuine 180 degree turn still moves it within a few frames.
+    Noise. The taper sits at -0.12 and wobbles by +-0.05 frame to frame, because the colour
+    mask moves a pixel at its edges and JPEG adds its own. Gating on a single frame dropped the
+    front reading about one frame in six while the car was stationary. A short average fixes
+    that: a car's shape changes only when the car does.
+
+    Resetting too eagerly. The first version treated any jump of more than 40 px between frames
+    as "the car was moved by hand" and cleared everything. At ten frames a second a toy car
+    crossing the sandbox in two seconds moves 40 px per frame - so driving the car wiped the
+    average and the front state on almost every frame, which is exactly when the readings were
+    seen to flicker. A jump now re-starts only the position; shape and front are properties of
+    the car and do not depend on where it is. A run of missed frames is what resets everything.
+
+    Flipping. Even with the average, a moving car's shape is less steady, and the derived front
+    could cross the gate and swap. Since a car cannot swap ends in a few frames, a swap has to
+    earn it: FLIP_TAPER for FLIP_FRAMES consecutive frames. When the car really is turned
+    around the crossing is immediate and sustained, so it is followed within those few frames.
     """
 
     def __init__(self, alpha: float = 0.3, position_alpha: float = 0.5,
-                 min_taper: float = MIN_TAPER, reset_px: float = 40.0):
+                 min_taper: float = MIN_TAPER, flip_taper: float = FLIP_TAPER,
+                 flip_frames: int = FLIP_FRAMES, max_misses: int = MAX_MISSES,
+                 position_reset_px: float = 40.0):
         self.alpha = alpha
         self.position_alpha = position_alpha
         self.min_taper = min_taper
-        self.reset_px = reset_px
+        self.flip_taper = flip_taper
+        self.flip_frames = flip_frames
+        self.max_misses = max_misses
+        self.position_reset_px = position_reset_px
         self._taper: Optional[float] = None
         self._ax = 0.0
         self._ay = 0.0
         self._x: Optional[float] = None
         self._y: Optional[float] = None
+        # Which end is the front: True means the +axis direction, and it only changes when the
+        # evidence says so strongly enough, for long enough.
+        self._front_is_plus: Optional[bool] = None
+        self._opposite_streak = 0
+        self._misses = 0
 
     def reset(self) -> None:
-        """Start again: used when the car is out of sight, or has been picked up."""
+        """Start again: the car has been out of sight long enough to be a new situation."""
         self._taper = None
         self._x = self._y = None
+        self._front_is_plus = None
+        self._opposite_streak = 0
+        self._misses = 0
 
     def update(self, pose: Optional[VehiclePose]) -> Optional[VehiclePose]:
         """One sighting in, a smoothed sighting out. None in, None out."""
         if pose is None:
-            self.reset()
+            self._misses += 1
+            if self._misses >= self.max_misses:
+                self.reset()
             return None
+        self._misses = 0
 
-        # A jump too big to be driving means the car was moved by hand, so the old shape says
-        # nothing about the new one.
+        # A jump too big to be driving means the car was moved by hand. That invalidates where
+        # it is, but not what shape it is - so only the position starts again.
         if (self._x is not None
-                and math.hypot(pose.x - self._x, pose.y - self._y) > self.reset_px):
-            self.reset()
+                and math.hypot(pose.x - self._x, pose.y - self._y) > self.position_reset_px):
+            self._x = self._y = None
 
         a = self.alpha
         self._taper = (pose.taper if self._taper is None
@@ -201,16 +239,31 @@ class VehicleTracker:
         self._x = pose.x if self._x is None else pa * pose.x + (1 - pa) * self._x
         self._y = pose.y if self._y is None else pa * pose.y + (1 - pa) * self._y
 
-        out = replace(pose, x=self._x, y=self._y, heading=heading, taper=self._taper)
-        if pose.elongation >= 1.6 and abs(self._taper) >= self.min_taper:
-            wider_is_plus = self._taper > 0
-            plus_is_front = wider_is_plus == FRONT_IS_THE_WIDER_END
-            out.front_heading = heading if plus_is_front else (heading + 180.0) % 360.0
-            out.front_is_known = True
+        # Which end the shape says is the front, and whether to believe it.
+        #
+        # The *raw* taper drives the flip and the smoothed one only holds it. Using the
+        # smoothed value for both made a real turn take about a second to register, because the
+        # average needs several frames to cross zero - too slow for a car that can be turned
+        # round in one movement. The raw value is safe for the flip because the trigger demands
+        # 0.10 on the *opposite* side for several consecutive frames: with the noise at 0.05
+        # around a mean of -0.12 that is a four-sigma excursion, and it has to happen three
+        # times in a row.
+        wider_is_plus = pose.taper > 0
+        wants_plus = wider_is_plus == FRONT_IS_THE_WIDER_END
+        if self._front_is_plus is None:
+            self._front_is_plus = wants_plus
+        elif wants_plus != self._front_is_plus and abs(pose.taper) >= self.flip_taper:
+            self._opposite_streak += 1
+            if self._opposite_streak >= self.flip_frames:
+                self._front_is_plus = not self._front_is_plus
+                self._opposite_streak = 0
         else:
-            out.front_heading = None
-            out.front_is_known = False
-        return out
+            self._opposite_streak = 0
+
+        known = pose.elongation >= 1.6 and abs(self._taper) >= self.min_taper
+        front = heading if self._front_is_plus else (heading + 180.0) % 360.0
+        return replace(pose, x=self._x, y=self._y, heading=heading, taper=self._taper,
+                       front_heading=front if known else None, front_is_known=known)
 
 
 def taper_of(points: np.ndarray, heading: float, bins: int = 12) -> float:

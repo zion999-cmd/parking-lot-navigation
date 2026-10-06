@@ -255,7 +255,7 @@ def test_a_genuine_turn_is_followed() -> None:
     for _ in range(8):
         before = tracker.update(a_pose(-0.12))
     assert before.front_is_known
-    for _ in range(8):
+    for _ in range(6):
         after = tracker.update(a_pose(+0.12))
     assert after.front_is_known, after.taper
     turn = abs((after.front_heading - before.front_heading) % 360)
@@ -273,20 +273,68 @@ def test_the_smoothed_axis_does_not_drift_to_ninety_degrees() -> None:
     assert offset < 10, out.heading
 
 
-def test_losing_sight_of_the_car_resets_the_smoothing() -> None:
+def test_a_brief_loss_of_sight_does_not_erase_what_is_known() -> None:
+    """One missed frame is an occlusion or motion blur, not a new situation."""
     tracker = vehicle.VehicleTracker()
-    tracker.update(a_pose(-0.12, x=100.0, y=100.0))
+    for _ in range(8):
+        before = tracker.update(a_pose(-0.12))
     assert tracker.update(None) is None
-    again = tracker.update(a_pose(-0.12, x=500.0, y=500.0))
-    assert abs(again.x - 500.0) < 1e-6, "the old position was blended into the new sighting"
+    after = tracker.update(a_pose(-0.12))
+    assert after is not None and after.front_is_known, after
+    assert after.front_heading == before.front_heading
 
 
-def test_a_hand_move_resets_the_smoothing() -> None:
-    """Driving cannot move the car across the frame in one frame; being picked up can."""
+def test_a_long_loss_of_sight_starts_again() -> None:
     tracker = vehicle.VehicleTracker()
     tracker.update(a_pose(-0.12, x=100.0, y=100.0))
+    for _ in range(vehicle.MAX_MISSES):
+        tracker.update(None)
+    again = tracker.update(a_pose(-0.12, x=500.0, y=500.0))
+    assert abs(again.x - 500.0) < 1e-6, "the old position survived a long gap"
+
+
+def test_a_hand_move_restarts_the_position_but_not_the_shape() -> None:
+    """Being picked up invalidates where the car is, not what shape it is."""
+    tracker = vehicle.VehicleTracker()
+    for _ in range(8):
+        tracker.update(a_pose(-0.12, x=100.0, y=100.0))
     moved = tracker.update(a_pose(-0.12, x=600.0, y=400.0))
     assert abs(moved.x - 600.0) < 1e-6 and abs(moved.y - 400.0) < 1e-6
+    assert moved.front_is_known, "the shape did not change just because the car moved"
+    assert abs(moved.taper + 0.12) < 0.02, moved.taper
+
+
+def test_the_front_does_not_flip_while_the_car_is_being_driven() -> None:
+    """The case that was actually reported: fine when still, flickering when driven.
+
+    The old version reset everything on any jump over 40 px, and at ten frames a second a toy
+    car crossing the sandbox moves about that much per frame - so driving wiped the average and
+    the front state several times a second.
+    """
+    tracker = vehicle.VehicleTracker()
+    rng = np.random.default_rng(7)
+    fronts, known = set(), 0
+    for i in range(60):
+        # 40 px per frame across the frame, with the taper wobbling as much as it really does
+        pose = a_pose(-0.12 + rng.normal(0, 0.05), x=60.0 + 12.0 * i, y=400.0)
+        out = tracker.update(pose)
+        assert out is not None
+        if out.front_is_known:
+            known += 1
+            fronts.add(round(out.front_heading))
+    assert known >= 55, f"the front was unknown too often while driving: {known}/60"
+    assert len(fronts) == 1, f"the front point moved while driving: {fronts}"
+
+
+def test_a_single_noisy_frame_cannot_swap_the_front() -> None:
+    tracker = vehicle.VehicleTracker()
+    for _ in range(10):
+        tracker.update(a_pose(-0.12))
+    one = tracker.update(a_pose(+0.12))          # one frame claiming the opposite
+    assert one.front_heading is not None
+    steady = tracker.update(a_pose(-0.12))       # back to normal
+    assert abs(((steady.front_heading - one.front_heading + 180) % 360) - 180) < 10, \
+        "a single frame was enough to swap the front"
 
 
 def test_a_sighting_with_no_front_known_keeps_the_position() -> None:
