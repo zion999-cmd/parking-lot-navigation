@@ -347,7 +347,7 @@ OV3660 直接输出 JPEG，省掉软件编码和 RGB565 字节交换 —— esp3
 #define CAM_FRAME_SIZE   FRAMESIZE_SVGA   /* 改成 FRAMESIZE_VGA 可提高帧率 */
 #define CAM_PIXEL_FORMAT PIXFORMAT_JPEG
 #define CAM_JPEG_QUALITY 12
-#define CAM_FB_COUNT     2
+#define CAM_FB_COUNT     3
 ```
 
 ### 实测数据
@@ -705,7 +705,71 @@ xQueueTakeMutexRecursive FreeRTOS-Kernel/queue.c:835
 
 ---
 
-## 15. 目录结构
+## 15. 帧率问题的完整调查（三个版本才定位）
+
+现象：`/stream` 只有 1~2 fps。最终：**28.3 fps / 464~511 KB/s / 单帧发送 15.5 ms / 0 次发送失败**。
+
+### 15.1 先让设备自己说时间花在哪
+
+在流任务里把每帧拆成两段计时（`stream.c`），每 50 帧打一行：
+
+```
+50 frames in 1.8 s (28.3 fps) | grab avg 19.9 ms (max 30.6) | send avg 15.5 ms (max 94.8) |
+jpeg avg 16.4 KB (min 14.7 max 18.5) | 464 KB/s | send failures 0
+```
+
+- `grab` = 等 `esp_camera_fb_get()` 返回一帧
+- `send` = 把 JPEG 写进 socket
+- 这一行是整件事的转折点。**修复前它是 `grab 16 ms / send 494 ms`** —— 97% 的时间卡在 socket 写入，摄像头有 20 倍以上余量。没有它，前几轮都在错误的地方找原因。
+
+### 15.2 三个原因（相乘，不是相加）
+
+**① Nagle 从来没关（最主要）**
+
+`esp_http_server` 不设置 `TCP_NODELAY`，而一帧要分几次写（chunk 头、part 前缀、JPEG、结束符）。Nagle 会把小片段压住、等前面的数据被 ACK，再叠加对端的延迟 ACK：
+
+- 11.7 KB 的帧，`send` 平均 **494 ms**，而链路 RTT 只有 66 ms —— 每帧白等 1~2 个往返
+- 帧一大就从小减速变成**彻底堵死**：`httpd_sock_err: error in send : 11`（EAGAIN），设备写了 105 KB 而客户端只收到 35 KB
+
+修复：在流 socket 上用 `httpd_req_to_sockfd()` + `setsockopt(TCP_NODELAY)`。**494 ms → 15.5 ms（32 倍）**。
+同时把 `send_wait_timeout` 从 10 s 降到 3 s，卡死的客户端更早被放弃。
+
+**② 发送期间一直攥着摄像头帧缓冲**
+
+流任务在整个发送期间持有帧缓冲。`fb_count=2` 时**两个客户端就把两块缓冲全占满 → 摄像头流水线永久冻结**（日志：`frames=9` 之后再也不动，同时 `clients=2`）。
+
+修复：先把 JPEG 拷到本任务的 PSRAM 暂存区、立刻归还摄像头缓冲，再做网络发送；`fb_count` 提到 3。
+
+**③ 3.3V 轨供不动 20 dBm 的发射电流尖峰**
+
+同一个固件（0.2.8）下，**接 LCD 185 KB/s，不接 LCD 18 KB/s，相差 10 倍**。LCD 模块在充当额外的去耦电容。
+
+确定是「发射侧」而不是「天线」的判据：**天线收发共用**。设备收到 AP 的信号是 -33 dBm（很强），说明天线和接收都好；而接收电流小、**发射才是电流尖峰**，所以只有上行方向坏 —— 小包 0% 丢包但 RTT 66~154 ms（重传），1.2 KB 的状态页 0.19 s 正常，11.7 KB 的 TCP 帧却堵死。
+
+修复：`CONFIG_WIFI_MAX_TX_POWER_DBM`（默认 10）。AP 就在旁边，链路预算有几十 dB 余量，**把发射功率降下来、尖峰电流减半就够了 —— 不需要在开发板上焊电容**。
+
+### 15.3 OTA 一直是「GET -> HTTP 0」的原因
+
+另一个独立的真机 bug：`esp_http_client_get_status_code()` **必须**在
+`esp_http_client_fetch_headers()` **之后**调用 —— 响应头还没读进来时它返回 0。
+原代码在 `esp_http_client_open()` 之后立刻取状态码，于是一律读到 0、判定失败、
+不读响应体就关连接。服务器侧的表现正好是证据：
+
+```
+192.168.3.118  "GET /manifest.json HTTP/1.1" 200 -      ← 服务器回了 200
+ConnectionResetError: [Errno 54] Connection reset by peer ← 设备不读响应体就关连接
+```
+
+两个调用点都修了（manifest 抓取、固件下载），后者本来也会踩同一个坑。
+
+### 15.4 教训
+
+- **先让设备报告时间构成**，不要在主机侧猜。`grab` vs `send` 一行就结束了前几轮的猜测。
+- **一次只动一个变量**。中间有一轮同时换了固件和 LCD，导致「LCD 是主因」的错误结论，
+  直到用同一固件跑出 18 KB/s vs 185 KB/s 才把两个因素分开。
+- 诊断行里的 `fps=` 是**瞬时 EMA**，卡顿后连发两帧会飙到 218 —— 不要信它，看 `frames=` 的增量。
+
+## 16. 目录结构
 
 ```
 parking-lot-navigation/
