@@ -94,6 +94,9 @@ class VehiclePose:
     # much darker it is than the rest. Both are diagnostic; they feed front_evidence.
     band_pos: Optional[float] = None
     band_contrast: float = 0.0
+    # Grey levels between the two ends after removing the lighting trend. Positive means the
+    # +axis end is brighter, which by the car's paint pattern means the front is that way.
+    ends_grey: float = 0.0
     # Signed and normalised: +1 means the front is at the +axis end.
     front_evidence: Optional[float] = None
     front_heading: Optional[float] = None
@@ -162,9 +165,26 @@ def touches_border(bbox: Sequence[int], shape: Sequence[int],
 # So the band leads and the taper is the fallback. Both are expressed as a signed "evidence"
 # in -1..1 pointing along the axis, normalised by how strong that cue usually gets, so one set
 # of thresholds works for either.
-BAND_MIN_CONTRAST = 15.0     # grey levels; below this there is no band to speak of
-BAND_SCALE = 0.5             # a band this far from the middle is fully convincing
-TAPER_SCALE = 0.20           # likewise for the taper
+# The ends of the car, which is the cue that works.
+#
+# The car is red, black, red, black from front to rear - bonnet, front glass, roof, rear glass.
+# That is why the previous cue failed: such a pattern has *two* dark bands, so "where is the
+# darkest band" picks whichever of the two happens to be darker at that moment. Tilting the car
+# or pushing it into different light swaps which one that is, the band position jumps from one
+# end to the other, and the front flips - although the car's front has not moved at all.
+#
+# The two ends do not swap: red at the front against black at the rear. Measured on the real
+# car, 13.8 grey levels apart with 0.3 to 0.6 of frame-to-frame noise, and the brighter end is
+# the front.
+#
+# A lighting gradient across the car would also make one end look brighter than the other, so
+# the profile's linear trend is removed first. What is compared is each end's tone *relative to
+# that trend* - the pattern rather than the lighting.
+ENDS_MIN_GREY = 4.0          # grey levels; below this there is no usable end-to-end difference
+ENDS_SCALE = 12.0            # ...and what counts as fully convincing
+BAND_MIN_CONTRAST = 15.0     # only used to report the band now; it no longer decides anything
+BAND_SCALE = 0.5
+TAPER_SCALE = 0.20           # fallback cue, for a car with no usable pattern
 KEEP_EVIDENCE = 0.25         # below this, do not claim a front at all
 FLIP_EVIDENCE = 0.60         # to change an established front, this much the other way...
 
@@ -304,27 +324,46 @@ class VehicleTracker:
                        front_heading=front if known else None, front_is_known=known)
 
 
-def band_of(along: np.ndarray, tones: np.ndarray, bins: int = 12
-            ) -> Tuple[Optional[float], float]:
-    """Where the dark stretch sits along the axis, and how dark it is against the rest.
+def profile_of(along: np.ndarray, tones: np.ndarray, bins: int = 24
+               ) -> Optional[np.ndarray]:
+    """The brightness profile along the car's axis: one mean tone per slice.
 
-    No rotation is needed: the pixels are projected onto the axis, and the grey values are
-    averaged per slice. Same quantity as measuring the brightness profile of an aligned crop,
-    for a fraction of the cost.
+    No rotation needed - the pixels are projected onto the axis and their grey values averaged
+    per slice, which is the same as measuring an aligned crop for a fraction of the cost.
     """
-    if len(along) < 20:
-        return None, 0.0
+    if len(along) < 30:
+        return None
     lo, hi = float(along.min()), float(along.max())
-    if hi - lo < 8:
-        return None, 0.0
+    if hi - lo < 12:
+        return None
     index = np.clip(((along - lo) / (hi - lo) * bins).astype(int), 0, bins - 1)
     sums = np.bincount(index, weights=tones, minlength=bins)
     counts = np.bincount(index, minlength=bins)
     if not counts.all():
-        return None, 0.0
-    profile = sums / counts
-    contrast = float(profile.max() - profile.min())
-    return float((int(np.argmin(profile)) + 0.5) / bins), contrast
+        return None
+    return sums / counts
+
+
+def ends_of(profile: np.ndarray, fraction: int = 4
+            ) -> Tuple[float, float]:
+    """The tone at the two ends, each relative to the profile's linear trend.
+
+    Returns (plus_end - minus_end, magnitude) in grey levels. Positive means the end in the
+    +axis direction is brighter. Removing the trend is what makes this a measurement of the
+    car's pattern rather than of how the light happens to fall across it.
+    """
+    bins = len(profile)
+    trend = np.polyval(np.polyfit(np.arange(bins, dtype=float), profile, 1),
+                       np.arange(bins, dtype=float))
+    detrended = profile - trend
+    difference = float(detrended[-fraction:].mean() - detrended[:fraction].mean())
+    return difference, abs(difference)
+
+
+def band_of(profile: np.ndarray) -> Tuple[float, float]:
+    """Where the darkest stretch sits along the axis, and its contrast. Reported, not used."""
+    return float((int(np.argmin(profile)) + 0.5) / len(profile)), \
+        float(profile.max() - profile.min())
 
 
 def taper_of(points: np.ndarray, heading: float, bins: int = 12) -> float:
@@ -388,13 +427,23 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
         taper = taper_of(points, heading)
         radians = np.radians(heading)
         along = points[:, 0] * np.cos(radians) + points[:, 1] * np.sin(radians)
-        band_pos, band_contrast = band_of(along, gray_values)
+        profile = profile_of(along, gray_values)
+        band_pos: Optional[float] = None
+        band_contrast = 0.0
+        if profile is not None:
+            band_pos, band_contrast = band_of(profile)
 
-        # Which end the front is on, as a signed evidence along the axis.
+        # Which end the front is on, as signed evidence along the axis: +1 means the +axis end.
+        # The car's pattern is the first choice - the brighter end is the front - and the taper
+        # of the silhouette is the fallback for a car with no usable pattern.
         evidence: Optional[float] = None
-        if band_pos is not None and band_contrast >= BAND_MIN_CONTRAST:
-            evidence = float(np.clip((band_pos - 0.5) * 2.0 / BAND_SCALE, -1.0, 1.0))
-        elif abs(taper) >= MIN_TAPER:
+        ends_grey = 0.0
+        if profile is not None:
+            difference, magnitude = ends_of(profile)
+            ends_grey = difference
+            if magnitude >= ENDS_MIN_GREY:
+                evidence = float(np.clip(difference / ENDS_SCALE, -1.0, 1.0))
+        if evidence is None and abs(taper) >= MIN_TAPER:
             signed = taper if FRONT_IS_THE_WIDER_END else -taper
             evidence = float(np.clip(signed / TAPER_SCALE, -1.0, 1.0))
         if elongation < 1.6:
@@ -410,6 +459,7 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
                                fill=area / max(w * h, 1), bbox=(x, y, w, h),
                                heading_pca=heading_pca, taper=taper,
                                band_pos=band_pos, band_contrast=band_contrast,
+                               ends_grey=ends_grey,
                                front_evidence=evidence,
                                front_heading=front_heading, front_is_known=front_known))
     out.sort(key=lambda p: -p.area)
