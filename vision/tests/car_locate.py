@@ -1,22 +1,17 @@
-"""Locate the hero car by colour and shape. A prototype, and it measures before it decides.
+"""Check the hero car's localisation, using the same code main.py uses.
 
-    python tests/car_locate.py                       # whole frame, 10 frames, save a debug image
-    python tests/car_locate.py --bay B4              # look inside one bay as well
-    python tests/car_locate.py --hues                # what colours are actually in the frame
+    python tests/car_locate.py                 # one reading, plus how steady it is
+    python tests/car_locate.py --watch         # once a second until Ctrl-C: move the car
+    python tests/car_locate.py --front         # the two cues that could tell front from back
+    python tests/car_locate.py --hues          # what hues are actually in the frame
 
-Why this exists rather than a marker: the job is to know where the car is and which way it
-points. A marker gives that precisely, but needs to be nearly half the car's width and flat
-towards the camera to be readable at 800x600 across a whole sandbox - and it is not being
-read. Colour and shape need no hardware and no reference frame, so they are unaffected by the
-two things that were wrecking measurements here: lighting changes and sub-pixel shifts of the
-painted bay lines.
+This deliberately contains no detection code of its own. It calls src/vehicle.py, the same
+module main.py calls, so the tool cannot drift away from what the product does - which is what
+happened when this file was first written, before that module existed.
 
-What it cannot do, and this is the honest limit: a car's long axis has no front. PCA gives the
-axis, not the direction of travel, so the heading is known modulo 180 degrees. If navigation
-needs to know which end is the front, that needs something on the car that is not symmetric -
-which is exactly what a marker is for.
-
-Nothing here is wired into the contract yet.
+`--hues` is the exception and it is the reason the thresholds are what they are: the red car
+measures hue 0..2 and 176..179, while the orange-red trim along the top of the enclosure
+measures 11..15. Reading the hues off a real frame is how those numbers were chosen.
 """
 
 from __future__ import annotations
@@ -25,128 +20,134 @@ import argparse
 import os
 import sys
 import time
-from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
+import vehicle                                                  # noqa: E402
 from camera import open_camera                                  # noqa: E402
 from road_network import RoadNetwork                            # noqa: E402
 from spot_config import load_spots                              # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-# Red wraps around the hue circle, so it takes two ranges. Saturation and value floors keep
-# washed-out and very dark pixels out - grey floor is unsaturated, so this does most of the
-# work before any shape reasoning.
-# Chosen from the frame, not guessed: the red car measures H=0..2 and 176..179 with S>=90
-# and V>=60, while the orange-red strip along the top edge of the enclosure sits at H=11..15.
-# The first thresholds used H<=12 and swallowed it, which is how a strip of trim at the top of
-# the picture became the largest "red object" in the frame.
-RED_RANGES = (((0, 90, 60), (3, 255, 255)), ((176, 90, 60), (180, 255, 255)))
+
+def grab(source: str, count: int, timeout: float = 90.0):
+    cam = open_camera(source)
+    frames, started = [], time.time()
+    try:
+        while len(frames) < count and time.time() - started < timeout:
+            f = cam.read()
+            if f is not None:
+                frames.append(f)
+    finally:
+        cam.close()
+    return frames
 
 
-def red_mask(hsv: np.ndarray) -> np.ndarray:
-    mask = np.zeros(hsv.shape[:2], np.uint8)
-    for lo, hi in RED_RANGES:
-        mask |= cv2.inRange(hsv, np.array(lo, np.uint8), np.array(hi, np.uint8))
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k)
-    # Close with a big kernel: the car's red area breaks into two pieces wherever a dark
-    # band crosses it (a shadow along the side, the join between body and roof), and a
-    # centroid that jumps between two halves is what the x jitter of +/-7px was. Nothing
-    # else red is nearby, so joining pieces a dozen pixels apart costs nothing.
-    big = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, big)
-    # Fill holes. A car's windows, its shadowed side and any dark trim drop out of the colour
-    # mask and leave holes inside the blob; those holes are what made the axis jump between
-    # two orientations from frame to frame, because PCA weighs every pixel and the holes come
-    # and go. Flood filling from the border and inverting keeps the outline and loses the holes.
-    holes = mask.copy()
-    cv2.floodFill(holes, np.zeros((mask.shape[0] + 2, mask.shape[1] + 2), np.uint8), (0, 0), 255)
-    return mask | cv2.bitwise_not(holes)
-
-
-def touches_border(bbox, shape, margin: int = 2) -> bool:
-    """True when a blob runs into the edge of the picture.
-
-    The lighting along the top of the enclosure is orange-red and shows up as a big blob.
-    A car parked in the lot does not sit half outside the frame, so this is cheap and safe.
-    """
-    x, y, w, h = bbox
-    return x <= margin or y <= margin or x + w >= shape[1] - margin or y + h >= shape[0] - margin
-
-
-def describe(mask: np.ndarray, min_area: int = 80) -> List[dict]:
-    """Every red blob big enough to be a car, with its position and its axis."""
-    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
-    out = []
-    for i in range(1, count):
-        area = int(stats[i, 4])
-        if area < min_area:
-            continue
-        x, y, w, h = (int(stats[i, 0]), int(stats[i, 1]), int(stats[i, 2]), int(stats[i, 3]))
-        ys, xs = np.where(labels == i)
-        points = np.column_stack([xs, ys]).astype(np.float32)
-        centre = points.mean(axis=0)
-        cov = np.cov((points - centre).T)
-        values, vectors = np.linalg.eigh(cov)
-        major = vectors[:, int(np.argmax(values))]
-        heading = float(np.degrees(np.arctan2(major[1], major[0]))) % 180.0
-        elongation = float(np.sqrt(max(values) / max(min(values), 1e-6)))
-        rect = cv2.minAreaRect(points)
-        (rdx, rdy), (rw, rh), rangle = rect
-        # Long axis of the fitted rectangle, as an angle in 0..180. Usually steadier than PCA
-        # on a blob whose outline flickers: the rectangle depends on the extremes, PCA on
-        # every pixel.
-        rect_heading = (rangle if rw >= rh else rangle + 90.0) % 180.0
-        out.append({
-            "area": area, "bbox": (x, y, w, h),
-            "centre": (float(centre[0]), float(centre[1])),
-            "heading": heading, "elongation": elongation,
-            "rect_heading": float(rect_heading),
-            "rect_size": (float(rect[1][0]), float(rect[1][1])),
-            "rect_angle": float(rect[2]),
-            "fill": area / max(w * h, 1),
-        })
-    out.sort(key=lambda b: -b["area"])
-    return out
-
-
-def bay_containing(spots, x: float, y: float) -> Optional[str]:
-    for spot in spots:
-        if cv2.pointPolygonTest(np.asarray(spot.polygon, np.float32), (x, y), False) >= 0:
-            return spot.id
-    return None
-
-
-def hue_report(hsv: np.ndarray) -> None:
-    """Which hues are actually present, so the thresholds are chosen from data."""
-    sat = hsv[:, :, 1].astype(int)
-    strong = sat >= 90
+def hue_report(frame: np.ndarray) -> None:
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    strong = hsv[:, :, 1] >= 90
     print(f"  饱和像素 (S>=90): {strong.mean() * 100:.1f}%")
     if not strong.any():
         return
     hist = np.bincount(hsv[:, :, 0][strong].ravel(), minlength=180)
-    top = np.argsort(hist)[::-1][:10]
-    print("  色相分布 (H 值 0-180，红色在 0 附近和 168-180):")
-    for h in sorted([int(t) for t in top if hist[t] > 0]):
+    print("  色相分布 (红在 0 附近和 168-180)：")
+    for h in sorted(int(v) for v in np.argsort(hist)[::-1][:10] if hist[v] > 0):
         print(f"    H={h:3d}  {hist[h]:6d} px")
+
+
+def describe_pose(pose, location) -> str:
+    where = ""
+    if location:
+        if location["kind"] == "spot":
+            where = f"  在车位 {location['id']}"
+        elif location["kind"] == "road":
+            where = f"  在路上 (距路 {location['distance_to_road']:.0f}px)"
+        elif location["kind"] == "floor":
+            where = f"  在空地 (距路 {location['distance_to_road']:.0f}px)"
+    agree = min(abs(pose.heading - pose.heading_pca),
+                180 - abs(pose.heading - pose.heading_pca))
+    trust = ("可信" if pose.elongation >= 1.6 and agree <= 10
+             else "形状可疑 —— 长轴读数不可信")
+    return (f"  ({pose.x:6.1f},{pose.y:6.1f})  轴 {pose.heading:5.1f}°  "
+            f"伸长比 {pose.elongation:.2f}  PCA {pose.heading_pca:5.1f}° (差 {agree:.1f}°)  "
+            f"面积 {pose.area}  {trust}{where}")
+
+
+def front_signals(frames, args) -> int:
+    """Measure the two cues that could tell the car's front from its back.
+
+    Both are measured *inside* the red mask, so neither can be a shadow lying on the ground.
+    The only question left is whether they belong to the car or to the lighting. A design
+    feature - a windscreen, a tapered nose - stays with the car when it is turned around; a
+    lighting effect stays with the world. So the test is: turn the car 180 degrees and run this
+    again.
+    """
+    bins = 24
+    rows = []
+    for frame in frames:
+        pose = vehicle.locate(frame, min_area=args.min_area, keep_border=args.keep_border)
+        if pose is None:
+            continue
+        mask = vehicle.red_mask(cv2.cvtColor(frame, cv2.COLOR_BGR2HSV))
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        size = (frame.shape[1] * 2, frame.shape[0] * 2)
+        rot = cv2.getRotationMatrix2D((pose.x, pose.y), pose.heading, 1.0)
+        aligned = cv2.warpAffine(mask, rot, size)
+        aligned_gray = cv2.warpAffine(gray, rot, size)
+        ys, xs = np.where(aligned > 0)
+        if not len(xs):
+            continue
+        sub = aligned[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+        subg = aligned_gray[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+        length = sub.shape[1]
+        widths = (sub > 0).sum(axis=0).astype(float)
+        prof = np.array([widths[int(i * length / bins):int((i + 1) * length / bins)].mean()
+                         for i in range(bins)])
+        taper = ((prof[-(bins // 4):].mean() - prof[:bins // 4].mean())
+                 / max(prof[-(bins // 4):].mean() + prof[:bins // 4].mean(), 1e-6))
+        tones = []
+        for i in range(bins):
+            seg = subg[:, int(i * length / bins):int((i + 1) * length / bins)]
+            m = sub[:, int(i * length / bins):int((i + 1) * length / bins)] > 0
+            tones.append(seg[m].mean() if m.any() else np.nan)
+        tones = np.array(tones)
+        rows.append((taper, int(np.nanargmin(tones)) / bins,
+                     float(np.nanmax(tones) - np.nanmin(tones))))
+    if not rows:
+        print("没有找到红车")
+        return 1
+    a = np.array(rows)
+    print(f"{len(a)} 帧:")
+    print(f"  形状锥度 (右端比左端宽多少): 均值 {a[:,0].mean():+.3f}  "
+          f"标准差 {a[:,0].std():.3f}  "
+          f"{'✅ 符号稳定' if a[:,0].std() < abs(a[:,0].mean()) else '⚠️ 噪声比信号大'}")
+    print(f"  最暗一段位于轴上            : 均值 {a[:,1].mean()*100:.0f}%  "
+          f"标准差 {a[:,1].std()*100:.0f}%")
+    print(f"  明暗对比                    : {a[:,2].mean():.1f} 灰阶")
+    print()
+    print("把车**原地转 180°** 再运行一次，对比：")
+    print("  形状锥度**符号翻转**  → 车身形状 ✅ 可用")
+    print("  形状锥度**符号不变**  → 光照切掉了一段红漆 ✗ 不可用")
+    print("  暗带**变成 ~33%**     → 车的设计特征（挡风玻璃）✅ 可用")
+    print("  暗带**仍在 ~67%**     → 光照效果（背光侧暗）✗ 不可用")
+    return 0
 
 
 def watch(args) -> int:
     """Print the reading once a second until interrupted.
 
-    This is how the prototype is meant to be checked: pick the car up, and see whether the
+    This is how the localisation is meant to be checked: pick the car up and see whether the
     numbers follow it. A single reading cannot show that a measurement tracks anything.
     """
     cam = open_camera(args.source)
     spots = load_spots(args.config, (600, 800)) if os.path.exists(args.config) else []
-    roads = RoadNetwork.load(args.config, (600, 800)) if os.path.exists(args.config) else None
+    roads = RoadNetwork.load(args.config) if os.path.exists(args.config) else None
     print("每秒输出一次；挪车看数字跟不跟。Ctrl-C 结束。\n")
-    print(f"{'时间':>6}  {'位置':>14}  {'朝向':>7}  {'伸长':>5}  {'面积':>6}  位置")
+    print(f"{'时间':>6}  {'位置':>15}  {'轴':>7}  {'伸长':>5}  {'面积':>6}  位置")
     started = time.time()
     try:
         while True:
@@ -156,31 +157,20 @@ def watch(args) -> int:
                 if frame is not None:
                     break
             if frame is None:
-                print("  没有帧")
                 time.sleep(1)
                 continue
-            blobs = [b for b in describe(red_mask(cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)),
-                                         args.min_area)
-                     if args.keep_border or not touches_border(b["bbox"], frame.shape)]
-            if not blobs:
-                print(f"{time.time()-started:6.0f}  {'-':>14}  {'-':>7}  {'-':>5}  {'-':>6}  "
+            pose = vehicle.locate(frame, min_area=args.min_area,
+                                  keep_border=args.keep_border)
+            if pose is None:
+                print(f"{time.time()-started:6.0f}  {'-':>15}  {'-':>7}  {'-':>5}  {'-':>6}  "
                       f"看不到红车 (visible: false)")
             else:
-                b = blobs[0]
-                where = bay_containing(spots, *b["centre"])
-                if where:
-                    loc = f"车位 {where}"
-                elif roads is not None and roads.nodes:
-                    near = roads.closest_point(b["centre"][0], b["centre"][1], skip_stubs=True)
-                    loc = (f"路上 (距路 {near.distance:.0f}px)" if near and near.distance < 35
-                           else f"空地上 (距路 {near.distance:.0f}px)" if near else "?")
-                else:
-                    loc = "?"
-                print(f"{time.time()-started:6.0f}  ({b['centre'][0]:6.1f},{b['centre'][1]:6.1f})  "
-                      f"{b.get('rect_heading', b['heading']):6.1f}°  {b['elongation']:5.2f}  "
-                      f"{b['area']:6d}  {loc}")
-                if len(blobs) > 1:
-                    print(f"        另有 {len(blobs)-1} 个红块（面积 {[x['area'] for x in blobs[1:4]]}）")
+                loc = vehicle.location_of(pose, spots, roads)
+                where = (f"车位 {loc['id']}" if loc["kind"] == "spot"
+                         else f"{loc['kind']} (距路 {loc['distance_to_road']}px)"
+                         if loc["distance_to_road"] is not None else loc["kind"])
+                print(f"{time.time()-started:6.0f}  ({pose.x:6.1f},{pose.y:6.1f})  "
+                      f"{pose.heading:6.1f}°  {pose.elongation:5.2f}  {pose.area:6d}  {where}")
             time.sleep(1)
     except KeyboardInterrupt:
         print("\n结束")
@@ -190,146 +180,91 @@ def watch(args) -> int:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Find the hero car by colour and shape")
+    ap = argparse.ArgumentParser(description="Check the hero car localisation")
     ap.add_argument("--source", default="http://192.168.3.118/stream")
     ap.add_argument("--config", default=os.path.join(ROOT, "config", "parking_spots.json"))
-    ap.add_argument("--bay", default=None, help="also report what is inside this bay")
     ap.add_argument("--frames", type=int, default=10)
-    ap.add_argument("--hues", action="store_true", help="report the hues present and exit")
-    ap.add_argument("--min-area", type=int, default=80)
+    ap.add_argument("--min-area", type=int, default=vehicle.DEFAULT_MIN_AREA)
     ap.add_argument("--keep-border", action="store_true",
-                    help="also report blobs that run into the edge of the frame (default: "
-                         "ignore them, they are the enclosure's trim, not a car)")
+                    help="do not ignore red blobs that run into the edge of the picture")
+    ap.add_argument("--hues", action="store_true", help="report the hues in the frame and stop")
+    ap.add_argument("--front", action="store_true",
+                    help="measure the two cues that could tell front from back")
+    ap.add_argument("--watch", action="store_true", help="print once a second until Ctrl-C")
     ap.add_argument("--save", default=os.path.join(ROOT, "data", "debug", "car_locate.jpg"))
-    ap.add_argument("--watch", action="store_true",
-                    help="keep printing where the car is, once a second, until Ctrl-C - move "
-                         "the car and watch the numbers follow")
     args = ap.parse_args()
-
-    cam = open_camera(args.source)
-    frames = []
-    started = time.time()
-    while len(frames) < max(args.frames, 1) and time.time() - started < 90:
-        f = cam.read()
-        if f is not None:
-            frames.append(f)
-    cam.close()
-    if not frames:
-        print("error: no frames arrived", file=sys.stderr)
-        return 2
 
     if args.watch:
         return watch(args)
 
-    reference = frames[0]
-    hsv0 = cv2.cvtColor(reference, cv2.COLOR_BGR2HSV)
-    print(f"{len(frames)} 帧 {reference.shape[1]}x{reference.shape[0]}")
+    frames = grab(args.source, max(args.frames, 1))
+    if not frames:
+        print("error: no frames arrived", file=sys.stderr)
+        return 2
+    frame = frames[0]
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    print(f"{len(frames)} 帧 {frame.shape[1]}x{frame.shape[0]}  "
+          f"亮度 {gray.mean():.1f} 对比度 {gray.std():.1f} "
+          f"清晰度 {cv2.Laplacian(gray, cv2.CV_64F).var():.0f}")
 
     if args.hues:
-        hue_report(hsv0)
+        hue_report(frame)
         return 0
+    if args.front:
+        return front_signals(frames, args)
 
-    spots = load_spots(args.config, reference.shape[:2]) if os.path.exists(args.config) else []
-    roads = (RoadNetwork.load(args.config, reference.shape[:2])
-             if os.path.exists(args.config) else None)
+    spots = load_spots(args.config, frame.shape[:2]) if os.path.exists(args.config) else []
+    roads = RoadNetwork.load(args.config) if os.path.exists(args.config) else None
 
-    mask = red_mask(hsv0)
-    print(f"红色像素: {mask.mean() / 255 * 100:.2f}% of the frame")
-    blobs = describe(mask, args.min_area)
-    dropped = [b for b in blobs if touches_border(b["bbox"], reference.shape)]
-    if not args.keep_border:
-        blobs = [b for b in blobs if not touches_border(b["bbox"], reference.shape)]
-        if dropped:
-            print(f"  (忽略了 {len(dropped)} 个贴着画面边缘的红块 —— 那是围栏的颜色，不是车)")
-    print(f"\n=== 红色块 (面积 >= {args.min_area}) ===")
-    if not blobs:
-        print("  没有找到红色块 —— 把 --hues 的输出发我，我按实际色相调阈值")
-    for b in blobs[:6]:
-        x, y, w, h = b["bbox"]
-        where = bay_containing(spots, *b["centre"]) if spots else None
-        print(f"  面积 {b['area']:6d}  {w:3d}x{h:3d}px  @({b['centre'][0]:.0f},{b['centre'][1]:.0f})")
-        print(f"     朝向 {b['heading']:6.1f}° (mod 180)  伸长比 {b['elongation']:.2f}  "
-              f"填满度 {b['fill']:.2f}  外接旋转框 {b['rect_size'][0]:.0f}x{b['rect_size'][1]:.0f}")
-        if where:
-            print(f"     → 在车位 {where}")
-        elif roads is not None and roads.nodes:
-            near = roads.closest_point(b["centre"][0], b["centre"][1], skip_stubs=True)
-            if near is not None:
-                on = "在路上" if near.distance < 35 else "不在路上也不在车位里"
-                print(f"     → {on}（距最近的路 {near.distance:.0f}px）")
+    pose = vehicle.locate(frame, min_area=args.min_area, keep_border=args.keep_border)
+    print(f"\n=== 红车 ===")
+    if pose is None:
+        print("  找不到红车 —— visible: false（这是正确答案，不是失败）")
+    else:
+        print(describe_pose(pose, vehicle.location_of(pose, spots, roads) if roads else None))
+    extra = vehicle.locate_all(frame, min_area=args.min_area,
+                               keep_border=args.keep_border)
+    if len(extra) > 1:
+        print(f"  ⚠️ 还有 {len(extra)-1} 个红块（面积 {[p.area for p in extra[1:4]]}）—— "
+              f"如果有两个红车，'最大的那个'就是个武断的规则")
 
-    if args.bay and spots:
-        target = [s for s in spots if s.id == args.bay]
-        if target:
-            poly = np.asarray(target[0].polygon, np.float32)
-            x0, y0 = poly.min(axis=0).astype(int)
-            x1, y1 = poly.max(axis=0).astype(int)
-            inside = mask[y0:y1, x0:x1]
-            print(f"\n=== {args.bay} 区内 (x {x0}-{x1}, y {y0}-{y1}) ===")
-            print(f"  红色像素 {int(inside.sum() / 255)} / {inside.size} "
-                  f"= {inside.mean() / 255 * 100:.1f}%")
-            for b in describe(np.pad(inside, ((y0, 0), (x0, 0))), args.min_area)[:2]:
-                print(f"  区内红块 面积 {b['area']}  朝向 {b['heading']:.1f}°  "
-                      f"伸长比 {b['elongation']:.2f}")
-        else:
-            print(f"\n  车位 {args.bay} 不在配置里")
-
-    # How steady is it while nothing moves? That is the accuracy the navigator would get.
-    if len(frames) > 2:
-        # Track the object that was identified, not simply the biggest one each time: the
-        # biggest red thing in the frame is trim along the top edge, and measuring its
-        # comings and goings says nothing about how steady the car's reading is.
-        anchor = None
-        if args.bay and spots:
-            target = [s for s in spots if s.id == args.bay]
-            if target:
-                anchor = tuple(np.asarray(target[0].polygon, float).mean(axis=0))
-        elif blobs:
-            anchor = blobs[0]["centre"]
-        track = []
+    if len(frames) > 2 and pose is not None:
+        rows = []
         for f in frames[1:]:
-            m = red_mask(cv2.cvtColor(f, cv2.COLOR_BGR2HSV))
-            cands = [b for b in describe(m, args.min_area)
-                     if args.keep_border or not touches_border(b["bbox"], reference.shape)]
-            if not cands:
-                continue
-            b = (min(cands, key=lambda b: (b["centre"][0] - anchor[0]) ** 2
-                     + (b["centre"][1] - anchor[1]) ** 2) if anchor else cands[0])
-            track.append((b["centre"][0], b["centre"][1], b["heading"], b["area"],
-                          b.get("rect_heading", b["heading"])))
-        if len(track) > 2:
-            a = np.array(track)
-
-            def circ_std(deg):
-                rad = np.radians(deg * 2)
-                return np.degrees(np.sqrt(-2 * np.log(np.abs(np.mean(np.exp(1j * rad)))))) / 2
-
-            print(f"\n=== 静止时的抖动（{len(track)} 帧，车没动；填洞之后的读数）===")
+            p = vehicle.locate(f, min_area=args.min_area, keep_border=args.keep_border)
+            if p is not None:
+                rows.append((p.x, p.y, p.heading, p.area))
+        if len(rows) > 2:
+            a = np.array(rows)
+            angles = np.radians(a[:, 2] * 2)
+            std = np.degrees(np.sqrt(-2 * np.log(np.abs(np.mean(np.exp(1j * angles)))))) / 2
+            print(f"\n=== 静止时的抖动（{len(a)} 帧，车没动）===")
             print(f"  位置 x±{a[:,0].std():.2f}px  y±{a[:,1].std():.2f}px")
-            print(f"  面积 中位 {int(np.median(a[:,3]))}px² (±{a[:,3].std() / max(np.median(a[:,3]), 1) * 100:.1f}%)")
-            print(f"  PCA      朝向 ±{circ_std(a[:,2]):.2f}°   读数 {[round(v,1) for v in a[:,2]]}")
-            print(f"  minAreaRect 朝向 ±{circ_std(a[:,4]):.2f}°   读数 {[round(v,1) for v in a[:,4]]}")
-            best = min(circ_std(a[:,2]), circ_std(a[:,4]))
-            print(f"\n  对照导航需求 (位置 ±5px, 朝向 ±15°): "
-                  + ("✅ 达标" if a[:,0].std() <= 5 and a[:,1].std() <= 5 and best <= 15
-                     else "❌ 还差一点"))
+            print(f"  轴向 ±{std:.2f}°   面积 中位 {int(np.median(a[:,3]))}px²")
+            print(f"  对照导航需求 (位置 ±5px, 朝向 ±15°): "
+                  + ("✅ 达标" if a[:,0].std() <= 5 and a[:,1].std() <= 5 and std <= 15
+                     else "❌ 不足"))
 
     try:
         os.makedirs(os.path.dirname(os.path.abspath(args.save)), exist_ok=True)
-        draw = reference.copy()
-        for b in blobs[:4]:
-            x, y, w, h = b["bbox"]
-            cv2.rectangle(draw, (x, y), (x + w, y + h), (0, 255, 0), 1)
-            c = (int(b["centre"][0]), int(b["centre"][1]))
-            length = max(w, h) * 0.6
-            rad = np.radians(b["heading"])
-            tip = (int(c[0] + length * np.cos(rad)), int(c[1] + length * np.sin(rad)))
-            cv2.arrowedLine(draw, c, tip, (0, 0, 255), 2, tipLength=0.25)
-            rect_deg = b.get("rect_heading", b["heading"])
-            cv2.putText(draw, f"PCA {b['heading']:.0f} / rect {rect_deg:.0f}", (x, max(y - 4, 12)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        draw = frame.copy()
+        for p in extra:
+            x, y, w, h = p.bbox
+            cv2.rectangle(draw, (x, y), (x + w, y + h), (255, 120, 0), 2)
+            rad = np.radians(p.heading)
+            length = max(w, h) * 0.7 / 2
+            p0 = (int(p.x - length * np.cos(rad)), int(p.y - length * np.sin(rad)))
+            p1 = (int(p.x + length * np.cos(rad)), int(p.y + length * np.sin(rad)))
+            cv2.line(draw, p0, p1, (255, 120, 0), 2)
+            for q in (p0, p1):
+                cv2.circle(draw, q, 5, (255, 120, 0), 2)
+            cv2.putText(draw, f"({p.x:.0f},{p.y:.0f}) axis {p.heading:.0f}",
+                        (max(x - 20, 6), max(y - 8, 14)), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        (255, 120, 0), 1)
         cv2.imwrite(args.save, draw)
-        print(f"\n标注图: {os.path.abspath(args.save)}（绿框=红色块, 红箭头=长轴方向）")
+        cv2.imwrite(os.path.join(os.path.dirname(os.path.abspath(args.save)), "car_mask.png"),
+                    vehicle.red_mask(cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)))
+        print(f"\n标注图: {os.path.abspath(args.save)}（橙框 = 检测到的车）")
     except OSError as exc:
         print(f"  could not save: {exc}", file=sys.stderr)
     return 0
