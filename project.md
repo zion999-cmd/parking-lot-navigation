@@ -36,6 +36,7 @@ ESP32 导航小车（车位级导航）◄── 下一步
 | **P0001** | ESP32-S3-CAM 作为局域网 MJPEG 相机 | ✅ **已验收** | 800x600 SVGA / JPEG、`/stream` 稳定 20+ fps、`/` 状态页、启动日志四条约定齐全 |
 | **P0001.1** | Wi-Fi 配网（SoftAP+强制门户+NVS）＋ 薄 OTA（A/B 分区、SHA256、原生回滚） | ✅ **已验收** | **0.2.10 → 0.2.11 真机 OTA 升级成功，20 秒，`slot ota_0` → `slot ota_1`，全程不按 BOOT 键** |
 | **P0001.2** | 板载 TFT 状态屏（ST7789 240x240） | ⚠️ **代码就绪，画面未目视确认** | 分带刷新修复后不再 OOM；`disp=` 计数正常递增；**但从没人看过屏幕到底显示了什么** |
+| **P0003** | PC/Web 端导航：指定车位 → 规划 Route → 地图可视化 | ✅ **第一阶段完成** | 真实契约端到端：指定空车位 10 → `r17→r8` 11 节点 608px；有车/不存在/不可达各自正确拒绝（§8） |
 | **P0002** | PC 端车位占用检测（OpenCV）＋ **停车场地图** ＋ **输出契约** | ✅ **已可用** | 48 个车位空/占用识别正确（静止场景下 48/48 稳定为 0 差异）；地图：**48/48 车位入口自动派生、全部从入口可达**，两端车位可手工纠正；契约：`parking_map.json` + `parking_state.json`（含 `UNKNOWN`）—— 见 §7 |
 
 ### 2.2 实测数字（固件 0.2.9~0.2.11）
@@ -50,7 +51,7 @@ ESP32 导航小车（车位级导航）◄── 下一步
 | 内存 | `heap_internal` ~123 KB（streaming）／~129 KB（idle），**无泄漏** |
 | 视觉阈值 | `changed_ratio ≥ 0.15` 判占用，逐像素阈值 25（灰阶），blur 5 |
 | 车位几何 | 48 个，全部 47~48 × 100~104 px，**两两重叠 0 对** |
-| 测试 | **180 项全绿**（occupancy 19 / detector 17 / editor 37 / alignment 15 / road 49 / contract 15 / vehicle 25） |
+| 测试 | **198 项全绿**（occupancy 19 / detector 17 / editor 37 / alignment 15 / road 49 / contract 15 / vehicle 28 / **route 18**） |
 | 主车定位 | 位置 **±0.25px**、长轴 **±0.8°**、**车头方向 60/60 帧稳定**（涂装图案 + 人工指定一次）—— 颜色+形状，**不用标记**（§7.4.1） |
 
 ### 2.3 还没验证的（诚实清单）
@@ -138,6 +139,9 @@ P=/usr/local/Caskroom/miniconda/base/envs/vision-dev/bin/python
 | `src/contract.py` | **P0002 输出契约**：生成 `parking_map` / `parking_state` 两个文档（§7） | — |
 | `src/vehicle.py` | **主车定位**：颜色 + 形状 → `x/y/heading`，并判定「在哪个车位 / 在路上」（§7.4.1） | — |
 | `src/emit_map.py` | **发射静态契约**：配置 → `out/parking_map.json` | `$P src/emit_map.py [--strict]` |
+| `src/route.py` | **导航层**：只读两个契约文档 → Dijkstra 规划 Route（§8） | — |
+| `src/plan.py` | **规划一条路线**并写出 `out/route.json` | `$P src/plan.py --spot 10 [--verbose]` |
+| `web/index.html` | **Route 可视化**（单文件、无依赖、画在地图契约上） | `python3 -m http.server 8010` 后打开 |
 | `tests/car_locate.py` | **主车定位的独立检查工具**（`--watch` 每秒打印，挪车看数字跟不跟） | `$P tests/car_locate.py --watch` |
 
 > ⚠️ **注意这个仓库有两个 `tests/` 目录，很容易走错：**
@@ -688,10 +692,98 @@ MAX_MISSES = 5                  # 短暂丢失（遮挡/运动模糊）不清空
 | `vision/config/parking_spots.json` | **人画的**：车位 ＋ 道路（只含决定，可手工编辑） | 地图工具 |
 | `vision/out/parking_map.json` | **生成的契约**：含派生出的接入点与导航图 | `src/emit_map.py` |
 | `vision/out/parking_state.json` | **实时契约**：状态 ＋ 主车 | `src/main.py` |
+| `vision/out/route.json` | **规划结果（P0003）**：目标车位 + 节点链 + 距离 | `src/plan.py` |
 
 ---
 
-## 8. 已知限制与坑
+## 8. P0003 导航（第一阶段）
+
+**输入严格是 P0002 的两个契约文档** ✓ —— `src/route.py` **不 import** 相机、OpenCV、
+`road_network` ✓✓。测试里那两张文档是**手写的** ✓ —— 如果它伸手去拿 P0002 的内部，测试就编不过 ✓。
+
+**做什么**：**你手动指定一个车位 ID** → 从**主车当前所在的道路节点**规划到该车位的
+`access` 节点 ✓。**不做什么**：自动选「最近/最优」车位、预约、收费、锁车、小车循迹 ✓
+
+### 8.1 Route 契约（`route/1`）
+
+```zsh
+$P src/emit_map.py                    # 静态世界
+$P src/main.py                        # 实时世界（运行期间持续写）
+$P src/plan.py --spot 10 --verbose    # 规划 → out/route.json
+```
+
+```json
+{
+  "schema": "route/1",
+  "generated_at": 1791297595,
+  "target_spot": "10",
+  "ok": true,
+  "code": "ok",
+  "reason": "11 node(s), 608px, and the car is 16px from the first one",
+  "start_node": "r17",
+  "target_node": "r8",
+  "nodes": ["r17", "r11", "r15", "r13", "r2", "r1", "r7", "r6", "r5", "r9", "r8"],
+  "distance": 608.0
+}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `nodes` | **只给节点 id** —— 几何已经在 `parking_map` 里了，复制过来就是两份真相 ✓ |
+| `distance` | 沿图累加的边权（像素）✓ |
+| `ok` / `code` / `reason` | **拒绝是一等公民** ✓ |
+
+**拒绝码**（稳定字符串，调用方可分支）：
+
+| code | 何时 |
+|---|---|
+| `no-such-spot` | 地图里没有这个车位 |
+| `spot-has-no-access` | 该车位没有道路接入点 |
+| `spot-not-free` | 车位是 **OCCUPIED 或 UNKNOWN** ✓（都拒绝，但理由不同 ✓） |
+| `hero-not-visible` | 主车没被定位到 |
+| `no-route` | 图上没有路径（或地图里没有路网）✓ |
+
+**退出码**：规划成功 **0**，**被拒绝 1** ✓ —— 脚本/测试不必解析文字 ✓
+
+**算法**：**Dijkstra** ✓（图上几百个节点，A\* 只会多一个把答案算错的途径 ✓）；
+`bidirectional: false` 的边**只在单方向出现** ✓（单向路不会被人从反方向走 ✓）
+
+### 8.2 Web 可视化（第一版）
+
+```zsh
+cd vision
+$P src/emit_map.py && $P src/main.py &        # 产出两个契约
+$P src/plan.py --spot 10                      # 规划一条
+python3 -m http.server 8010
+open http://localhost:8010/web/index.html
+```
+
+画布上能明确看到：**主车**（实心点=车头、空心=车尾 ✓）、**目标车位**（蓝框 ✓）、
+**规划路线**（黄线 ✓）、每个车位的**状态配色**（绿=空／红=有车／灰=不知道 ✓）、
+停车场大门、道路节点与边（**单向边画成虚线** ✓）。
+
+**第一版只「显示」Route** ✓ —— 页面按钮只**重新拉取文档** ✗，**不触发规划** ✓
+（那需要一个服务端接口 ✓，留到下一阶段 ✓）。**换了目标车位要重跑 `src/plan.py`** ✓。
+
+### 8.3 第一阶段验收
+
+> **「我指定一个空车位，系统知道我的红色 hero 在哪里，并在停车场地图上规划出一条
+> 从当前道路位置到该车位 access 的路线。」**
+
+实测（真实契约文档 + 真实主车位置）：
+
+| 用例 | 结果 |
+|---|---|
+| 指定**空**车位 `10` | ✅ `r17 → r8`，11 节点、608px —— 路线就是沿环路走：底部向西 → 左侧向上 → 进车位接入点 ✓ |
+| 指定**有车**的 `B1` | ✅ 拒绝 `spot-not-free`：`bay B1 is OCCUPIED - take another bay` |
+| 指定**不存在**的 `999` | ✅ 拒绝 `no-such-spot` |
+| **主车移动后** | ✅ `start_node`／距离／节点链都随之改变（有测试 ✓） |
+| **不可达目标** | ✅ 明确返回 `no-route`（有测试 ✓） |
+| 主车不可见 / 车位无接入点 | ✅ 各自返回 `hero-not-visible` / `spot-has-no-access` ✓ |
+
+---
+
+## 9. 已知限制与坑
 
 ### `align` 默认关闭：它的语义在这里不成立
 
@@ -752,7 +844,7 @@ vision/data/{debug,reference}/, vision/data/cases/*.csv
 
 ---
 
-## 9. 目录结构
+## 10. 目录结构
 
 ```
 parking-lot-navigation/
@@ -773,7 +865,7 @@ parking-lot-navigation/
 
 ---
 
-## 10. 下一步
+## 11. 下一步
 
 | | 内容 | 备注 |
 |---|---|---|
@@ -781,7 +873,8 @@ parking-lot-navigation/
 | 2 | **录 5 个验收案例并拟合阈值** | `--headless --csv` → `tests/fit_threshold.py`，把 0.15 从「经验值」变成「测量值」 |
 | 3 | **（可选）看情况补通道** | 现在 0 个车位离路超过 220px（引线 27~38px），**不补也行**；只有以后多了新区域、`p` 报「离路很远」时才需要 |
 | 4 | ~~P0002.5 — 主车定位~~ | ✅ **已完成**（见 §7.4.1）：颜色 + 形状，**不用标记**。精度 位置 ±0.25px / 轴向 ±0.8°，实测远超需求 |
-| 5 | **P0003 — 导航** | 输入已齐（`parking_map` 静态世界 + `parking_state` 实时状态含主车位置/车头）⇒ 做：找可用车位 → A*/Dijkstra → Route → 下发给小车。**不再碰视觉** ✓ |
+| 5 | ~~P0003 第一阶段~~ | ✅ **已完成**（§8）：指定车位 → Dijkstra → Route 契约 → Web 可视化 |
+| 6 | **P0003 下一阶段**（待你定） | 候选：① 页面按钮直接触发规划（需要一个小接口）② 自动选车位策略（最近/最优）③ 把「车头朝向」用于路径（例如要求车尾朝内）④ Route 下发给小车循迹 |
 
 > **P0002.5 的依赖已经就绪**：`cv2.aruco` 在当前的 `opencv-python 4.13.0` 里自带（**不需要**装 `opencv-contrib-python`，已实测）。
 >

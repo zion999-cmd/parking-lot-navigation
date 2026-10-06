@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>停车场导航 — Route 可视化</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, -apple-system, "PingFang SC", sans-serif;
+         margin: 0; background: #14161a; color: #e6e6e6; display: flex;
+         flex-direction: column; align-items: center; }
+  header { width: min(96vw, 1100px); padding: 14px 0 6px; }
+  h1 { font-size: 18px; margin: 0 0 6px; font-weight: 600; }
+  #result { font-size: 15px; padding: 8px 12px; border-radius: 6px;
+            background: #1d2026; border-left: 4px solid #666; }
+  #result.ok { border-left-color: #37d67a; }
+  #result.bad { border-left-color: #ff5c5c; }
+  #meta { color: #8b93a0; font-size: 12px; margin-top: 6px; }
+  canvas { background: #0b0d10; border: 1px solid #2a2f38; border-radius: 6px;
+           width: min(96vw, 1100px); height: auto; image-rendering: pixelated; }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 13px;
+            color: #b9c0cc; padding: 10px 0 24px; width: min(96vw, 1100px); }
+  .legend span { display: flex; align-items: center; gap: 6px; }
+  .sw { width: 14px; height: 14px; border-radius: 3px; display: inline-block; }
+  button { background: #2a2f38; color: #e6e6e6; border: 1px solid #3a4049;
+           border-radius: 6px; padding: 6px 12px; font-size: 13px; cursor: pointer; }
+  button:hover { background: #353b45; }
+</style>
+</head>
+<body>
+<header>
+  <h1>停车场导航 — Route 可视化</h1>
+  <div id="result">加载中…</div>
+  <div id="meta"></div>
+</header>
+<canvas id="map" width="800" height="600"></canvas>
+<div class="legend">
+  <span><i class="sw" style="background:#1f7a44"></i>EMPTY 空</span>
+  <span><i class="sw" style="background:#8c2f2f"></i>OCCUPIED 有车</span>
+  <span><i class="sw" style="background:#4a4f57"></i>UNKNOWN 不知道</span>
+  <span><i class="sw" style="background:#2a2f38;border:1px solid #4a4f57"></i>道路节点/边</span>
+  <span><i class="sw" style="background:#ffd166"></i>规划路线</span>
+  <span><i class="sw" style="background:#ff7a45;border-radius:50%"></i>红色主车（实心点=车头）</span>
+  <span><i class="sw" style="background:none;border:2px solid #66d9ff"></i>目标车位</span>
+  <button onclick="load()">重新加载</button>
+</div>
+
+<script>
+// Everything comes from the two contract documents P0002 emits, plus the route P0003 planned.
+// No geometry is duplicated here: the map already has the nodes, the edges and the bay
+// polygons, and the route is a list of node ids. This page only draws.
+const DOCS = { map: "../out/parking_map.json",
+               state: "../out/parking_state.json",
+               route: "../out/route.json" };
+
+async function getJSON(url) {
+  try {
+    const r = await fetch(url + "?t=" + Date.now());
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (e) { return null; }
+}
+
+const cv = document.getElementById("map");
+const ctx = cv.getContext("2d");
+
+function spotColours(state) {
+  if (state === "OCCUPIED") return { fill: "rgba(140,47,47,.55)", line: "#ff6b6b" };
+  if (state === "EMPTY")    return { fill: "rgba(31,122,68,.45)", line: "#37d67a" };
+  return { fill: "rgba(74,79,87,.35)", line: "#6b7280" };   // UNKNOWN
+}
+
+function draw(mapDoc, stateDoc, routeDoc) {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  const nodes = {};
+  for (const n of (mapDoc.road_network?.nodes ?? [])) nodes[n.id] = n;
+  const edges = mapDoc.road_network?.edges ?? [];
+  const states = stateDoc?.spots ?? {};
+
+  // roads first, so everything else sits on top
+  ctx.lineWidth = 2;
+  for (const e of edges) {
+    const a = nodes[e.from], b = nodes[e.to];
+    if (!a || !b) continue;
+    ctx.strokeStyle = e.bidirectional === false ? "#6b7280" : "#2a2f38";
+    if (e.bidirectional === false) ctx.setLineDash([4, 4]); else ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  ctx.fillStyle = "#3a4049";
+  for (const id in nodes) { const n = nodes[id]; ctx.fillRect(n.x - 1, n.y - 1, 2, 2); }
+
+  // bays, coloured by what the state document says
+  for (const s of (mapDoc.spots ?? [])) {
+    const c = spotColours(states[s.id]?.state);
+    ctx.beginPath();
+    s.polygon.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+    ctx.closePath();
+    ctx.fillStyle = c.fill; ctx.fill();
+    ctx.strokeStyle = c.line; ctx.lineWidth = 1; ctx.stroke();
+  }
+
+  // the car park gate
+  for (const g of (mapDoc.entrances ?? [])) {
+    const n = nodes[g.node];
+    if (!n) continue;
+    ctx.beginPath(); ctx.arc(n.x, n.y, 7, 0, Math.PI * 2);
+    ctx.strokeStyle = "#c084fc"; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = "#c084fc"; ctx.font = "11px system-ui";
+    ctx.fillText("门 " + g.node, n.x + 10, n.y - 8);
+  }
+
+  // the planned route
+  if (routeDoc?.ok && routeDoc.nodes?.length) {
+    ctx.beginPath();
+    routeDoc.nodes.forEach((id, i) => {
+      const n = nodes[id]; if (!n) return;
+      i ? ctx.lineTo(n.x, n.y) : ctx.moveTo(n.x, n.y);
+    });
+    ctx.strokeStyle = "#ffd166"; ctx.lineWidth = 4; ctx.lineJoin = "round";
+    ctx.stroke();
+    for (const id of routeDoc.nodes) {
+      const n = nodes[id]; if (!n) continue;
+      ctx.beginPath(); ctx.arc(n.x, n.y, 3, 0, Math.PI * 2);
+      ctx.fillStyle = "#ffd166"; ctx.fill();
+    }
+  }
+
+  // the target bay
+  const target = (mapDoc.spots ?? []).find(s => String(s.id) === String(routeDoc?.target_spot));
+  if (target) {
+    ctx.beginPath();
+    target.polygon.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+    ctx.closePath();
+    ctx.strokeStyle = "#66d9ff"; ctx.lineWidth = 3; ctx.stroke();
+    const [cx, cy] = target.polygon.reduce((a, p) => [a[0] + p[0], a[1] + p[1]], [0, 0])
+                                    .map(v => v / target.polygon.length);
+    ctx.fillStyle = "#66d9ff"; ctx.font = "bold 13px system-ui";
+    ctx.fillText("目标 " + target.id, cx - 22, cy + 4);
+  }
+
+  // the hero: filled dot at the front, hollow at the back, line along the axis
+  const v = stateDoc?.vehicle;
+  if (v?.visible) {
+    const r = 8;
+    if (v.front_is_known && v.front_heading != null) {
+      const a = v.front_heading * Math.PI / 180;
+      const fx = v.x + r * 1.6 * Math.cos(a), fy = v.y + r * 1.6 * Math.sin(a);
+      const bx = v.x - r * 1.6 * Math.cos(a), by = v.y - r * 1.6 * Math.sin(a);
+      ctx.strokeStyle = "#ff7a45"; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(fx, fy); ctx.stroke();
+      ctx.beginPath(); ctx.arc(fx, fy, 5, 0, Math.PI * 2); ctx.fillStyle = "#ff7a45"; ctx.fill();
+      ctx.beginPath(); ctx.arc(bx, by, 5, 0, Math.PI * 2); ctx.stroke();
+    } else {
+      const a = (v.heading ?? 0) * Math.PI / 180;
+      const p = [[v.x + r * 1.6 * Math.cos(a), v.y + r * 1.6 * Math.sin(a)],
+                 [v.x - r * 1.6 * Math.cos(a), v.y - r * 1.6 * Math.sin(a)]];
+      ctx.strokeStyle = "#ff7a45"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(p[0][0], p[0][1]); ctx.lineTo(p[1][0], p[1][1]); ctx.stroke();
+      for (const q of p) { ctx.beginPath(); ctx.arc(q[0], q[1], 5, 0, Math.PI * 2); ctx.stroke(); }
+    }
+    ctx.beginPath(); ctx.arc(v.x, v.y, 3, 0, Math.PI * 2); ctx.fillStyle = "#ff7a45"; ctx.fill();
+    ctx.fillStyle = "#ff7a45"; ctx.font = "11px system-ui";
+    ctx.fillText("主车", v.x + 12, v.y + 4);
+  }
+}
+
+function say(routeDoc) {
+  const el = document.getElementById("result");
+  if (!routeDoc) { el.className = ""; el.textContent = "还没有规划过路线 —— 跑一次 src/plan.py"; return; }
+  if (routeDoc.ok) {
+    el.className = "ok";
+    el.textContent = `目标 ${routeDoc.target_spot}：${routeDoc.start_node} → ${routeDoc.target_node}`
+                   + `，共 ${routeDoc.nodes.length} 个节点，${routeDoc.distance} px`;
+  } else {
+    el.className = "bad";
+    el.textContent = `拒绝（${routeDoc.code}）：${routeDoc.reason}`;
+  }
+}
+
+async function load() {
+  const [mapDoc, stateDoc, routeDoc] = await Promise.all(
+    [getJSON(DOCS.map), getJSON(DOCS.state), getJSON(DOCS.route)]);
+  if (!mapDoc) {
+    document.getElementById("result").textContent =
+      "读不到 parking_map.json —— 先在 vision/ 目录下跑 src/emit_map.py 和 python3 -m http.server 8010";
+    return;
+  }
+  draw(mapDoc, stateDoc, routeDoc);
+  say(routeDoc);
+  const ts = t => t ? new Date(t * 1000).toLocaleTimeString() : "—";
+  document.getElementById("meta").textContent =
+    `state ${ts(stateDoc?.timestamp)}   route ${ts(routeDoc?.generated_at)}   `
+    + `（刷新的只是页面，重新规划要再跑一次 src/plan.py）`;
+}
+
+load();
+setInterval(load, 5000);      // the state moves; the route only changes when it is re-planned
+</script>
+</body>
+</html>
