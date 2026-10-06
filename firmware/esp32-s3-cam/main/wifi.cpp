@@ -6,6 +6,7 @@
 
 #include <esp_log.h>
 #include <esp_netif.h>
+#include <esp_wifi.h>
 #include <esp_timer.h>
 
 #include "ssid_manager.h"
@@ -151,9 +152,32 @@ esp_err_t wifi_init(void)
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, on_wifi_event, NULL, NULL));
 
+    wifi_disable_power_save();
+
     s_initialized = true;
     ESP_LOGI(TAG, "WiFi manager initialised (SoftAP prefix \"%s\")", AP_SSID_PREFIX);
     return ESP_OK;
+}
+
+void wifi_disable_power_save(void)
+{
+    /*
+     * WIFI_PS_NONE. This was in the original wifi.c and got lost when this file was
+     * rewritten as a C adapter for the provisioning component.
+     *
+     * With the default (WIFI_PS_MIN_MODEM) the access point buffers downlink frames
+     * until the next DTIM beacon and the radio sleeps in between, which is poison for
+     * a video stream: on this board the delivered rate settled at ~1.2 fps with the
+     * power save on. The measured frame intervals were 500-800 ms punctuated by
+     * multi-second stalls, and the rate decayed over the first minute after
+     * association - the signature of the power save engaging.
+     */
+    esp_err_t err = esp_wifi_set_ps(WIFI_PS_NONE);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_set_ps(WIFI_PS_NONE) failed: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "WiFi power save: disabled (WIFI_PS_NONE)");
+    }
 }
 
 void wifi_set_event_callback(wifi_event_cb_t cb)

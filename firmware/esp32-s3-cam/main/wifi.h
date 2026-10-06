@@ -33,6 +33,14 @@ typedef void (*wifi_event_cb_t)(wifi_mgr_event_t event, const char *data);
  */
 esp_err_t wifi_init(void);
 
+/**
+ * Force WIFI_PS_NONE.
+ *
+ * Also called again once the station is up, because the driver can re-enable modem
+ * sleep when the interface is reconfigured.
+ */
+void wifi_disable_power_save(void);
+
 /** Register the single event callback used by the provisioning state machine. */
 void wifi_set_event_callback(wifi_event_cb_t cb);
 

@@ -204,6 +204,8 @@ static void handle_event(const prov_evt_t *ev)
 
     case EVT_WIFI_CONNECTED:
         cancel_timeout();
+        /* Re-assert it: the driver may restore modem sleep once the station is up. */
+        wifi_disable_power_save();
         set_state(PROV_CONNECTED);
         ESP_LOGI(TAG, "WiFi connected");
         ESP_LOGI(TAG, "IP address: %s", wifi_ip_string());
