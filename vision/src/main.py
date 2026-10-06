@@ -205,32 +205,32 @@ def status_line(spots: List[Spot], results: Dict[str, SpotResult],
 
 
 def reference_audit(ref: np.ndarray, live: np.ndarray, spots: List[Spot],
-                    detector: OccupancyDetector) -> None:
-    """Say *why* a bay reads as occupied, instead of leaving it a mystery.
+                    detector: OccupancyDetector) -> str:
+    """Say whether the reference frame is still usable, and if not, why.
 
-    A bay that stays OCCUPIED after the car has gone has two possible causes, and the
-    per-bay numbers look identical either way:
+    The first version of this got it badly wrong in a way worth keeping a note of. It compared
+    the reference with the live frame outside the bays, saw 7% of pixels differ, and concluded
+    "the reference is stale - re-capture it". But 41 of the 48 bays read exactly 0.000, which
+    says the camera had not moved and the light had not changed at all: the 7% was cars parked
+    on the roads, and roads are outside the bays. Following that advice would have baked the
+    cars into the reference - the exact mistake this project had already spent an evening
+    undoing.
 
-      - the reference was captured with a car standing in that bay, so its absence is now
-        the difference, and the bay can never go back to EMPTY on its own
-      - the whole view moved (camera nudged, light changed) and every comparison is
-        against a stale image
-
-    They are told apart by comparing the reference with the current frame *outside* the
-    bays as well as inside them. Nothing changed outside the bays means the scene is
-    stable and only the flagged bays' contents differ. A lot changed outside means the
-    reference itself is stale. The first case is what happened here: 47 bays at exactly
-    0.000 and one at 0.258.
+    So the bays decide, not the outside pixels. If most bays are untouched the view and the
+    light are fine by construction, whatever is happening elsewhere in the frame. The outside
+    count is still reported, because it is how you notice a car on a road or something left in
+    the scene, but it no longer decides anything on its own. It also ignores a margin around
+    every bay, since the painted bay lines sit just outside their own detection areas and
+    dominated the count with thin differences.
     """
     p = detector.params.normalized()
     a = detector._prep(ref)
     b = detector._prep(live)
     if a.shape != b.shape:
         print("  audit: the reference and the current frame differ in size - press r")
-        return
+        return "size-mismatch"
 
-    mask = cv2.threshold(cv2.absdiff(a, b), p.pixel_threshold, 255,
-                         cv2.THRESH_BINARY)[1]
+    mask = cv2.threshold(cv2.absdiff(a, b), p.pixel_threshold, 255, cv2.THRESH_BINARY)[1]
     if p.open_ksize > 1:
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (p.open_ksize,) * 2)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k)
@@ -238,40 +238,52 @@ def reference_audit(ref: np.ndarray, live: np.ndarray, spots: List[Spot],
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (p.close_ksize,) * 2)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
 
-    # Blank out every bay (plus its border, which is a high-contrast edge) so what is
-    # left is purely "did the scene change".
+    # Blank every bay *and a margin around it*: the bay's own painted line lies just outside
+    # its detection area, and those thin differences used to make up most of the count.
     outside = mask.copy()
     for s in spots:
-        x0, y0, x1, y1 = s.roi
-        cv2.rectangle(outside, (max(x0 - 2, 0), max(y0 - 2, 0)),
-                      (min(x1 + 2, outside.shape[1] - 1),
-                       min(y1 + 2, outside.shape[0] - 1)), 0, -1)
+        cv2.fillPoly(outside, [np.round(s.polygon).astype(np.int32)], 0)
+        cv2.polylines(outside, [np.round(s.polygon).astype(np.int32)], True, 0, 12)
     outside_pct = 100.0 * cv2.countNonZero(outside) / max(outside.size, 1)
 
     results = detector.evaluate(live, spots)
     ranked = sorted(results.values(), key=lambda r: -r.changed_ratio)
     over = [r for r in ranked if r.changed_ratio >= p.changed_ratio_threshold]
+    quiet = [r for r in ranked if r.changed_ratio < 0.01]
+    quiet_pct = 100.0 * len(quiet) / max(len(ranked), 1)
 
+    verdict = "ok"
     print("  ---------- reference audit -----------------------------------------")
-    print(f"  pixels changed outside every bay : {outside_pct:.2f}%")
-    print(f"  threshold {p.changed_ratio_threshold:.2f}; over it: {len(over)} bay(s)")
+    print(f"  bays reading exactly 0.000 : {len(quiet)}/{len(ranked)} "
+          f"({quiet_pct:.0f}%)   <- this is what decides")
+    print(f"  bays over the threshold    : {len(over)}")
+    print(f"  pixels changed outside the bays: {outside_pct:.2f}% (a car on a road shows up here)")
     for r in ranked[:6]:
         print(f"    {r.spot_id:>5}  {r.changed_ratio:.3f}  {r.state}")
-    if outside_pct < 1.0:
-        print("  verdict: the scene itself is unchanged - the view and the light are fine.")
+
+    if quiet_pct >= 70.0:
+        print("  verdict: the camera and the light are unchanged - the reference is still good.")
+        if outside_pct >= 0.5:
+            print(f"  {outside_pct:.1f}% of pixels outside the bays differ, which is what a car on a")
+            print("  road looks like. Do NOT re-capture the reference while it is there: whatever")
+            print("  is standing in the scene would become part of the reference.")
+            print("  Fix: nothing, if that car is meant to be there. If it is not, remove it and")
+            print("  run the audit again.")
+            verdict = "ok-with-extra"
+        else:
+            print("  Nothing outside the bays changed either, so there is nothing to do.")
+            verdict = "ok"
         if over:
             who = ", ".join(r.spot_id for r in over[:8])
-            print(f"  So the contents of {who} really do differ from the reference:")
-            print("  either a car is standing there now, or the reference was captured while")
-            print("  one was - and then the bay can never return to EMPTY by itself.")
-            print("  Fix: clear every bay and press r.")
-        else:
-            print("  No bay is over the threshold, so nothing needs doing.")
+            print(f"  The {len(over)} bay(s) over the threshold ({who}) differ from the reference")
+            print("  while everything else matches, so those bays' contents really did change.")
     else:
-        print(f"  verdict: {outside_pct:.1f}% of the scene outside the bays changed too, so the")
-        print("  whole view moved or the light changed: the reference itself is stale.")
+        verdict = "stale"
+        print(f"  verdict: only {quiet_pct:.0f}% of bays match the reference, so the view itself has")
+        print("  moved or the light has changed: the reference is stale.")
         print("  Fix: realign the bays with 'e' if needed, then press r with every bay empty.")
     print("  --------------------------------------------------------------------")
+    return verdict
 
 
 def capture_reference(frame: np.ndarray, path: str) -> bool:

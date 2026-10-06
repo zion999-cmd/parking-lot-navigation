@@ -291,6 +291,56 @@ def test_a_bay_partly_outside_the_frame_is_clipped_not_rejected():
     assert spots[0].inner_area() > 0
 
 
+# ---------------------------------------------------------------------------
+# The reference audit
+#
+# Its first version judged the reference by how many pixels differed *outside* the bays, and
+# reported "the reference is stale - re-capture it" when a car was parked on a road. Following
+# that would have baked the car into the reference. A car on a road is outside the bays; the
+# bays are what should decide.
+# ---------------------------------------------------------------------------
+
+def test_the_audit_does_not_blame_a_car_parked_on_a_road() -> None:
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+    from main import reference_audit
+
+    ref = np.full((600, 800, 3), 120, np.uint8)
+    cv2.rectangle(ref, (100, 100), (150, 260), (200, 200, 200), 2)      # bay markings
+    spot = Spot(id="38", polygon=np.array([[80, 90], [170, 90], [170, 270], [80, 270]],
+                                          dtype=float))
+    spots = [spot]
+    spot.prepare(ref.shape[:2])
+    detector = OccupancyDetector()
+    detector.set_reference(ref, spots)
+
+    # the same scene, plus something parked on the ground well away from the bay
+    live = ref.copy()
+    cv2.rectangle(live, (500, 450), (620, 520), (40, 40, 180), -1)
+
+    verdict = reference_audit(ref, live, spots, detector)
+    assert verdict == "ok-with-extra", verdict
+
+
+def test_the_audit_does_blame_a_stale_reference() -> None:
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+    from main import reference_audit
+
+    ref = np.full((600, 800, 3), 120, np.uint8)
+    for x in range(90, 280, 45):
+        cv2.line(ref, (x, 90), (x, 270), (230, 230, 230), 2)
+    spot = Spot(id="38", polygon=np.array([[80, 90], [270, 90], [270, 270], [80, 270]],
+                                          dtype=float))
+    spots = [spot]
+    spot.prepare(ref.shape[:2])
+    detector = OccupancyDetector()
+    detector.set_reference(ref, spots)
+
+    live = np.clip(ref.astype(int) + 45, 0, 255).astype(np.uint8)        # the light changed
+    assert reference_audit(ref, live, spots, detector) == "stale"
+
+
 def main() -> int:
     tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith("test_") and callable(f)]
