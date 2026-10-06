@@ -55,8 +55,8 @@
     { "id": "n1", "kind": "entrance", "x": 77, "y": 496 },
     { "id": "n2", "kind": "waypoint", "x": 77, "y": 438 },
     { "id": "n3", "kind": "waypoint", "x": 741, "y": 436 },
-    { "id": "n4", "kind": "spot", "x": 741, "y": 164, "spot": "10" },
-    { "id": "n5", "kind": "spot", "x": 16, "y": 163, "spot": "B1" },
+    { "id": "n4", "kind": "waypoint", "x": 741, "y": 164 },
+    { "id": "n5", "kind": "waypoint", "x": 16, "y": 163 },
     { "id": "n6", "kind": "waypoint", "x": 17, "y": 440 },
     { "id": "n7", "kind": "waypoint", "x": 17, "y": 495 }
   ],
