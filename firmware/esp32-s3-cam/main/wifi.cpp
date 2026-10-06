@@ -8,6 +8,7 @@
 #include <esp_netif.h>
 #include <esp_wifi.h>
 #include <esp_timer.h>
+#include <sdkconfig.h>
 
 #include "ssid_manager.h"
 #include "wifi_manager.h"
@@ -256,20 +257,29 @@ int wifi_max_tx_power(void)
 int wifi_force_max_tx_power(void)
 {
     /*
-     * The provisioning component applies a value from NVS on every station start
-     * ("max_tx_power", wifi_station.cc). esp_wifi_set_max_tx_power() takes 0.25 dBm
-     * units, so a portal that stores "20" meaning 20 dBm would actually set 5 dBm.
-     * Nothing in this firmware needs to save transmit power - the node is mains
-     * powered - so it is pinned to the build's ceiling and the value is reported.
+     * Cap the transmit power at CONFIG_WIFI_MAX_TX_POWER_DBM (10 dBm by default).
+     *
+     * Sizing the transmit current spikes down is the one thing firmware can do about a
+     * 3.3 V rail that cannot carry them. Measured on this board with identical firmware:
+     * the stream delivers ~185 KB/s with the LCD module plugged in and ~0.6 KB/s with it
+     * removed - the module is acting as extra decoupling capacitance. A sagging rail
+     * corrupts the uplink, because transmitting is what draws the current, so the AP's
+     * signal still reads strong (-33 dBm) while the board struggles to answer.
+     *
+     * The access point is a few metres away, so 10 dBm leaves the link budget with tens
+     * of dB of margin and there is nothing to lose by not shouting.
+     *
+     * The provisioning component also restores its own value from NVS on every station
+     * start ("max_tx_power", wifi_station.cc), which is why this is re-applied on
+     * connect and re-checked every 10 s rather than set once at boot.
      */
+    const int want = CONFIG_WIFI_MAX_TX_POWER_DBM * 4;   /* the API counts 0.25 dBm */
     int before = wifi_max_tx_power();
     if (before < 0) {
         ESP_LOGW(TAG, "could not read the max TX power");
         return -1;
     }
 
-    /* CONFIG_ESP_PHY_MAX_WIFI_TX_POWER is 20 dBm = 80 in these units. */
-    const int want = 80;
     if (before != want) {
         esp_err_t err = esp_wifi_set_max_tx_power((int8_t)want);
         int after = wifi_max_tx_power();
@@ -279,9 +289,8 @@ int wifi_force_max_tx_power(void)
             ESP_LOGW(TAG, "max TX power is %d (%.2f dBm), wanted %d - the driver refused",
                      after, after / 4.0, want);
         } else {
-            ESP_LOGW(TAG, "max TX power was %d (%.2f dBm) - raised to %d (%.2f dBm). "
-                          "A reduced TX power weakens the uplink while the downlink RSSI "
-                          "still looks healthy, which is what was happening here.",
+            ESP_LOGI(TAG, "max TX power %d (%.2f dBm) -> %d (%.2f dBm): smaller current "
+                          "spikes, which is what this board's supply needs",
                      before, before / 4.0, want, want / 4.0);
         }
         return after;

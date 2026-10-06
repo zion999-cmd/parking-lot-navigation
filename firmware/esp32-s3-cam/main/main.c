@@ -9,6 +9,7 @@
 #include <esp_log.h>
 #include <esp_system.h>
 #include <esp_timer.h>
+#include <sdkconfig.h>
 
 #include "camera.h"
 #include "display.h"
@@ -134,13 +135,15 @@ static void diagnostics_task(void *arg)
             ESP_LOGW(TAG, "modem sleep is on (%s) - turning it off again", wifi_power_save_name());
             wifi_disable_power_save();
         }
-        if (wifi_is_connected() && wifi_max_tx_power() < 80) {
+        if (wifi_is_connected() && wifi_max_tx_power() != CONFIG_WIFI_MAX_TX_POWER_DBM * 4) {
             /*
-             * The provisioning component restores this from NVS on every station
-             * start, so it is re-checked instead of trusted. A reduced transmit power
-             * weakens only the uplink, which cannot be seen in the RSSI printed on the
-             * same line - the device goes on receiving the AP perfectly well while its
-             * own frames struggle.
+             * The provisioning component restores its own transmit power from NVS on
+             * every station start, so this is re-checked rather than trusted.
+             *
+             * The configured cap is deliberately below what the hardware can do: the
+             * 3.3 V rail cannot carry 20 dBm transmit current spikes, and a sagging
+             * rail corrupts the uplink while the RSSI on this same line still reads
+             * strong. See CONFIG_WIFI_MAX_TX_POWER_DBM.
              */
             wifi_force_max_tx_power();
         }

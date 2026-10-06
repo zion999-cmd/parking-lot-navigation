@@ -17,6 +17,41 @@ menu "Parking Lot Camera"
             no-op because there is no queue to post to. The camera node is
             unaffected.
 
+    config WIFI_MAX_TX_POWER_DBM
+        int "Wi-Fi maximum transmit power (dBm)"
+        range 2 20
+        default 10
+        help
+            Cap on the Wi-Fi transmit power, in dBm. 10 by default, not the 20 the
+            hardware allows, and that is deliberate.
+
+            This board's 3.3 V rail cannot carry the current spikes of a 20 dBm
+            transmit burst. The evidence is a hardware comparison, not a guess: with
+            the identical firmware, the stream delivers ~185 KB/s when the LCD module
+            is plugged in and ~0.6 KB/s when it is not. The LCD is acting as extra
+            decoupling capacitance, which is exactly what a sagging rail needs.
+
+            A weak rail hits the uplink only, because receiving is cheap and
+            transmitting is what draws the current, and it shows up as every one of
+            these at once:
+              - the AP's signal reads strong (-33 dBm) while the board struggles to
+                be heard
+              - small pings get 0% loss but 66-154 ms round trips (retries)
+              - a 1.2 KB HTTP page completes in 0.19 s, while 11.7 KB JPEG frames
+                wedge the socket (send timed out, EAGAIN)
+              - ping loss 15% before the modem-sleep fix, 0% after, throughput still
+                wrong
+
+            The real fix is electrical - a better supply, a short thick cable, or a
+            bulk capacitor (470-1000 uF plus 100 nF) across the 3.3 V pins. This
+            setting only reduces the size of the current spikes so the board keeps
+            working in the meantime. Lower it further (8, or even 2) if the link is
+            still unreliable; the access point is close enough that the link budget
+            is not the limiting factor.
+
+            The value actually in force is read back from the driver and printed in
+            the diagnostics line as tx=<dBm>.
+
     config OTA_MANIFEST_URL
         string "OTA manifest URL"
         default "http://192.168.3.102:8000/manifest.json"
