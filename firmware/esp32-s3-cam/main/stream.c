@@ -24,8 +24,32 @@ static const char *TAG = "stream";
 #define PART_BOUNDARY "parkinglotcamboundary"
 
 static const char *STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=" PART_BOUNDARY;
-static const char *STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n";
-static const char *STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
+/*
+ * Boundary and part header in one write.
+ *
+ * Nagle holds a small segment back while earlier data is still unacknowledged, and a
+ * 40 KB JPEG is always in flight, so each of the boundary and part-header writes used
+ * to cost a round trip. Sending them as a single prefix halves the number of small
+ * writes; the JPEG itself is large enough to go out immediately.
+ */
+#define STREAM_PREFIX_FMT \
+    "\r\n--" PART_BOUNDARY "\r\n" \
+    "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n"
+
+/*
+ * Where does the time go?
+ *
+ * The board was delivering ~4 fps in bursts between 0.5 and 8.5 fps, and there was no
+ * way to tell from outside whether the camera or the network was stalling. These
+ * accumulators split each frame into "waiting for the sensor" and "pushing it down the
+ * socket", and track the JPEG size, so the log says which side is the problem instead
+ * of leaving it to guesswork. Reported every STREAM_STATS_EVERY frames.
+ */
+#define STREAM_STATS_EVERY 50
+static uint32_t s_stat_frames = 0;
+static int64_t s_grab_us = 0, s_send_us = 0;
+static int64_t s_grab_max_us = 0, s_send_max_us = 0;
+static size_t s_jpeg_sum = 0, s_jpeg_min = 0, s_jpeg_max = 0;
 
 /* Stack for the per-client streaming task. */
 #define STREAM_TASK_STACK 4096
@@ -145,8 +169,15 @@ static void stream_task(void *arg)
 
     ESP_LOGI(TAG, "client connected (%d active)", s_clients);
 
+    s_grab_us = s_send_us = 0;
+    s_grab_max_us = s_send_max_us = 0;
+    s_stat_frames = 0;
+    s_jpeg_sum = s_jpeg_min = s_jpeg_max = 0;
+
     while (res == ESP_OK) {
+        int64_t t_grab0 = esp_timer_get_time();
         camera_fb_t *fb = esp_camera_fb_get();
+        int64_t t_grab1 = esp_timer_get_time();
         if (fb == NULL) {
             ESP_LOGE(TAG, "esp_camera_fb_get() failed, closing stream");
             res = ESP_FAIL;
@@ -160,18 +191,38 @@ static void stream_task(void *arg)
             break;
         }
 
-        char part_hdr[64];
-        int hlen = snprintf(part_hdr, sizeof(part_hdr), STREAM_PART, (unsigned)fb->len);
+        char prefix[128];
+        int plen = snprintf(prefix, sizeof(prefix), STREAM_PREFIX_FMT, (unsigned)fb->len);
 
-        res = httpd_resp_send_chunk(req, STREAM_BOUNDARY, strlen(STREAM_BOUNDARY));
-        if (res == ESP_OK) {
-            res = httpd_resp_send_chunk(req, part_hdr, hlen);
-        }
+        res = httpd_resp_send_chunk(req, prefix, plen);
         if (res == ESP_OK) {
             res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
         }
 
         esp_camera_fb_return(fb);
+        int64_t t_send = esp_timer_get_time();
+        s_grab_us += t_grab1 - t_grab0;
+        s_send_us += t_send - t_grab1;
+        if (t_grab1 - t_grab0 > s_grab_max_us) s_grab_max_us = t_grab1 - t_grab0;
+        if (t_send - t_grab1 > s_send_max_us) s_send_max_us = t_send - t_grab1;
+        s_jpeg_sum += fb->len;
+        if (s_jpeg_min == 0 || fb->len < s_jpeg_min) s_jpeg_min = fb->len;
+        if (fb->len > s_jpeg_max) s_jpeg_max = fb->len;
+        if (++s_stat_frames % STREAM_STATS_EVERY == 0) {
+            ESP_LOGI(TAG, "timing over %u frames: grab avg %.1f ms (max %.1f) | "
+                          "send avg %.1f ms (max %.1f) | jpeg avg %.1f KB (min %.1f max %.1f)",
+                     (unsigned)s_stat_frames,
+                     (double)s_grab_us / 1000.0 / s_stat_frames,
+                     (double)s_grab_max_us / 1000.0,
+                     (double)s_send_us / 1000.0 / s_stat_frames,
+                     (double)s_send_max_us / 1000.0,
+                     (double)s_jpeg_sum / 1024.0 / s_stat_frames,
+                     (double)s_jpeg_min / 1024.0, (double)s_jpeg_max / 1024.0);
+            s_grab_us = s_send_us = 0;
+            s_grab_max_us = s_send_max_us = 0;
+            s_stat_frames = 0;
+            s_jpeg_sum = s_jpeg_min = s_jpeg_max = 0;
+        }
 
         if (res != ESP_OK) {
             /* Client went away; this is the normal way a stream ends. */
