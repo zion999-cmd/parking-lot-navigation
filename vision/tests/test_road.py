@@ -15,6 +15,7 @@ Run:  python tests/test_road.py
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import tempfile
@@ -23,6 +24,8 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+
+import road_network as rn                                    # noqa: E402
 
 from calibration import CalibrationApp                          # noqa: E402
 from detector import DetectorParams                             # noqa: E402
@@ -186,9 +189,96 @@ def test_an_entrance_joins_a_road_in_the_middle_of_a_segment() -> None:
     assert len(graph.edges) >= 4, [(e.a, e.b) for e in graph.edges]
     for spot_id in ("38", "39"):
         entrance = graph.node(graph.spot_nodes()[spot_id])
-        partner = graph.node(graph.adjacency()[entrance.id][0][0])
-        assert abs(partner.y - 400) < 1, (spot_id, partner.y)
-        assert 0 < partner.x < 880, "the join must be on the segment, not at one end"
+        # The stub from the bay down to the aisle is a road as well, and densify() puts nodes on
+        # it, so this walks the chain rather than assuming the first neighbour is on the aisle.
+        seen, here = {entrance.id}, entrance
+        for _ in range(20):
+            if abs(here.y - 400) < 1:
+                break
+            step = [graph.node(n) for n, _ in graph.adjacency()[here.id] if n not in seen]
+            assert step, f"bay {spot_id}: the stub never reaches the road"
+            here = step[0]
+            seen.add(here.id)
+        assert abs(here.y - 400) < 1, (spot_id, here.y)
+        assert 0 < here.x < 880, "the join must be on the segment, not at one end"
+        assert abs(here.x - entrance.x) < 1, "and it must join where the bay is"
+
+
+def test_a_long_road_gets_nodes_along_it_and_keeps_its_length() -> None:
+    """Why: nodes on the real map come mostly from bays, so the two sides of the ring with no bay
+    on them were single 272-277 px edges and a car mid-edge had its nearest node 136 px away."""
+    network = rn.RoadNetwork(shape=(600, 800),
+                             nodes=[rn.RoadNode(id="r1", x=0, y=0, kind=rn.KIND_JUNCTION),
+                                    rn.RoadNode(id="r2", x=272, y=0, kind=rn.KIND_JUNCTION)],
+                             edges=[rn.RoadEdge(a="r1", b="r2")])
+    inserted = network.densify(60.0)
+    assert inserted == 4, inserted
+    assert len(network.edges) == 5
+    pieces = [network.distance(e.a, e.b) for e in network.edges]
+    assert all(p <= 60.0 for p in pieces), pieces
+    assert abs(sum(pieces) - 272.0) < 1e-6, sum(pieces)      # splitting adds nodes, not length
+
+
+def test_a_short_road_is_left_alone() -> None:
+    """The bay stubs on the real map are about 36 px; the median edge is 35 px. Nothing that
+    already has adequate resolution may be touched, or the map would churn on every emit."""
+    network = rn.RoadNetwork(nodes=[rn.RoadNode(id="r1", x=0, y=0),
+                                    rn.RoadNode(id="r2", x=60, y=0)],
+                             edges=[rn.RoadEdge(a="r1", b="r2")])
+    assert network.densify(60.0) == 0
+    assert len(network.nodes) == 2 and len(network.edges) == 1
+
+
+def test_densifying_twice_inserts_nothing_the_second_time() -> None:
+    network = rn.RoadNetwork(nodes=[rn.RoadNode(id="r1", x=0, y=0),
+                                    rn.RoadNode(id="r2", x=272, y=0)],
+                             edges=[rn.RoadEdge(a="r1", b="r2")])
+    assert network.densify(60.0) == 4
+    assert network.densify(60.0) == 0
+    assert len(network.edges) == 5
+
+
+def test_a_node_on_a_long_road_keeps_its_name_whichever_way_the_edge_is_stored() -> None:
+    """Ids must not depend on which end an edge happens to be written from, or re-emitting the
+    map after a one-pixel edit would rename half the graph and every route with it."""
+    def names(a: str, b: str, xa: float, xb: float) -> list:
+        network = rn.RoadNetwork(nodes=[rn.RoadNode(id=a, x=xa, y=0),
+                                        rn.RoadNode(id=b, x=xb, y=0)],
+                                 edges=[rn.RoadEdge(a=a, b=b)])
+        network.densify(60.0)
+        return sorted(n.id for n in network.nodes if "_" in n.id)
+    assert names("r1", "r2", 0.0, 272.0) == names("r2", "r1", 272.0, 0.0) == [
+        "r1_r2_1", "r1_r2_2", "r1_r2_3", "r1_r2_4"]
+
+
+def test_a_one_way_road_stays_one_way_after_densifying() -> None:
+    network = rn.RoadNetwork(nodes=[rn.RoadNode(id="r1", x=0, y=0),
+                                    rn.RoadNode(id="r2", x=272, y=0)],
+                             edges=[rn.RoadEdge(a="r1", b="r2", oneway=True)])
+    network.densify(60.0)
+    assert all(e.oneway for e in network.edges)
+    chain, here = [network.node("r1").id], "r1"
+    for _ in range(5):
+        step = [n for n, _ in network.adjacency()[here]]
+        assert len(step) == 1, (here, step)
+        here = step[0]
+        chain.append(here)
+    assert chain[-1] == "r2", chain
+
+
+def test_no_point_on_a_derived_road_is_left_far_from_a_node() -> None:
+    """The property the fix is for: a route's start must be able to follow the car. On the real
+    map the worst gap was 136 px; after densifying it is half a piece at most."""
+    graph = roads_with_aisle().derive(two_bays())
+    worst = 0.0
+    for edge in graph.edges:
+        a, b = graph.node(edge.a), graph.node(edge.b)
+        for k in range(21):
+            x = a.x + (b.x - a.x) * k / 20
+            y = a.y + (b.y - a.y) * k / 20
+            d = min(math.hypot(n.x - x, n.y - y) for n in graph.nodes)
+            worst = max(worst, d)
+    assert worst <= 60.0 / 2 + 1, worst
 
 
 def test_an_entrance_never_hangs_off_another_bays_entrance() -> None:

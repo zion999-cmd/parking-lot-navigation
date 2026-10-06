@@ -39,6 +39,16 @@ import numpy as np
 
 import map_document
 
+# How long a stretch of road may be without a node on it.
+#
+# Measured on the real map: the median edge is 35 px and the longest is 277 px, because nodes are
+# put on a road where bays open onto it - and the two long edges, the left and right sides of the
+# ring, have no bay on them at all. A car standing mid-edge then has its nearest node up to 136 px
+# away, so a route's start cannot follow the car: it sticks to an end of the edge until the car
+# drives past one. 60 px is above the median, so the drawn map keeps its shape, and low enough
+# that a start is never more than about 30 px from the car.
+MAX_EDGE_PX = 60.0
+
 KIND_ENTRANCE = "entrance"
 KIND_JUNCTION = "junction"
 KIND_WAYPOINT = "waypoint"
@@ -315,7 +325,7 @@ class RoadNetwork:
     # -- editing ------------------------------------------------------------
 
     def add_node(self, x: float, y: float, kind: str = KIND_WAYPOINT,
-                 label: str = "", spot: str = "") -> RoadNode:
+                 label: str = "", spot: str = "", node_id: str = "") -> RoadNode:
         """Add a node, clamped into the frame.
 
         Same reasoning as the bay clamp: a click or drag whose coordinates land outside the
@@ -324,7 +334,8 @@ class RoadNetwork:
         if self.shape[0] > 0 and self.shape[1] > 0:
             x = min(max(float(x), 0.0), self.shape[1] - 1.0)
             y = min(max(float(y), 0.0), self.shape[0] - 1.0)
-        node = RoadNode(id=self.next_id(), kind=kind if kind in NODE_KINDS else KIND_WAYPOINT,
+        node = RoadNode(id=node_id or self.next_id(),
+                        kind=kind if kind in NODE_KINDS else KIND_WAYPOINT,
                         x=float(x), y=float(y), label=label, spot=spot)
         self.nodes.append(node)
         return node
@@ -430,7 +441,47 @@ class RoadNetwork:
         mx, my = bay_mouth(pts, (near.x, near.y), getattr(spot, "access_side", None))
         return self.attach(mx, my, kind=KIND_SPOT, spot=spot.id, skip_stubs=True)
 
-    def derive(self, spots: Sequence) -> "RoadNetwork":
+    def densify(self, max_len: float = MAX_EDGE_PX,
+                kind: str = KIND_WAYPOINT) -> int:
+        """Split every edge longer than `max_len` into equal pieces. Returns nodes inserted.
+
+        A road as drawn can be one long edge between two clicks. The stored map keeps it that way
+        - it holds what a person decided, and a person deciding "the road runs from here to here"
+        is not deciding where a car is allowed to be considered to be. The *derived* graph has to
+        be usable at the resolution the car moves at, which is what this makes it.
+
+        Distances are not touched: edges carry no weight of their own and are measured from their
+        ends, so the collinear pieces add up to exactly what the whole edge measured before.
+
+        Ids are named after the *sorted* pair of ends, so a node keeps its name whether the edge
+        happens to be stored one way round or the other, and they cannot collide with the r<n>
+        ids the editor hands out. Running it twice inserts nothing the second time.
+        """
+        inserted = 0
+        for index in range(len(self.edges) - 1, -1, -1):
+            edge = self.edges[index]
+            a, b = self.node(edge.a), self.node(edge.b)
+            if a is None or b is None or a.id == b.id:
+                continue
+            length = math.hypot(b.x - a.x, b.y - a.y)
+            if length <= max_len or length <= 0:
+                continue
+            pieces = int(math.ceil(length / max_len))
+            lo, hi = sorted([a.id, b.id])
+            middle = []
+            for k in range(1, pieces):
+                t = k / pieces
+                # Along the edge in its own direction, so a one-way edge stays one-way.
+                middle.append(self.add_node(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t,
+                                            kind=kind, node_id=f"{lo}_{hi}_{k}"))
+            self.edges.pop(index)
+            chain = [a] + middle + [b]
+            for u, v in zip(chain, chain[1:]):
+                self.connect(u.id, v.id, oneway=edge.oneway)
+            inserted += len(middle)
+        return inserted
+
+    def derive(self, spots: Sequence, max_edge: float = MAX_EDGE_PX) -> "RoadNetwork":
         """The navigation graph: the roads as drawn, plus one connection per bay.
 
         Derived, and deliberately not stored. The map file holds the two things a human
@@ -453,6 +504,7 @@ class RoadNetwork:
                 entrance.kind = KIND_ENTRANCE
         for spot in spots:
             out._attach_bay(spot)
+        out.densify(max_edge)
         return out
 
     def far_bays(self, spots: Sequence, limit: float) -> List[Tuple[str, float]]:
