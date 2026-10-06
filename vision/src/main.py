@@ -82,12 +82,27 @@ def annotate(frame: np.ndarray, spots: List[Spot], results: Dict[str, SpotResult
         length = max(w, h) * 0.7
         rad = math.radians(pose.heading)
         dx, dy = length * math.cos(rad) / 2, length * math.sin(rad) / 2
-        p0 = (int(pose.x - dx), int(pose.y - dy))
-        p1 = (int(pose.x + dx), int(pose.y + dy))
-        cv2.line(canvas, p0, p1, COL_CAR, 2)
-        for p in (p0, p1):
-            cv2.circle(canvas, p, 5, COL_CAR, 2)
+        cv2.line(canvas, (int(pose.x - dx), int(pose.y - dy)),
+                 (int(pose.x + dx), int(pose.y + dy)), COL_CAR, 2)
         cv2.circle(canvas, (int(pose.x), int(pose.y)), 4, COL_CAR, -1)
+        if pose.front_is_known and pose.front_heading is not None:
+            # A filled dot at the end the car faces and a hollow one behind it. The picture
+            # can say which way is forward now, but only because a person told us which end
+            # of this car is the front - nothing in the pixels knows that.
+            facing = math.radians(pose.front_heading)
+            half = length / 2
+            fx = (int(pose.x + half * math.cos(facing)),
+                  int(pose.y + half * math.sin(facing)))
+            rear = (int(pose.x - half * math.cos(facing)),
+                    int(pose.y - half * math.sin(facing)))
+            cv2.circle(canvas, fx, 7, COL_CAR, -1)      # filled = the front
+            cv2.circle(canvas, rear, 7, COL_CAR, 2)     # hollow = the back
+        else:
+            # No front known: both ends get a ring, so the drawing does not claim a direction
+            # it does not have.
+            for p in ((int(pose.x - dx), int(pose.y - dy)),
+                      (int(pose.x + dx), int(pose.y + dy))):
+                cv2.circle(canvas, p, 5, COL_CAR, 2)
 
         where = ""
         if location:
@@ -102,12 +117,20 @@ def annotate(frame: np.ndarray, spots: List[Spot], results: Dict[str, SpotResult
         # the blob is not car shaped, whatever the angle says.
         agree = min(abs(pose.heading - pose.heading_pca),
                     180 - abs(pose.heading - pose.heading_pca))
-        text = f"car ({pose.x:.0f},{pose.y:.0f}) axis {pose.heading:.0f}deg{where}"
-        detail = f"elon {pose.elongation:.2f}  pca {pose.heading_pca:.0f}deg  d{agree:.0f}deg"
+        if pose.front_is_known and pose.front_heading is not None:
+            text = (f"car ({pose.x:.0f},{pose.y:.0f}) FRONT {pose.front_heading:.0f}deg"
+                    f"  (axis {pose.heading:.0f}){where}")
+        else:
+            text = (f"car ({pose.x:.0f},{pose.y:.0f}) axis {pose.heading:.0f}deg"
+                    f"  front unknown{where}")
+        detail = (f"elon {pose.elongation:.2f}  pca {pose.heading_pca:.0f}deg  d{agree:.0f}deg"
+                  f"  taper {pose.taper:+.2f}")
         if pose.elongation < 1.6:
             detail += "  NO CLEAR AXIS"
         if agree > 10:
             detail += "  SHAPE SUSPECT"
+        if not pose.front_is_known:
+            detail += "  front UNSET (taper too small)"
         cv2.putText(canvas, text, (max(x - 20, 6), max(y - 8, 14)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 4)
         cv2.putText(canvas, text, (max(x - 20, 6), max(y - 8, 14)),

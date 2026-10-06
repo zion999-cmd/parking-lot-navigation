@@ -40,6 +40,23 @@ RED_HUE_RANGES: Tuple[Tuple[Tuple[int, int, int], Tuple[int, int, int]], ...] = 
     ((176, 90, 60), (180, 255, 255)),
 )
 
+# ---------------------------------------------------------------------------
+# Which end of the car is the front.
+#
+# Decided by the user looking at an annotated frame: the end marked green was the front, and
+# the green marker was on the *wider* end. Nothing here can work that out on its own - it is a
+# fact about a particular toy car, not about pixels - so it is stated once and used thereafter.
+#
+# It cross-checks with the other asymmetric cue: the dark band (the windscreen, presumably)
+# sits near the wider end in both orientations, which is why there is really only one cue here
+# rather than two independent ones.
+FRONT_IS_THE_WIDER_END = True
+
+# How much wider one end has to be before the front is claimed at all. Measured on this car
+# either side of a 180 degree turn: +0.17 and -0.15, with a frame-to-frame spread of +-0.05.
+# Below this the honest answer is "front unknown" rather than a coin flip.
+MIN_TAPER = 0.04
+
 # Below this a red blob is a sticker or a reflection, not a car.
 DEFAULT_MIN_AREA = 80
 # Two pieces of the same car are joined if they are this close. The body breaks into pieces
@@ -52,7 +69,12 @@ BORDER_MARGIN = 2
 
 @dataclass
 class VehiclePose:
-    """One sighting of the car. `heading` is the long axis in degrees, 0..180, no front."""
+    """One sighting of the car.
+
+    `heading` is the long axis in degrees 0..180 and has no front. `front_heading` is the
+    direction the car actually faces in 0..360, and is only filled in when the shape is
+    asymmetric enough to say which end is which - `front_is_known` says whether to trust it.
+    """
 
     x: float
     y: float
@@ -64,15 +86,27 @@ class VehiclePose:
     # Second opinion on the heading: the two agree to about half a degree when the mask is
     # clean, so a large disagreement is a sign the mask is not a car.
     heading_pca: float = 0.0
+    # How much wider one end of the shape is than the other. Positive means the end in the
+    # +heading direction is the wider one.
+    taper: float = 0.0
+    front_heading: Optional[float] = None
+    front_is_known: bool = False
 
     @property
     def centre(self) -> Tuple[float, float]:
         return (self.x, self.y)
 
     def as_dict(self) -> dict:
-        return {"id": "hero", "x": round(self.x, 1), "y": round(self.y, 1),
-                "heading": round(self.heading, 1), "visible": True,
-                "heading_is_axis_only": True}
+        out = {"id": "hero", "x": round(self.x, 1), "y": round(self.y, 1),
+               "heading": round(self.heading, 1), "visible": True,
+               "heading_is_axis_only": True,
+               "front_is_known": bool(self.front_is_known)}
+        if self.front_is_known and self.front_heading is not None:
+            # The axis, plus the one fact a person had to tell us: which end is the front.
+            out["front_heading"] = round(self.front_heading, 1)
+        else:
+            out["front_heading"] = None
+        return out
 
 
 def red_mask(hsv: np.ndarray, close_kernel: int = CLOSE_KERNEL) -> np.ndarray:
@@ -105,6 +139,33 @@ def touches_border(bbox: Sequence[int], shape: Sequence[int],
             or x + w >= shape[1] - margin or y + h >= shape[0] - margin)
 
 
+def taper_of(points: np.ndarray, heading: float, bins: int = 12) -> float:
+    """How much wider one end of a blob is than the other, along its own axis.
+
+    Positive means the end in the +heading direction is wider. This is the cue that says
+    which end of an otherwise symmetric car is the front, and it needs no rotation: the
+    pixels are projected onto the axis and onto the perpendicular, and the width is the
+    perpendicular extent within each slice along the axis.
+    """
+    if len(points) < 20:
+        return 0.0
+    radians = np.radians(heading)
+    along = points[:, 0] * np.cos(radians) + points[:, 1] * np.sin(radians)
+    across = -points[:, 0] * np.sin(radians) + points[:, 1] * np.cos(radians)
+    lo, hi = float(along.min()), float(along.max())
+    if hi - lo < 8:
+        return 0.0
+    widths = []
+    for i in range(bins):
+        a = lo + (hi - lo) * i / bins
+        b = lo + (hi - lo) * (i + 1) / bins
+        band = across[(along >= a) & (along < b)]
+        widths.append(float(band.max() - band.min()) if len(band) else 0.0)
+    n = max(bins // 4, 1)
+    first, last = float(np.mean(widths[:n])), float(np.mean(widths[-n:]))
+    return (last - first) / max(last + first, 1e-6)
+
+
 def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
                keep_border: bool = False,
                close_kernel: int = CLOSE_KERNEL) -> List[VehiclePose]:
@@ -134,10 +195,21 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
         # Long axis of the fitted rectangle. Steadier than PCA on a blob whose outline
         # flickers, because the rectangle depends on the extremes rather than every pixel.
         heading = (angle if rw >= rh else angle + 90.0) % 180.0
+        taper = taper_of(points, heading)
+        front_heading = None
+        front_known = False
+        if elongation >= 1.6 and abs(taper) >= MIN_TAPER:
+            # `taper` is positive when the end in the +heading direction is wider, and
+            # FRONT_IS_THE_WIDER_END records which end of this car that is.
+            wider_is_plus = taper > 0
+            plus_is_front = wider_is_plus == FRONT_IS_THE_WIDER_END
+            front_heading = heading if plus_is_front else (heading + 180.0) % 360.0
+            front_known = True
         out.append(VehiclePose(x=float(centre[0]), y=float(centre[1]), heading=heading,
                                area=area, elongation=elongation,
                                fill=area / max(w * h, 1), bbox=(x, y, w, h),
-                               heading_pca=heading_pca))
+                               heading_pca=heading_pca, taper=taper,
+                               front_heading=front_heading, front_is_known=front_known))
     out.sort(key=lambda p: -p.area)
     return out
 

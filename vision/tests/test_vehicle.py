@@ -173,6 +173,60 @@ def test_with_no_map_the_location_is_unknown_not_a_guess() -> None:
     assert vehicle.location_of(pose, None, None)["kind"] == "unknown"
 
 
+def test_a_symmetric_bar_cannot_say_which_end_is_the_front() -> None:
+    """A plain rectangle has no front. Claiming one would be a coin flip."""
+    pose = vehicle.locate(frame_with((100, 300, 200, 340)))
+    assert pose is not None
+    assert abs(pose.taper) < vehicle.MIN_TAPER, pose.taper
+    assert pose.front_is_known is False
+    assert pose.front_heading is None
+    assert pose.as_dict()["front_heading"] is None
+    assert pose.as_dict()["front_is_known"] is False
+
+
+def test_a_tapered_nose_gives_a_front_direction() -> None:
+    """A shape that is tall on the left and short on the right.
+
+    The wide end is therefore on the left, and with FRONT_IS_THE_WIDER_END that means the car
+    faces left - 180 degrees. The taper is negative because it measures (right - left).
+    """
+    img = np.full((H, W, 3), BACKGROUND, np.uint8)
+    cv2.fillConvexPoly(img, np.array([[100, 290], [220, 310], [220, 330], [100, 350]]), RED)
+    pose = vehicle.locate(img)
+    assert pose is not None
+    assert pose.taper < -vehicle.MIN_TAPER, pose.taper
+    assert pose.front_is_known is True, pose.taper
+    expected = 180.0 if vehicle.FRONT_IS_THE_WIDER_END else 0.0
+    diff = min(abs(pose.front_heading - expected), 360 - abs(pose.front_heading - expected))
+    assert diff < 15, (pose.front_heading, expected)
+
+
+def test_turning_the_same_car_around_flips_the_front_by_180() -> None:
+    """The property that matters: the front follows the car, not the picture."""
+    forward = np.full((H, W, 3), BACKGROUND, np.uint8)
+    cv2.fillConvexPoly(forward, np.array([[100, 290], [220, 310], [220, 330], [100, 350]]),
+                       RED)
+    backward = np.full((H, W, 3), BACKGROUND, np.uint8)
+    cv2.fillConvexPoly(backward, np.array([[100, 310], [100, 330], [220, 290], [220, 350]]),
+                       RED)
+    a = vehicle.locate(forward)
+    b = vehicle.locate(backward)
+    assert a is not None and b is not None
+    assert a.front_is_known and b.front_is_known
+    turn = abs((a.front_heading - b.front_heading) % 360)
+    assert abs(turn - 180) < 20, (a.front_heading, b.front_heading, turn)
+
+
+def test_the_front_direction_agrees_with_the_axis_or_is_opposite_it() -> None:
+    """front_heading must be one end of the axis, never something off to the side."""
+    img = np.full((H, W, 3), BACKGROUND, np.uint8)
+    cv2.fillConvexPoly(img, np.array([[100, 290], [220, 310], [220, 330], [100, 350]]), RED)
+    pose = vehicle.locate(img)
+    assert pose is not None and pose.front_heading is not None
+    offset = abs((pose.front_heading - pose.heading) % 360)
+    assert abs(offset - 0) < 1 or abs(offset - 180) < 1, (pose.front_heading, pose.heading)
+
+
 def main() -> int:
     tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith("test_") and callable(f)]

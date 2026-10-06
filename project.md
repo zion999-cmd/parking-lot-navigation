@@ -50,8 +50,8 @@ ESP32 导航小车（车位级导航）◄── 下一步
 | 内存 | `heap_internal` ~123 KB（streaming）／~129 KB（idle），**无泄漏** |
 | 视觉阈值 | `changed_ratio ≥ 0.15` 判占用，逐像素阈值 25（灰阶），blur 5 |
 | 车位几何 | 48 个，全部 47~48 × 100~104 px，**两两重叠 0 对** |
-| 测试 | **165 项全绿**（occupancy 17 / detector 17 / editor 37 / alignment 15 / road 49 / contract 15 / vehicle 15） |
-| 主车定位 | 位置 **±0.25px**、长轴 **±0.8°**（导航需 ±5px / ±15°）—— 颜色+形状，不用标记 |
+| 测试 | **169 项全绿**（occupancy 17 / detector 17 / editor 37 / alignment 15 / road 49 / contract 15 / vehicle 19） |
+| 主车定位 | 位置 **±0.25px**、长轴 **±0.8°**、**车头方向可判**（锥度 + 人工指定一次）—— 颜色+形状，不用标记 |
 
 ### 2.3 还没验证的（诚实清单）
 
@@ -496,9 +496,10 @@ $P src/emit_map.py --strict        # 有任何车位没接入道路就返回非�
     "39": { "state": "EMPTY" },
     "40": { "state": "UNKNOWN", "reason": "no frames for 4.0s" }
   },
-  "vehicle": { "id": "hero", "x": 336, "y": 436, "heading": 0.0,
+  "vehicle": { "id": "hero", "x": 406, "y": 437, "heading": 0.0,
                 "visible": true, "heading_is_axis_only": true,
-                "location": { "kind": "road", "id": null, "distance_to_road": 1.3 } }
+                "front_is_known": true, "front_heading": 180.0,
+                "location": { "kind": "road", "id": null, "distance_to_road": 0.2 } }
 }
 ```
 
@@ -547,7 +548,9 @@ $P src/emit_map.py --strict        # 有任何车位没接入道路就返回非�
 |---|---|
 | `x` / `y` | 车在图像坐标系里的位置（像素） |
 | `heading` | **车的长轴方向**，0~180° |
-| **`heading_is_axis_only`** | **恒为 true** —— 长轴**没有车头**，东向和西向读数相同 |
+| **`heading_is_axis_only`** | **恒为 true** —— `heading` 是**长轴**，东向和西向读数相同 |
+| **`front_heading`** | **车头真正指向**（0~360°）；判不出来时是 `null` |
+| **`front_is_known`** | `front_heading` 可不可信 —— **不知道就不编**（同 `UNKNOWN` 纪律） |
 | `visible` | 看不到红车就是 **`false`**，**不带上次的位置**（同 `UNKNOWN` 纪律） |
 | `location.kind` | `spot`（在哪个车位）/ `road`（在路上）/ `floor`（在空地）/ `unknown`（没地图） |
 | `location.id` | 在车位时的车位号；在路上时为 null |
@@ -560,8 +563,24 @@ $P src/emit_map.py --strict        # 有任何车位没接入道路就返回非�
 而这辆车在画面里只有 **69px 宽** —— **标记得占车宽 58%**，物理上不合理。实测 ArUco 也确实读不到。
 而**颜色+形状不需要参考帧**，因此也不受光照变化和车位线亚像素偏移的影响。
 
-**ArUco 唯一不可替代的地方**：**车头方向**。如果以后导航需要知道「车头朝哪」
-（而不只是「沿哪根轴」），那才需要往车上加东西；`heading_is_axis_only` 就是给消费方看的诚实标记。
+**车头方向（有办法，不用标记）**：车的**形状一头宽钝、一头窄尖**，锥度 =
+(右端宽 − 左端宽)/(两端宽之和)，实测转 180° 前 **+0.17**、转后 **−0.15** ⇒ **跟着车转，
+是车身特征** ✓（不是光照）。另一个信号「暗带（挡风玻璃？）靠近宽端」同样跟着转 ✓，
+但它与锥度**信息重复** ✓（都指向同一端）。
+
+**机器无法判断「哪端是车头」** —— 这是关于某一台玩具车的事实，不是关于像素的 ✓。
+所以它由人指定一次：
+
+```python
+# src/vehicle.py
+FRONT_IS_THE_WIDER_END = True    # 用户看标注图得出：绿圈（车头）在更宽的那端
+MIN_TAPER = 0.04                 # 锥度小于此值 ⇒ front_is_known = false（不抛硬币）
+```
+
+**画面上**：**实心点 = 车头**、**空心点 = 车尾**；锥度不够时退回两个空心圆（不假装知道方向）✓
+
+**ArUco 唯一不可替代的地方**原本是**车头方向** —— 现在它被「锥度 + 人工指定一次」解决了 ✓
+所以 ArUco 在本项目里没有剩下必要用途 ✓（工具保留：`tools/make-aruco-marker.py`、`tests/aruco_check.py`）
 
 ### 7.5 三个文件的分工（别混）
 
