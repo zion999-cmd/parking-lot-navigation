@@ -1,5 +1,22 @@
 menu "Parking Lot Camera"
 
+    config DISPLAY_ENABLE
+        bool "Enable the on-device status display (ST7789 240x240)"
+        default y
+        help
+            Turn this off when the TFT is not fitted.
+
+            The panel costs internal RAM (a 7.5 KB DMA bounce buffer per flush,
+            plus the SPI bus and driver state) and real time in the display
+            task. With the screen absent that is pure waste, and internal RAM is
+            the scarcest resource on this board.
+
+            With this off, display_init() returns immediately: no frame buffer is
+            allocated, the SPI bus and the panel driver are never initialised, no
+            display task is created, and every display_show_*() call becomes a
+            no-op because there is no queue to post to. The camera node is
+            unaffected.
+
     config OTA_MANIFEST_URL
         string "OTA manifest URL"
         default "http://192.168.3.102:8000/manifest.json"

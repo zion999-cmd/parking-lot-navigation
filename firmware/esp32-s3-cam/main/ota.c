@@ -12,6 +12,7 @@
 #include <cJSON.h>
 #include <esp_app_desc.h>
 #include <esp_crt_bundle.h>
+#include <esp_heap_caps.h>
 #include <esp_http_client.h>
 #include <esp_log.h>
 #include <esp_ota_ops.h>
@@ -159,17 +160,27 @@ typedef struct {
     size_t size;
 } ota_manifest_t;
 
+/*
+ * Only attach the root-CA bundle when the URL really is https. On the sandbox LAN
+ * the manifest and firmware come over plain HTTP, and internal RAM is the scarce
+ * resource on this board - there is no reason to set up certificate handling for
+ * a connection that will not use TLS.
+ */
+static void apply_http_defaults(esp_http_client_config_t *cfg, const char *url,
+                                int buffer_size)
+{
+    cfg->url = url;
+    cfg->timeout_ms = 15000;
+    cfg->buffer_size = buffer_size;
+    if (strncmp(url, "https://", 8) == 0) {
+        cfg->crt_bundle_attach = esp_crt_bundle_attach;
+    }
+}
+
 static bool http_get_to_buffer(const char *url, char *buf, size_t buf_len, size_t *out_len)
 {
     esp_http_client_config_t cfg = {};
-    cfg.url = url;
-    cfg.timeout_ms = 15000;
-    cfg.buffer_size = 1024;
-    /*
-     * Only consulted when the URL is https://; for plain HTTP it is ignored, so
-     * the LAN development setup needs no PKI work at all.
-     */
-    cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    apply_http_defaults(&cfg, url, 1024);
 
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (client == NULL) {
@@ -274,11 +285,9 @@ static void make_firmware_url(const char *base_manifest_url, const char *rel,
 static bool download_and_flash(const char *url, const ota_manifest_t *m)
 {
     esp_http_client_config_t cfg = {};
-    cfg.url = url;
+    apply_http_defaults(&cfg, url, OTA_DOWNLOAD_BUF);
     cfg.timeout_ms = 30000;
-    cfg.buffer_size = OTA_DOWNLOAD_BUF;
     cfg.keep_alive_enable = false;
-    cfg.crt_bundle_attach = esp_crt_bundle_attach;
 
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (client == NULL) {
@@ -286,7 +295,14 @@ static bool download_and_flash(const char *url, const ota_manifest_t *m)
         return false;
     }
 
-    uint8_t *buf = malloc(OTA_DOWNLOAD_BUF);
+    /*
+     * Take the download buffer from PSRAM, not internal RAM. It is 4 KB that the
+     * Wi-Fi stack and the SPI DMA bounce buffers need far more than this does.
+     */
+    uint8_t *buf = heap_caps_malloc(OTA_DOWNLOAD_BUF, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (buf == NULL) {
+        buf = malloc(OTA_DOWNLOAD_BUF);
+    }
     if (buf == NULL) {
         esp_http_client_cleanup(client);
         set_result("download: out of memory");

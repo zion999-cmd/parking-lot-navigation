@@ -10,12 +10,15 @@
 #include <driver/ledc.h>
 #include <driver/spi_common.h>
 #include <esp_heap_caps.h>
+#include <esp_heap_caps.h>
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_panel_vendor.h>
+#include <esp_timer.h>
 #include <esp_log.h>
 
 #include "font8x16.h"
+#include <sdkconfig.h>
 
 /*
  * On-device status panel for the ESP32-S3-CAM.
@@ -59,6 +62,22 @@ static const char *TAG = "display";
 #define BL_LEDC_CHANNEL LEDC_CHANNEL_1
 #define BL_DUTY_PERCENT 75
 
+/*
+ * The panel is flushed in horizontal bands, not in one call.
+ *
+ * The frame buffer lives in PSRAM, and the SPI DMA engine cannot read from
+ * PSRAM, so the driver has to bounce every transfer through an internal
+ * DMA-capable buffer of the *transfer* size. Asking for the whole 240x240 frame
+ * at once therefore wants ~115 KB of internal RAM, and on this board the internal
+ * heap only has ~38 KB free - less than 20 KB while an OTA check is running. The
+ * allocation failed, the panel reported "Failed to allocate priv TX buffer" and
+ * the draw call hung waiting for a completion callback that never came.
+ *
+ * BAND_LINES = 16 keeps the bounce buffer at 240*16*2 = 7.5 KB.
+ */
+#define BAND_LINES 16
+#define BAND_BYTES (LCD_W * BAND_LINES * sizeof(uint16_t))
+
 #define COL_BG      0x0000  /* black  */
 #define COL_FG      0xFFFF  /* white  */
 #define COL_DIM     0x8410  /* grey   */
@@ -73,6 +92,8 @@ static const char *TAG = "display";
 static esp_lcd_panel_handle_t s_panel = NULL;
 static uint16_t *s_fb = NULL;
 static bool s_ready = false;
+static int s_flush_fail_streak = 0;
+static int64_t s_flush_paused_until_us = 0;
 
 /* ------------------------------------------------------------------------- */
 /* Message queue                                                              */
@@ -223,9 +244,44 @@ static void draw_text(int x, int y, const char *text, uint16_t colour, int scale
 
 static void flush(void)
 {
-    if (s_panel != NULL && s_fb != NULL) {
-        esp_lcd_panel_draw_bitmap(s_panel, 0, 0, LCD_W, LCD_H, s_fb);
+    if (s_panel == NULL || s_fb == NULL) {
+        return;
     }
+    /*
+     * Back off instead of hammering. A draw failure means the SPI driver could
+     * not get its bounce buffer (usually because internal RAM is tight, for
+     * example during an OTA check). Retrying immediately makes it worse and
+     * floods the log, so pause for a while and keep the panel usable afterwards.
+     */
+    int64_t now = esp_timer_get_time();
+    if (now < s_flush_paused_until_us) {
+        return;
+    }
+
+    for (int y = 0; y < LCD_H; y += BAND_LINES) {
+        int y_end = y + BAND_LINES;
+        if (y_end > LCD_H) {
+            y_end = LCD_H;
+        }
+        esp_err_t err = esp_lcd_panel_draw_bitmap(s_panel, 0, y, LCD_W, y_end,
+                                                 s_fb + (size_t)y * LCD_W);
+        if (err != ESP_OK) {
+            s_flush_fail_streak++;
+            if (s_flush_fail_streak == 1) {
+                ESP_LOGW(TAG, "panel draw failed at y=%d: %s - internal RAM is "
+                              "tight (free internal heap was %u bytes). Pausing "
+                              "the status panel; the camera keeps running.",
+                         y, esp_err_to_name(err),
+                         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+            }
+            if (s_flush_fail_streak >= 3) {
+                s_flush_paused_until_us = now + 10 * 1000 * 1000;
+                s_flush_fail_streak = 0;
+            }
+            return;
+        }
+    }
+    s_flush_fail_streak = 0;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -403,6 +459,10 @@ static void backlight_init(void)
 
 bool display_init(void)
 {
+#if defined(CONFIG_DISPLAY_ENABLE) && !CONFIG_DISPLAY_ENABLE
+    ESP_LOGI(TAG, "Status display disabled at build time (CONFIG_DISPLAY_ENABLE=n)");
+    return false;
+#else
     if (s_ready) {
         return true;
     }
@@ -416,7 +476,7 @@ bool display_init(void)
     bus.sclk_io_num = LCD_PIN_SCLK;
     bus.quadwp_io_num = -1;
     bus.quadhd_io_num = -1;
-    bus.max_transfer_sz = LCD_W * LCD_H * sizeof(uint16_t);
+    bus.max_transfer_sz = BAND_BYTES;
 
     esp_err_t err = spi_bus_initialize(LCD_HOST, &bus, SPI_DMA_CH_AUTO);
     if (err != ESP_OK) {
@@ -490,6 +550,7 @@ bool display_init(void)
     s_ready = true;
     ESP_LOGI(TAG, "Status display ready");
     return true;
+#endif  /* CONFIG_DISPLAY_ENABLE */
 }
 
 bool display_ready(void)
