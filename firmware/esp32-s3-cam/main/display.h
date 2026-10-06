@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -26,6 +27,15 @@ bool display_init(void);
 
 /** True once the panel is usable; all show_* calls are no-ops if false. */
 bool display_ready(void);
+
+/**
+ * How many times the panel has actually been flushed since boot.
+ *
+ * Exists to settle an argument with data. Drawing only happens when a screen is
+ * posted, so if a slow stream coincides with this counter standing still, the panel is
+ * provably not the cause; if it climbs while the stream stalls, it is.
+ */
+uint32_t display_flush_count(void);
 
 void display_show_boot(const char *version);
 

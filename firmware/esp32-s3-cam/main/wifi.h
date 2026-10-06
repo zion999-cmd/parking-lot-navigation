@@ -61,6 +61,27 @@ const char *wifi_power_save_name(void);
  */
 void wifi_link_summary(char *out, size_t n);
 
+/**
+ * The driver's current max transmit power, in the API's own 0.25 dBm units.
+ *
+ * Worth printing because the provisioning component restores this from NVS
+ * ("max_tx_power", wifi_station.cc) on every station start, and the unit is easy to get
+ * wrong: 20 stored as "20 dBm" means 20 * 0.25 = 5 dBm. That would leave the device
+ * receiving the AP strongly while its own uplink struggles.
+ */
+int wifi_max_tx_power(void);
+
+/**
+ * Raise the transmit power to the highest the build allows and report it.
+ *
+ * Mains-powered node, so there is no reason to save power here. Logs loudly if it had
+ * to change anything, because a silently reduced TX power is exactly the kind of thing
+ * that is invisible from the outside.
+ *
+ * Returns the value read back afterwards.
+ */
+int wifi_force_max_tx_power(void);
+
 /** Register the single event callback used by the provisioning state machine. */
 void wifi_set_event_callback(wifi_event_cb_t cb);
 

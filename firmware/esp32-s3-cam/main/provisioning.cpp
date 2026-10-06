@@ -206,6 +206,8 @@ static void handle_event(const prov_evt_t *ev)
         cancel_timeout();
         /* Re-assert it: the driver may restore modem sleep once the station is up. */
         wifi_disable_power_save();
+        /* And pin the transmit power: the component restores it from NVS here. */
+        wifi_force_max_tx_power();
         set_state(PROV_CONNECTED);
         ESP_LOGI(TAG, "WiFi connected");
         ESP_LOGI(TAG, "IP address: %s", wifi_ip_string());

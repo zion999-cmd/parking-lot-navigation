@@ -94,6 +94,7 @@ static uint16_t *s_fb = NULL;
 static bool s_ready = false;
 static int s_flush_fail_streak = 0;
 static int64_t s_flush_paused_until_us = 0;
+static uint32_t s_flush_count = 0;
 
 /* ------------------------------------------------------------------------- */
 /* Message queue                                                              */
@@ -282,6 +283,7 @@ static void flush(void)
         }
     }
     s_flush_fail_streak = 0;
+    s_flush_count++;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -490,7 +492,16 @@ bool display_init(void)
     io_cfg.dc_gpio_num = LCD_PIN_DC;
     io_cfg.spi_mode = 0;
     io_cfg.pclk_hz = LCD_PCLK_HZ;
-    io_cfg.trans_queue_depth = 10;
+    /*
+     * Two transactions in flight, not ten.
+     *
+     * The SPI driver cannot read the frame buffer from PSRAM, so every band is copied
+     * through an internal DMA-capable bounce buffer of 7.5 KB. A depth of 10 let a
+     * single redraw hold up to 75 KB of that memory - the same internal RAM the Wi-Fi
+     * transmit path draws from on a board that only has ~123 KB free while streaming.
+     * Depth 2 caps the panel's appetite at 15 KB.
+     */
+    io_cfg.trans_queue_depth = 2;
     io_cfg.lcd_cmd_bits = 8;
     io_cfg.lcd_param_bits = 8;
     err = esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &io_cfg, &io);
@@ -556,6 +567,11 @@ bool display_init(void)
 bool display_ready(void)
 {
     return s_ready;
+}
+
+uint32_t display_flush_count(void)
+{
+    return s_flush_count;
 }
 
 /* ------------------------------------------------------------------------- */

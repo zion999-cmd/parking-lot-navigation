@@ -244,6 +244,51 @@ void wifi_link_summary(char *out, size_t n)
     snprintf(out, n, "ch%u+%d %s %d dBm", (unsigned)ap.primary, (int)ap.second, phy, ap.rssi);
 }
 
+int wifi_max_tx_power(void)
+{
+    int8_t power = 0;
+    if (esp_wifi_get_max_tx_power(&power) != ESP_OK) {
+        return -1;
+    }
+    return (int)power;
+}
+
+int wifi_force_max_tx_power(void)
+{
+    /*
+     * The provisioning component applies a value from NVS on every station start
+     * ("max_tx_power", wifi_station.cc). esp_wifi_set_max_tx_power() takes 0.25 dBm
+     * units, so a portal that stores "20" meaning 20 dBm would actually set 5 dBm.
+     * Nothing in this firmware needs to save transmit power - the node is mains
+     * powered - so it is pinned to the build's ceiling and the value is reported.
+     */
+    int before = wifi_max_tx_power();
+    if (before < 0) {
+        ESP_LOGW(TAG, "could not read the max TX power");
+        return -1;
+    }
+
+    /* CONFIG_ESP_PHY_MAX_WIFI_TX_POWER is 20 dBm = 80 in these units. */
+    const int want = 80;
+    if (before != want) {
+        esp_err_t err = esp_wifi_set_max_tx_power((int8_t)want);
+        int after = wifi_max_tx_power();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "esp_wifi_set_max_tx_power(%d) failed: %s", want, esp_err_to_name(err));
+        } else if (after != want) {
+            ESP_LOGW(TAG, "max TX power is %d (%.2f dBm), wanted %d - the driver refused",
+                     after, after / 4.0, want);
+        } else {
+            ESP_LOGW(TAG, "max TX power was %d (%.2f dBm) - raised to %d (%.2f dBm). "
+                          "A reduced TX power weakens the uplink while the downlink RSSI "
+                          "still looks healthy, which is what was happening here.",
+                     before, before / 4.0, want, want / 4.0);
+        }
+        return after;
+    }
+    return before;
+}
+
 void wifi_set_event_callback(wifi_event_cb_t cb)
 {
     s_callback = cb;

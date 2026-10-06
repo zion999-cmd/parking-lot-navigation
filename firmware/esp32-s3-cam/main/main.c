@@ -134,12 +134,23 @@ static void diagnostics_task(void *arg)
             ESP_LOGW(TAG, "modem sleep is on (%s) - turning it off again", wifi_power_save_name());
             wifi_disable_power_save();
         }
+        if (wifi_is_connected() && wifi_max_tx_power() < 80) {
+            /*
+             * The provisioning component restores this from NVS on every station
+             * start, so it is re-checked instead of trusted. A reduced transmit power
+             * weakens only the uplink, which cannot be seen in the RSSI printed on the
+             * same line - the device goes on receiving the AP perfectly well while its
+             * own frames struggle.
+             */
+            wifi_force_max_tx_power();
+        }
 
         char link[48];
         wifi_link_summary(link, sizeof(link));
 
-        ESP_LOGI(TAG, "uptime=%us fw=%s fps=%.1f frames=%u clients=%d rssi=%d dBm "
-                      "net=%s ip=%s ps=%s link=\"%s\" heap_internal=%u heap_psram=%u heap_min=%u",
+        ESP_LOGI(TAG, "uptime=%us fw=%s fps=%.1f frames=%u clients=%d rssi=%d dBm net=%s ip=%s "
+                      "ps=%s tx=%.2fdBm link=\"%s\" disp=%u heap_internal=%u dma_free=%u "
+                      "heap_psram=%u heap_min=%u",
                  (unsigned)(esp_timer_get_time() / 1000000),
                  ota_running_version(),
                  (double)stream_fps(),
@@ -149,8 +160,11 @@ static void diagnostics_task(void *arg)
                  provisioning_state_name(),
                  wifi_ip_string(),
                  wifi_power_save_name(),
+                 wifi_max_tx_power() / 4.0,
                  link,
+                 (unsigned)display_flush_count(),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
                  (unsigned)esp_get_minimum_free_heap_size());
     }
