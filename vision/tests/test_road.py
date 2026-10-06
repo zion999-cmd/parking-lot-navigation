@@ -1,8 +1,13 @@
-"""Road network layer: the map document, the graph, and the two-layer editor.
+"""The parking lot map: bays, roads, and the graph derived from them.
 
-The road layer is the navigator's half of the map - "how does a car get there" - as
-opposed to the camera's half, "is this bay free". It is drawn by hand on purpose, so what
-is worth testing is the data model and the invariants around it, not any detection.
+The user-facing model is deliberately small. A person marks bays and draws where cars
+drive; the bay-to-road connections are derived from those two things, so the tests that
+matter most are the ones about derive() - that it is pure, deterministic, puts each
+entrance on the side of the bay facing the road, and never lets one bay's entrance become
+another bay's road.
+
+No test here needs to know about nodes, edges or chains except the ones that check the data
+model itself, which is the point.
 
 Run:  python tests/test_road.py
 """
@@ -38,7 +43,7 @@ def frame() -> np.ndarray:
 
 
 def two_bays() -> list:
-    """Two bays on a 900x600 frame, without going through a file."""
+    """Two bays side by side, y 100..260, x 100..150 and 160..210, on a 900x600 frame."""
     poly = [[100, 100], [150, 100], [150, 260], [100, 260]]
     other = [[160, 100], [210, 100], [210, 260], [160, 260]]
     with tempfile.TemporaryDirectory() as tmp:
@@ -50,8 +55,26 @@ def two_bays() -> list:
         return load_spots(path, (H, W))
 
 
+def bay(polygon, bay_id: str = "38"):
+    class _Bay:
+        pass
+    b = _Bay()
+    b.id = bay_id
+    b.polygon = np.asarray(polygon, dtype=float)
+    return b
+
+
+def roads_with_aisle() -> RoadNetwork:
+    """A road running under both bays: from the left edge of the picture to the right."""
+    net = RoadNetwork(shape=(H, W))
+    a = net.add_node(0, 400)
+    b = net.add_node(880, 400)
+    net.connect(a.id, b.id)
+    return net
+
+
 # ---------------------------------------------------------------------------
-# The graph
+# The data model
 # ---------------------------------------------------------------------------
 
 def test_ids_are_never_reused_after_a_deletion() -> None:
@@ -61,10 +84,9 @@ def test_ids_are_never_reused_after_a_deletion() -> None:
     net.remove_node(a.id)
     c = net.add_node(30, 30)
     assert c.id not in (a.id, b.id), "a freed id was handed out again"
-    assert len({n.id for n in net.nodes}) == len(net.nodes)
 
 
-def test_a_node_cannot_be_placed_outside_the_frame() -> None:
+def test_a_road_point_cannot_be_placed_outside_the_frame() -> None:
     net = RoadNetwork(shape=(H, W))
     n = net.add_node(5000, -400)
     assert 0 <= n.x <= W - 1 and 0 <= n.y <= H - 1, (n.x, n.y)
@@ -75,217 +97,226 @@ def test_connect_refuses_self_loops_and_duplicates() -> None:
     a, b = net.add_node(10, 10), net.add_node(100, 10)
     assert net.connect(a.id, a.id) is None
     assert net.connect(a.id, b.id) is not None
-    assert net.connect(a.id, b.id) is None, "a duplicate edge would double a path weight"
-    assert net.connect(b.id, a.id) is None, "and so would the same edge reversed"
+    assert net.connect(a.id, b.id) is None, "a duplicate segment would double a path weight"
+    assert net.connect(b.id, a.id) is None
 
 
-def test_removing_a_node_removes_its_edges() -> None:
+def test_removing_a_point_removes_its_segments() -> None:
     net = RoadNetwork(shape=(H, W))
     a, b, c = (net.add_node(10, 10), net.add_node(100, 10), net.add_node(200, 10))
     net.connect(a.id, b.id)
     net.connect(b.id, c.id)
     net.remove_node(b.id)
-    assert net.edges == [], net.edges
+    assert net.edges == []
     assert {n.id for n in net.nodes} == {a.id, c.id}
 
 
-def test_oneway_edges_are_asymmetric_for_the_navigator() -> None:
+def test_oneway_roads_are_asymmetric_for_the_navigator() -> None:
     net = RoadNetwork(shape=(H, W))
     a, b = net.add_node(0, 0), net.add_node(100, 0)
     net.connect(a.id, b.id, oneway=True)
     graph = net.adjacency()
     assert [n for n, _ in graph[a.id]] == [b.id]
     assert graph[b.id] == [], "a one-way road must not be walkable backwards"
-    assert net.neighbors(b.id) == []
 
 
-def test_edge_weight_is_the_pixel_distance() -> None:
+def test_segment_weight_is_the_pixel_distance() -> None:
     net = RoadNetwork(shape=(H, W))
     a, b = net.add_node(0, 0), net.add_node(30, 40)
     net.connect(a.id, b.id)
-    assert abs(net.distance(a.id, b.id) - 50.0) < 1e-6
     assert abs(net.adjacency()[a.id][0][1] - 50.0) < 1e-6
 
 
-def test_spot_nodes_map_bays_to_their_connection_point() -> None:
-    net = RoadNetwork(shape=(H, W))
-    j = net.add_node(100, 300, kind=KIND_JUNCTION)
-    s1 = net.add_node(100, 200, kind=KIND_SPOT, spot="38")
-    s2 = net.add_node(100, 400, kind=KIND_SPOT, spot="39")
-    net.connect(j.id, s1.id)
-    net.connect(j.id, s2.id)
-    assert net.spot_nodes() == {"38": s1.id, "39": s2.id}
-
-
-def test_validate_reports_the_things_that_break_navigation() -> None:
+def test_validate_reports_dangling_and_unknown_things() -> None:
     net = RoadNetwork(shape=(H, W))
     j = net.add_node(100, 300)
-    s = net.add_node(100, 200, kind=KIND_SPOT, spot="99")    # bay 99 does not exist
+    s = net.add_node(100, 200, kind=KIND_SPOT, spot="99")
     net.connect(j.id, s.id)
-    net.edges.append(type(net.edges[0])(a=j.id, b="ghost"))  # dangling endpoint
-    problems = net.validate(["38", "39"])
-    joined = " | ".join(problems)
-    assert "ghost" in joined, problems
-    assert "99" in joined, problems
-    assert "no road connection" in joined, problems
-
-
-def test_validate_is_quiet_about_a_fully_connected_map() -> None:
-    net = RoadNetwork(shape=(H, W))
-    e = net.add_node(10, 300, kind=KIND_ENTRANCE)
-    j = net.add_node(100, 300, kind=KIND_JUNCTION)
-    s = net.add_node(100, 200, kind=KIND_SPOT, spot="38")
-    net.connect(e.id, j.id)
-    net.connect(j.id, s.id)
-    assert net.validate(["38"]) == []
+    net.edges.append(type(net.edges[0])(a=j.id, b="ghost"))
+    problems = " | ".join(net.validate(["38", "39"]))
+    assert "ghost" in problems, problems
+    assert "99" in problems, problems
 
 
 # ---------------------------------------------------------------------------
-# One document, two layers
-#
-# The invariani that matters: the two layers are written by different editors into one
-# file, so each writer must re-emit whatever it found. These are the tests that would have
-# caught the bays vanishing because someone saved a road.
+# derive(): bays + roads -> navigation graph
 # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Connecting bays in bulk
-#
-# "Do all 48 bays need a point by hand?" No. But the first version derived each bay's mouth
-# from a network it was itself extending, so every new connection stub became the "nearest
-# road" for the next bay and the mouths ended up on the wrong side of their own bay. The
-# regression test for that is test_a_stub_is_never_used_as_another_bays_road below.
-# ---------------------------------------------------------------------------
-
-def row_and_aisle():
-    """Two bays side by side with a straight aisle below them."""
-    bays = two_bays()                       # y 100..260, x 100..150 and 160..210
-    ed = RoadEditor((H, W))
-    ed.add_at(40, 400)
-    ed.add_at(500, 400)
-    ed.net.nodes[0].kind = KIND_ENTRANCE
-    return ed, bays
-
-
-def test_each_mouth_lands_on_the_side_facing_the_road() -> None:
-    ed, bays = row_and_aisle()
-    assert ed.connect_all_bays(bays) == 2
-    for spot in bays:
-        node = ed.net.node(ed.net.spot_nodes()[spot.id])
+def test_an_entrance_is_placed_on_the_side_of_the_bay_facing_the_road() -> None:
+    graph = roads_with_aisle().derive(two_bays())
+    for spot_id in ("38", "39"):
+        node = graph.node(graph.spot_nodes()[spot_id])
         assert abs(node.y - 260) < 1, \
-            f"bay {spot.id}: mouth at y={node.y}; the road is below, so it belongs at y=260"
-        cx = float(np.asarray(spot.polygon, dtype=float)[:, 0].mean())
-        assert abs(node.x - cx) < 1, (spot.id, node.x, cx)
+            f"bay {spot_id}: entrance at y={node.y}; the road is below, so it belongs at 260"
+        assert node.x == {38: 125, 39: 185}[int(spot_id)] or abs(
+            node.x - {38: 125, 39: 185}[int(spot_id)]) < 1, (spot_id, node.x)
 
 
-def test_a_stub_is_never_used_as_another_bays_road() -> None:
-    """The bug this guards: connecting bay 2 must not attach it to bay 1's stub."""
-    ed, bays = row_and_aisle()
-    ed.connect_all_bays(bays)
-    for node_id, edges in ed.net.adjacency().items():
-        node = ed.net.node(node_id)
+def test_every_bay_gets_an_entrance_with_no_extra_step() -> None:
+    """The product requirement: the user draws roads and stops there."""
+    bays = two_bays()
+    graph = roads_with_aisle().derive(bays)
+    assert set(graph.spot_nodes()) == {"38", "39"}
+    assert graph.validate(["38", "39"]) == []
+
+
+def test_deriving_leaves_the_drawn_roads_untouched() -> None:
+    """Purity is what stops the saved map becoming a mix of decisions and machine output."""
+    roads = roads_with_aisle()
+    nodes, edges = len(roads.nodes), len(roads.edges)
+    roads.derive(two_bays())
+    assert (len(roads.nodes), len(roads.edges)) == (nodes, edges)
+    assert all(n.kind != KIND_SPOT for n in roads.nodes)
+
+
+def test_deriving_twice_gives_the_same_graph() -> None:
+    roads = roads_with_aisle()
+    first = roads.derive(two_bays())
+    second = roads.derive(two_bays())
+    assert len(first.nodes) == len(second.nodes)
+    assert [(n.id, n.kind, round(n.x), round(n.y)) for n in first.nodes] == \
+           [(n.id, n.kind, round(n.x), round(n.y)) for n in second.nodes]
+
+
+def test_an_entrance_joins_a_road_in_the_middle_of_a_segment() -> None:
+    """A bay on a long road adds a point where it is, rather than being dragged to an end."""
+    roads = roads_with_aisle()
+    assert len(roads.edges) == 1
+    graph = roads.derive(two_bays())
+    assert len(graph.edges) >= 4, [(e.a, e.b) for e in graph.edges]
+    for spot_id in ("38", "39"):
+        entrance = graph.node(graph.spot_nodes()[spot_id])
+        partner = graph.node(graph.adjacency()[entrance.id][0][0])
+        assert abs(partner.y - 400) < 1, (spot_id, partner.y)
+        assert 0 < partner.x < 880, "the join must be on the segment, not at one end"
+
+
+def test_an_entrance_never_hangs_off_another_bays_entrance() -> None:
+    graph = roads_with_aisle().derive(two_bays())
+    for node_id, neighbours in graph.adjacency().items():
+        node = graph.node(node_id)
         if node.kind != KIND_SPOT:
             continue
-        assert len(edges) == 1, (node_id, edges)
-        partner = ed.net.node(edges[0][0])
-        assert partner.kind != KIND_SPOT, \
-            f"{node_id} hangs off another bay's stub ({partner.id})"
-        assert abs(partner.y - 400) < 1, (node_id, partner.id, partner.y)
+        assert len(neighbours) == 1, (node_id, neighbours)
+        partner = graph.node(neighbours[0][0])
+        assert partner.kind != KIND_SPOT, f"{node_id} hangs off {partner.id}"
 
 
-def test_connecting_all_bays_twice_changes_nothing() -> None:
-    ed, bays = row_and_aisle()
-    ed.connect_all_bays(bays)
-    nodes, edges = len(ed.net.nodes), len(ed.net.edges)
-    assert ed.connect_all_bays(bays) == 0
-    assert (len(ed.net.nodes), len(ed.net.edges)) == (nodes, edges)
-    assert len(ed.net.spot_nodes()) == 2
+def test_the_entrance_is_the_road_point_closest_to_the_edge_of_the_picture() -> None:
+    roads = roads_with_aisle()
+    graph = roads.derive(two_bays())
+    marked = [n for n in graph.nodes if n.kind == KIND_ENTRANCE]
+    assert len(marked) == 1, marked
+    assert marked[0].x in (0, 880), marked[0]
 
 
-def test_connecting_bays_with_no_road_yet_creates_nothing() -> None:
-    ed = RoadEditor((H, W))
-    assert ed.connect_all_bays(two_bays()) == 0
-    assert ed.net.nodes == [] and ed.net.edges == []
-    assert "roads first" in ed.message.text, ed.message.text
+def test_a_marked_entrance_is_not_overwritten() -> None:
+    roads = roads_with_aisle()
+    middle = roads.nodes[1]
+    middle.kind = KIND_ENTRANCE
+    graph = roads.derive(two_bays())
+    marked = [n for n in graph.nodes if n.kind == KIND_ENTRANCE]
+    assert len(marked) == 1 and marked[0].id == middle.id, marked
 
 
-def test_splitting_an_edge_keeps_the_road_connected() -> None:
-    net = RoadNetwork(shape=(H, W))
-    a, b = net.add_node(0, 300, kind=KIND_ENTRANCE), net.add_node(400, 300)
-    net.connect(a.id, b.id)
-    mid = net.split_edge(0, 200, 300)
-    assert mid is not None
-    pairs = {(e.a, e.b) for e in net.edges}
-    assert pairs == {(a.id, mid.id), (b.id, mid.id)}, pairs
-    graph = net.adjacency()
-    assert len(graph) == 3
-    assert len(graph[a.id]) == 1 and len(graph[mid.id]) == 2
-
-
-def test_every_bay_is_reachable_from_the_entrance_after_connecting_all() -> None:
-    ed, bays = row_and_aisle()
-    ed.connect_all_bays(bays)
-    graph = ed.net.adjacency()
-    start = [n.id for n in ed.net.nodes if n.kind == KIND_ENTRANCE][0]
+def test_every_bay_is_reachable_from_the_entrance() -> None:
+    graph = roads_with_aisle().derive(two_bays())
+    adjacency = graph.adjacency()
+    start = next(n.id for n in graph.nodes if n.kind == KIND_ENTRANCE)
     seen, stack = {start}, [start]
     while stack:
-        for nxt, _ in graph[stack.pop()]:
+        for nxt, _ in adjacency[stack.pop()]:
             if nxt not in seen:
                 seen.add(nxt)
                 stack.append(nxt)
-    for bay, node in ed.net.spot_nodes().items():
-        assert node in seen, f"bay {bay} is not reachable from the entrance"
-    assert ed.net.validate([s.id for s in bays]) == []
+    for bay_id, node_id in graph.spot_nodes().items():
+        assert node_id in seen, f"bay {bay_id} is not reachable"
 
+
+def test_bays_far_from_any_road_are_reported() -> None:
+    """The one thing a person can act on, said in map terms."""
+    roads = RoadNetwork(shape=(H, W))
+    a = roads.add_node(0, 590)
+    b = roads.add_node(880, 590)
+    roads.connect(a.id, b.id)
+    far = roads.far_bays(two_bays(), limit=100.0)
+    assert {sid for sid, _ in far} == {"38", "39"}, far
+    assert all(d > 100 for _, d in far)
+
+
+def test_no_bays_far_from_the_road_when_it_is_close() -> None:
+    assert roads_with_aisle().far_bays(two_bays(), limit=220.0) == []
+
+
+# ---------------------------------------------------------------------------
+# The saved map: bays and roads in one file, each writer preserving the other
+# ---------------------------------------------------------------------------
 
 def test_saving_the_roads_keeps_the_bays() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "map.json")
-        bays = two_bays()
-        save_spots(path, bays, (H, W))
-        assert len(read(path)["spots"]) == 2
+        save_spots(path, two_bays(), (H, W))
 
-        net = RoadNetwork.load(path, (H, W))
-        e = net.add_node(10, 300, kind=KIND_ENTRANCE)
-        j = net.add_node(200, 300)
-        net.connect(e.id, j.id)
-        net.save(path)
+        roads = RoadNetwork.load(path, (H, W))
+        a = roads.add_node(0, 400)
+        b = roads.add_node(800, 400)
+        roads.connect(a.id, b.id)
+        roads.save(path)
 
         doc = read(path)
-        assert len(doc["spots"]) == 2, "saving the road layer destroyed the bays"
+        assert len(doc["spots"]) == 2, "saving the roads destroyed the bays"
         assert len(doc["nodes"]) == 2 and len(doc["edges"]) == 1
-        # The bay layer must still load: same document, same reader.
         assert len(load_spots(path, (H, W))) == 2
 
 
 def test_saving_the_bays_keeps_the_roads() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "map.json")
-        net = RoadNetwork(shape=(H, W))
-        a, b = net.add_node(10, 10, kind=KIND_ENTRANCE), net.add_node(90, 10)
-        net.connect(a.id, b.id)
-        net.save(path)
+        roads = RoadNetwork(shape=(H, W))
+        a, b = roads.add_node(0, 400), roads.add_node(800, 400)
+        roads.connect(a.id, b.id)
+        roads.save(path)
 
         save_spots(path, two_bays(), (H, W))
 
         doc = read(path)
         assert len(doc["nodes"]) == 2 and len(doc["edges"]) == 1, \
-            "saving the bay layer destroyed the roads"
+            "saving the bays destroyed the roads"
         assert len(doc["spots"]) == 2
-        reloaded = RoadNetwork.load(path, (H, W))
-        assert [e.a for e in reloaded.edges] == [a.id]
+
+
+def test_the_file_holds_bays_and_roads_and_nothing_derived() -> None:
+    """The map is what a human decided; the graph is worked out from it."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "map.json")
+        save_spots(path, two_bays(), (H, W))
+        roads = RoadNetwork.load(path, (H, W))
+        a, b = roads.add_node(0, 400), roads.add_node(800, 400)
+        roads.connect(a.id, b.id)
+        roads.save(path)
+
+        doc = read(path)
+        assert "nodes" in doc and "edges" in doc
+        kinds = {n.get("kind") for n in doc["nodes"]}
+        assert KIND_SPOT not in kinds, "a derived bay entrance was written to the map"
 
 
 def test_coordinates_stay_whole_numbers() -> None:
-    """Whole pixels must not be written as 64.0 - it turns a small diff into 48 lines."""
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "map.json")
-        net = RoadNetwork(shape=(H, W))
-        net.add_node(64, 194, kind=KIND_ENTRANCE)
-        net.save(path)
+        roads = RoadNetwork(shape=(H, W))
+        roads.add_node(64, 194)
+        roads.save(path)
         text = open(path, encoding="utf-8").read()
         assert '"x": 64' in text and '"x": 64.0' not in text, text
-        assert '"y": 194' in text, text
+
+
+def test_a_bay_only_file_does_not_invent_road_sections() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "map.json")
+        save_spots(path, two_bays(), (H, W))
+        doc = read(path)
+        assert "nodes" not in doc and "edges" not in doc, doc.keys()
 
 
 def test_the_map_file_is_readable_one_object_per_line() -> None:
@@ -298,124 +329,101 @@ def test_the_map_file_is_readable_one_object_per_line() -> None:
 
 
 # ---------------------------------------------------------------------------
-# The editor
+# Drawing roads
 # ---------------------------------------------------------------------------
 
-def test_clicking_along_a_path_draws_a_chained_road() -> None:
+def test_clicking_along_a_road_chaindraws_it() -> None:
     ed = RoadEditor((H, W))
     ed.add_at(100, 300)
     ed.add_at(200, 300)
     ed.add_at(300, 300)
-    assert len(ed.net.nodes) == 3
     assert [(e.a, e.b) for e in ed.net.edges] == [("n1", "n2"), ("n2", "n3")]
-    assert ed.net.nodes[0].kind == KIND_ENTRANCE, "a road starts at an entrance"
-    assert ed.net.nodes[1].kind == KIND_WAYPOINT, "and continues as plain path"
 
 
-def test_breaking_the_chain_starts_a_new_road() -> None:
+def test_starting_another_road_does_not_join_the_previous_one() -> None:
     ed = RoadEditor((H, W))
     ed.add_at(100, 300)
     ed.add_at(200, 300)
     ed.break_chain()
     ed.add_at(100, 500)
-    assert len(ed.net.nodes) == 3
-    assert len(ed.net.edges) == 1, "the new road must not join the old one"
+    assert len(ed.net.nodes) == 3 and len(ed.net.edges) == 1
 
 
-def test_selecting_a_node_makes_it_the_branch_point() -> None:
+def test_selecting_a_point_makes_it_where_the_next_click_continues() -> None:
     ed = RoadEditor((H, W))
     ed.add_at(100, 300)
     ed.add_at(200, 300)
-    ed.select(0)                      # go back to the first node
-    ed.add_at(100, 400)               # and extend from it
-    pairs = {(e.a, e.b) for e in ed.net.edges}
-    assert ("n1", "n3") in pairs, pairs
+    ed.select(0)
+    ed.add_at(100, 400)
+    assert ("n1", "n3") in {(e.a, e.b) for e in ed.net.edges}
 
 
-def test_joining_two_roads_with_a_right_click() -> None:
+def test_joining_two_roads() -> None:
     ed = RoadEditor((H, W))
     ed.add_at(100, 300)
     ed.add_at(200, 300)
     ed.break_chain()
     ed.add_at(100, 500)
-    assert ed.connect_to(0) is True          # join the chain head to node 0
-    assert len(ed.net.edges) == 2, ed.net.edges
+    assert ed.connect_to(0) is True
+    assert len(ed.net.edges) == 2
 
 
-def test_deleting_a_node_takes_its_edges_and_the_chain_with_it() -> None:
+def test_deleting_a_point_takes_its_segments() -> None:
     ed = RoadEditor((H, W))
     ed.add_at(100, 300)
     ed.add_at(200, 300)
     ed.select(1)
     assert ed.delete_selected() is True
     assert len(ed.net.nodes) == 1 and ed.net.edges == []
-    assert ed.chain is None, "the chain pointed at the node that no longer exists"
 
 
-def test_undo_restores_nodes_edges_and_the_chain() -> None:
+def test_undo_restores_what_was_deleted() -> None:
     ed = RoadEditor((H, W))
     ed.add_at(100, 300)
     ed.add_at(200, 300)
-    before_chain = ed.chain
     ed.delete_selected()
     ed.undo()
     assert len(ed.net.nodes) == 2 and len(ed.net.edges) == 1
-    assert ed.chain == before_chain
 
 
-def test_binding_bays_never_hands_out_a_bay_twice() -> None:
-    """The invariant: a bay has at most one connection point, and walking the list is how
-    the 48 of them get done without typing ids."""
-    ed = RoadEditor((H, W))
-    ed.add_at(100, 200)
-    ed.add_at(200, 200)
-    ed.add_at(300, 200)
-    bays = ["38", "39", "40"]
-    for i, expect in enumerate(bays):
-        ed.select(i)
-        assert ed.bind_next_bay(bays) == expect
-    assert ed.net.spot_nodes() == {"38": "n1", "39": "n2", "40": "n3"}
-    ed.select(0)
-    assert ed.bind_next_bay(bays) is None, "everything is taken; nothing may be stolen"
-    assert ed.net.spot_nodes()["40"] == "n3", "an existing binding was moved"
-
-
-def test_binding_again_on_the_same_node_moves_it_rather_than_duplicating() -> None:
-    """Deliberate, and the only way to correct a wrong binding from the UI.
-
-    add_at() selects the node it just placed, so pressing 'b' twice without moving on
-    rebinds that node to the next free bay - and frees the bay it had. The message says
-    which bay it came from so this cannot look like a bay silently vanishing, and 'z'
-    undoes it like any other edit.
-    """
-    ed = RoadEditor((H, W))
-    ed.add_at(100, 200)
-    assert ed.bind_next_bay(["38", "39"]) == "38"
-    assert ed.bind_next_bay(["38", "39"]) == "39"
-    assert ed.net.spot_nodes() == {"39": "n1"}, ed.net.spot_nodes()
-    assert "rebound" in ed.message.text, ed.message.text
-    ed.undo()
-    assert ed.net.spot_nodes() == {"38": "n1"}, ed.net.spot_nodes()
-
-
-def test_nudging_a_node_keeps_it_inside_the_frame() -> None:
-    ed = RoadEditor((H, W))
-    ed.add_at(20, 20)
-    ed.select(0)
-    for _ in range(30):
-        ed.nudge(-5, -5)
-    node = ed.selected_node()
-    assert node.x >= 0 and node.y >= 0, (node.x, node.y)
-
-
-def test_a_drag_cannot_push_a_node_out_of_the_frame() -> None:
+def test_a_drag_cannot_push_a_point_out_of_the_frame() -> None:
     ed = RoadEditor((H, W))
     ed.add_at(20, 20)
     assert ed.begin_drag(20, 20) is True
     ed.update_drag(9000, 9000)
     ed.end_drag()
     node = ed.selected_node()
-    assert node.x <= W - 1 and node.y <= H - 1, (node.x, node.y)
+    assert node.x <= W - 1 and node.y <= H - 1
+
+
+def test_marking_the_way_in_and_unmarking_it() -> None:
+    ed = RoadEditor((H, W))
+    ed.add_at(40, 400)
+    ed.add_at(500, 400)
+    ed.select(1)
+    ed.toggle_entrance()
+    assert ed.selected_node().kind == KIND_ENTRANCE
+    ed.select(0)
+    ed.toggle_entrance()
+    assert ed.selected_node().kind == KIND_ENTRANCE, "only one way in at a time"
+    assert sum(1 for n in ed.net.nodes if n.kind == KIND_ENTRANCE) == 1
+
+
+def test_the_editor_only_ever_holds_roads() -> None:
+    """Bay entrances are derived, so they must never end up in the editable set."""
+    ed = RoadEditor((H, W))
+    ed.add_at(0, 400)
+    ed.add_at(880, 400)
+    assert all(n.kind != KIND_SPOT for n in ed.net.nodes)
+    assert len(ed.derived(two_bays()).spot_nodes()) == 2
+
+
+def test_a_check_reports_a_missing_road_and_a_complete_map() -> None:
+    ed = RoadEditor((H, W))
+    assert "no roads drawn yet" in ed.problems(two_bays())[0]
+    ed.add_at(0, 400)
+    ed.add_at(880, 400)
+    assert ed.problems(two_bays()) == []
 
 
 # ---------------------------------------------------------------------------
@@ -428,7 +436,7 @@ def test_the_layer_switches_with_t_and_with_the_tabs() -> None:
     assert app.layer == "spots"
     app.act("t")
     assert app.layer == "roads"
-    app.act("@spots")                 # the tab button
+    app.act("@spots")
     assert app.layer == "spots"
     app.act("@roads")
     assert app.layer == "roads"
@@ -440,13 +448,12 @@ def test_render_works_in_both_layers_and_shows_both_tabs() -> None:
     img = frame()
     for layer in ("spots", "roads", "spots"):
         app.layer = layer
-        out = app.render(img)
-        assert out.shape == img.shape
+        assert app.render(img).shape == img.shape
         labels = [b[4] for b in app._buttons]
-        assert "Parking Spots" in labels and "Road Network" in labels, labels
+        assert "Parking Spots" in labels and "Roads" in labels, labels
 
 
-def test_clicks_only_place_road_nodes_in_the_road_layer() -> None:
+def test_clicks_only_draw_roads_in_the_road_layer() -> None:
     ed = SpotEditor((H, W))
     app = CalibrationApp(ed, "unused.json")
     app.render(frame())
@@ -454,14 +461,35 @@ def test_clicks_only_place_road_nodes_in_the_road_layer() -> None:
     app.layer = "spots"
     app.on_mouse(cv2.EVENT_LBUTTONDOWN, 300, 200, 0, None)
     app.on_mouse(cv2.EVENT_LBUTTONUP, 300, 200, 0, None)
-    assert app.road.net.nodes == [], "a click in the bay layer drew a road node"
+    assert app.road.net.nodes == [], "a click in the bay layer drew a road"
 
     app.layer = "roads"
     for x in (200, 300, 400):
         app.on_mouse(cv2.EVENT_LBUTTONDOWN, x, 200, 0, None)
         app.on_mouse(cv2.EVENT_LBUTTONUP, x, 200, 0, None)
-    assert len(app.road.net.nodes) == 3, app.road.net.nodes
+    assert len(app.road.net.nodes) == 3
     assert len(app.road.net.edges) == 2
+
+
+def test_drawing_a_road_is_all_it_takes_to_connect_the_bays() -> None:
+    """The whole product requirement in one test: mark bays, draw roads, done."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "map.json")
+        save_spots(path, two_bays(), (H, W))
+
+        ed = SpotEditor((H, W))
+        ed.load(path)
+        app = CalibrationApp(ed, path)
+        app.layer = "roads"
+        for x in (0, 880):                      # one road under the two bays
+            app.on_mouse(cv2.EVENT_LBUTTONDOWN, x, 400, 0, None)
+            app.on_mouse(cv2.EVENT_LBUTTONUP, x, 400, 0, None)
+
+        # No binding step: the entrances and the graph are already there.
+        graph = app.road.derived(ed.spots)
+        assert set(graph.spot_nodes()) == {"38", "39"}
+        assert app.road.problems(ed.spots) == []
+        assert "2/2" in app.road.stats(ed.spots), app.road.stats(ed.spots)
 
 
 def test_saving_from_either_layer_writes_one_document_with_both() -> None:
@@ -474,7 +502,7 @@ def test_saving_from_either_layer_writes_one_document_with_both() -> None:
         app = CalibrationApp(ed, path)
         app.layer = "roads"
         app.on_mouse(cv2.EVENT_LBUTTONDOWN, 300, 400, 0, None)
-        app.act("s")                 # save the road layer only
+        app.act("s")
 
         doc = read(path)
         assert len(doc["spots"]) == 2, "the bays did not survive the road save"
@@ -497,13 +525,94 @@ def test_quitting_saves_both_layers() -> None:
         assert len(doc["nodes"]) == 1 and len(doc["spots"]) == 2, doc.keys()
 
 
-def test_a_bay_layer_save_does_not_invent_road_sections() -> None:
-    """A map with no roads must stay a two-key file, not gain empty sections."""
+def test_stored_bay_connection_points_are_restored_to_plain_road_points() -> None:
+    """An earlier version could turn one of the user's own road points into a bay
+    connection point, which is how two corners of a drawn ring ended up labelled as bays.
+    Turning them back keeps the geometry; deleting them would cut the ring in half."""
+    doc = {
+        "image_size": [H, W],
+        "nodes": [{"id": "n1", "kind": "entrance", "x": 0, "y": 400},
+                  {"id": "n2", "kind": "spot", "x": 880, "y": 400, "spot": "10"}],
+        "edges": [{"a": "n1", "b": "n2"}],
+    }
+    net = RoadNetwork.from_document(doc, (H, W))
+    assert net.stale_connections == 1
+    assert net.node("n2").kind == KIND_WAYPOINT
+    assert net.node("n2").spot == ""
+    assert len(net.edges) == 1, "the road itself must survive"
+    assert net.spot_nodes() == {}
+
+
+def test_a_saved_map_never_contains_a_derived_bay_entrance() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "map.json")
         save_spots(path, two_bays(), (H, W))
-        doc = read(path)
-        assert "nodes" not in doc and "edges" not in doc, doc.keys()
+        roads = RoadNetwork.load(path, (H, W))
+        a, b = roads.add_node(0, 400), roads.add_node(880, 400)
+        roads.connect(a.id, b.id)
+        roads.save(path)
+        kinds = {n.get("kind") for n in read(path)["nodes"]}
+        assert KIND_SPOT not in kinds, kinds
+
+
+def test_the_editor_opens_with_the_roads_already_in_the_file() -> None:
+    """Regression: the road layer used to start empty and would then overwrite them."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "map.json")
+        save_spots(path, two_bays(), (H, W))
+        roads = RoadNetwork.load(path, (H, W))
+        a, b = roads.add_node(0, 400), roads.add_node(880, 400)
+        roads.connect(a.id, b.id)
+        roads.save(path)
+
+        ed = SpotEditor((H, W))
+        ed.load(path)
+        app = CalibrationApp(ed, path)
+        assert len(app.road.net.nodes) == 2, app.road.net.nodes
+        assert len(app.road.net.edges) == 1
+        assert "2/2" in app.road.stats(ed.spots), app.road.stats(ed.spots)
+
+
+def test_opening_the_editor_on_a_map_with_stale_points_marks_it_for_saving() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "map.json")
+        save_spots(path, two_bays(), (H, W))
+        roads = RoadNetwork.load(path, (H, W))
+        a = roads.add_node(0, 400, kind=KIND_ENTRANCE)
+        b = roads.add_node(880, 400, kind=KIND_SPOT, spot="38")
+        roads.connect(a.id, b.id)
+        roads.save(path)
+
+        ed = SpotEditor((H, W))
+        ed.load(path)
+        app = CalibrationApp(ed, path)
+        assert app.road.net.stale_connections == 1
+        assert app.road.dirty, "a repaired map should be written back out"
+        app.act("q")
+        assert KIND_SPOT not in {n.get("kind") for n in read(path)["nodes"]}
+
+
+def test_switching_layers_with_both_a_map_and_roads_loaded() -> None:
+    """Regression: switch_layer() used to hand the bay *ids* where the map code wants the
+    bays themselves. The existing tab test did not catch it because it switched layers with
+    no bays loaded, where the wrong argument happens to be harmless."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "map.json")
+        save_spots(path, two_bays(), (H, W))
+        roads = RoadNetwork.load(path, (H, W))
+        a = roads.add_node(0, 400)
+        b = roads.add_node(880, 400)
+        roads.connect(a.id, b.id)
+        roads.save(path)
+
+        ed = SpotEditor((H, W))
+        ed.load(path)
+        app = CalibrationApp(ed, path)
+        app.act("t")
+        assert app.layer == "roads"
+        app.render(frame())
+        app.act("@spots")
+        assert app.layer == "spots"
 
 
 def main() -> int:

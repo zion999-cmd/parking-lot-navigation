@@ -32,7 +32,7 @@ pixels.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -158,6 +158,8 @@ class RoadNetwork:
     shape: Tuple[int, int] = (0, 0)          # (height, width); 0 means unset
     nodes: List[RoadNode] = field(default_factory=list)
     edges: List[RoadEdge] = field(default_factory=list)
+    # Not part of the map: how many stored bay connection points a load had to undo.
+    stale_connections: int = 0
 
     # -- lookup -------------------------------------------------------------
 
@@ -364,6 +366,81 @@ class RoadNetwork:
         parts = [f"{counts[k]} {KIND_NAMES[k]}" for k in NODE_KINDS if counts.get(k)]
         return f"road: {len(self.nodes)} nodes ({', '.join(parts)}), {len(self.edges)} edges"
 
+    # -- the derived navigation graph ---------------------------------------
+
+    def _border_node(self) -> Optional[RoadNode]:
+        """The road point closest to the edge of the frame.
+
+        A road that reaches the edge of the picture is where cars come in from outside, so
+        this is how the entrance is worked out rather than asked about. A person can still
+        mark a different point as the entrance; this is only the default.
+        """
+        if not self.nodes or self.shape[0] <= 0:
+            return None
+        h, w = self.shape
+        best: Optional[RoadNode] = None
+        best_d = None
+        for n in self.nodes:
+            d = min(n.x, n.y, (w - 1) - n.x, (h - 1) - n.y)
+            if best_d is None or d < best_d:
+                best, best_d = n, d
+        return best
+
+    def _attach_bay(self, spot) -> Optional[RoadNode]:
+        """Give one bay a connection point on the nearest road."""
+        pts = np.asarray(spot.polygon, dtype=np.float64)
+        centre = pts.mean(axis=0)
+        near = self.closest_point(float(centre[0]), float(centre[1]), skip_stubs=True)
+        if near is None:
+            return None
+        mx, my = bay_mouth(pts, (near.x, near.y))
+        return self.attach(mx, my, kind=KIND_SPOT, spot=spot.id, skip_stubs=True)
+
+    def derive(self, spots: Sequence) -> "RoadNetwork":
+        """The navigation graph: the roads as drawn, plus one connection per bay.
+
+        Derived, and deliberately not stored. The map file holds the two things a human
+        decided - the bay polygons and the roads a car can drive - and the graph is worked
+        out from those. Nothing here looks at the image: a bay's entrance is the midpoint of
+        whichever of its sides faces the nearest road, which follows from the polygon and
+        the road alone.
+
+        Pure. It returns a new network and leaves the roads as drawn untouched, so calling
+        it again cannot accumulate stubs, and the saved map never becomes a mix of human
+        decisions and machine output. It is also deterministic: same roads, same bays, same
+        result.
+        """
+        out = RoadNetwork(shape=self.shape,
+                          nodes=[replace(n) for n in self.nodes],
+                          edges=[replace(e) for e in self.edges])
+        if not any(n.kind == KIND_ENTRANCE for n in out.nodes):
+            entrance = out._border_node()
+            if entrance is not None:
+                entrance.kind = KIND_ENTRANCE
+        for spot in spots:
+            out._attach_bay(spot)
+        return out
+
+    def far_bays(self, spots: Sequence, limit: float) -> List[Tuple[str, float]]:
+        """Bays whose entrance is further than `limit` from the nearest road.
+
+        Reported in map terms rather than graph terms because that is the only thing the
+        person drawing can act on: a bay that far away usually means a road is missing.
+        """
+        out: List[Tuple[str, float]] = []
+        for spot in spots:
+            pts = np.asarray(spot.polygon, dtype=np.float64)
+            centre = pts.mean(axis=0)
+            near = self.closest_point(float(centre[0]), float(centre[1]))
+            if near is None:
+                continue
+            mouth = bay_mouth(pts, (near.x, near.y))
+            d = math.hypot(mouth[0] - near.x, mouth[1] - near.y)
+            if d > limit:
+                out.append((spot.id, d))
+        out.sort(key=lambda item: -item[1])
+        return out
+
     # -- validation ---------------------------------------------------------
 
     def validate(self, spot_ids: Optional[Sequence[str]] = None) -> List[str]:
@@ -400,15 +477,6 @@ class RoadNetwork:
                 if n.kind == KIND_SPOT and n.spot and n.spot not in known:
                     problems.append(f"node {n.id} points at bay {n.spot}, which does not exist")
 
-        # A bay with no connection point is not an error (the road may not be drawn yet),
-        # but it is worth saying out loud, because navigation cannot reach it.
-        if spot_ids is not None and self.nodes:
-            missing = [s for s in spot_ids if s not in self.spot_nodes()]
-            if missing:
-                shown = ", ".join(missing[:6])
-                more = f" (+{len(missing) - 6} more)" if len(missing) > 6 else ""
-                problems.append(f"{len(missing)} bay(s) have no road connection: {shown}{more}")
-
         for n in self.nodes:
             if n.kind == KIND_SPOT and not n.spot:
                 problems.append(f"node {n.id} is a bay connection but names no bay")
@@ -423,8 +491,26 @@ class RoadNetwork:
 
     @staticmethod
     def from_document(doc: Dict[str, Any], shape: Tuple[int, int] = (0, 0)) -> "RoadNetwork":
-        nodes = [RoadNode.from_dict(r) for r in doc.get("nodes", []) or []
-                 if isinstance(r, dict)]
+        """Read the roads from a map document.
+
+        Any stored bay connection point is turned back into a plain road point. Those are
+        derived data and no longer written, but an earlier version of the tool did write
+        them - and worse, its "bind this point to a bay" action could convert one of the
+        user's own road points into a connection point, which is how two corners of a drawn
+        ring ended up labelled as bays. Turning them back keeps the geometry: deleting them
+        would have cut the ring in half.
+        """
+        nodes: List[RoadNode] = []
+        stale = 0
+        for raw in doc.get("nodes", []) or []:
+            if not isinstance(raw, dict):
+                continue
+            node = RoadNode.from_dict(raw)
+            if node.kind == KIND_SPOT:
+                node.kind = KIND_WAYPOINT
+                node.spot = ""
+                stale += 1
+            nodes.append(node)
         edges = [RoadEdge.from_dict(r) for r in doc.get("edges", []) or []
                  if isinstance(r, dict)]
         size = doc.get("image_size")
@@ -433,7 +519,7 @@ class RoadNetwork:
                 shape = (int(size[0]), int(size[1]))
             except (TypeError, ValueError):
                 pass
-        return RoadNetwork(shape=shape, nodes=nodes, edges=edges)
+        return RoadNetwork(shape=shape, nodes=nodes, edges=edges, stale_connections=stale)
 
     @staticmethod
     def load(path: str, shape: Tuple[int, int] = (0, 0)) -> "RoadNetwork":

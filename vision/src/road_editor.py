@@ -1,21 +1,19 @@
-"""Editing model for the road network, shaped exactly like SpotEditor.
+"""Drawing roads on the parking lot map.
 
-The window layer (``CalibrationApp``) drives both layers through the same handful of calls
-- select, begin_drag, update_drag, end_drag, nudge, delete_selected, undo, clear, load,
-save, ``_say`` - so hosting two layers in one window needs no special cases scattered
-through the input code. Keeping the two editors interchangeable is the point of this file.
+The person using this draws one thing: where a car can drive. That is the whole interface.
 
-The drawing interaction is a polyline, because that is how a road is actually drawn: click
-along the path and each new node connects to the one before it.
+Everything else that the navigator needs is derived, not asked for:
 
-    入口 ──click──click──click── Spot 38
+    bay polygons (already marked)  +  roads (drawn)  ->  bay entrances  ->  graph
 
-Branching is explicit: select the node the branch leaves from (which becomes the chain
-head, drawn on screen) and keep clicking. 'n' breaks the chain so the next click starts a
-new road somewhere else instead of joining the one you were drawing.
+A bay's entrance is the midpoint of whichever of its sides faces the nearest road, and when
+that lands in the middle of a road the road gains a point there. Nobody has to place 48
+points, and nobody has to know that any of it involves nodes, edges or chains - those are
+the shapes of the data, not part of the job.
 
-Nothing here is auto-detected. The road's visual edges do not matter to navigation - what
-matters is the centre line a car should follow, and that is a human decision.
+So this file holds only the roads as drawn. The graph is built by RoadNetwork.derive(),
+which is pure, so it is recomputed whenever it is needed rather than cached: 48 bays against
+a handful of road segments costs microseconds, and a cache is how derived data goes stale.
 """
 
 from __future__ import annotations
@@ -23,30 +21,32 @@ from __future__ import annotations
 import copy
 from typing import Dict, List, Optional, Sequence, Tuple
 
-import numpy as np
-
-from road_network import (KIND_NAMES, KIND_SPOT, KIND_TAG, NODE_KINDS,
-                          RoadNetwork, RoadNode, bay_mouth)
+from road_network import (KIND_ENTRANCE, KIND_NAMES, KIND_TAG, KIND_WAYPOINT,
+                          RoadNetwork, RoadNode)
 from spot_editor import EditMessage
 
 MAX_UNDO = 50
-# How close the pointer must be to a node to grab it instead of placing a new one.
+# How close the pointer must be to a road point to grab it instead of starting a new one.
 HIT_TOLERANCE = 14.0
+# Beyond this a bay's entrance is far enough from every road that something is probably
+# missing from the drawing. Reported as "this bay is far from any road", which is the only
+# form of the problem a person can act on.
+FAR_BAY_LIMIT = 220.0
 
 
 class RoadEditor:
     def __init__(self, shape: Tuple[int, int], network: Optional[RoadNetwork] = None):
         self.shape = shape
+        # The roads as drawn. This is what gets saved; nothing derived is stored here.
         self.net = network if network is not None else RoadNetwork(shape=shape)
         self.net.shape = shape
         self.selected: Optional[int] = None
-        # The node the next click chains from. None means the next click starts a new road.
+        # The point the next click continues from. None means the next click starts a road.
         self.chain: Optional[str] = None
-        self.message = EditMessage()
         self.dirty = False
+        self.message = EditMessage()
         self._undo: List[Tuple[List[RoadNode], list, Optional[int], Optional[str]]] = []
         self._drag: Optional[Dict] = None
-        self._counter = 0
 
     # -- housekeeping -------------------------------------------------------
 
@@ -59,6 +59,10 @@ class RoadEditor:
         if len(self._undo) > MAX_UNDO:
             self._undo.pop(0)
 
+    def derived(self, spots: Sequence) -> RoadNetwork:
+        """The graph a navigator would use: roads plus one entrance per bay."""
+        return self.net.derive(spots)
+
     # -- selection ----------------------------------------------------------
 
     def select(self, index: Optional[int]) -> None:
@@ -66,8 +70,9 @@ class RoadEditor:
             self.selected = None
             return
         self.selected = index
-        # Touching a node makes it the chain head: that is how a branch is started, and it
-        # keeps one rule instead of two ("select" here, "anchor" there).
+        # Touching a point makes it the one the next click continues from: that is one rule
+        # instead of two ("select" here, "anchor" there), and it is how a road is joined to
+        # another one.
         self.chain = self.net.nodes[index].id
 
     def selected_node(self) -> Optional[RoadNode]:
@@ -77,7 +82,7 @@ class RoadEditor:
 
     def select_next(self, step: int = 1) -> None:
         if not self.net.nodes:
-            self._say("no nodes yet: click on the image to draw a road")
+            self._say("no roads yet: click on the image to draw where a car can drive")
             return
         if self.selected is None:
             self.select(0)
@@ -85,7 +90,8 @@ class RoadEditor:
             self.select((self.selected + step) % len(self.net.nodes))
         node = self.selected_node()
         if node is not None:
-            self._say(f"selected {node.id} ({KIND_NAMES[node.kind]})")
+            where = "" if node.kind != KIND_ENTRANCE else " - the way in from outside"
+            self._say(f"{node.id} selected{where}")
 
     # -- pointer ------------------------------------------------------------
 
@@ -98,7 +104,7 @@ class RoadEditor:
         return best
 
     def begin_drag(self, x: float, y: float) -> bool:
-        """Grab a node for dragging. False means the click was on empty space."""
+        """Grab a point to move it. False means the click was on empty space."""
         idx = self.hit_test(x, y)
         if idx is None:
             return False
@@ -114,7 +120,6 @@ class RoadEditor:
         if not (0 <= idx < len(self.net.nodes)):
             return
         node = self.net.nodes[idx]
-        # Absolute from the grab point, so a drag that leaves the window cannot drift.
         self.net.move_node(node.id, node.x + (x - self._drag["last"][0]),
                            node.y + (y - self._drag["last"][1]))
         self._drag["last"] = (x, y)
@@ -129,69 +134,54 @@ class RoadEditor:
     def nudge(self, dx: float, dy: float) -> None:
         node = self.selected_node()
         if node is None:
-            self._say("select a node first (Tab, or click one)", "warn")
+            self._say("select a road point first (Tab, or click one)", "warn")
             return
         self._push_undo()
         self.net.move_node(node.id, node.x + dx, node.y + dy)
         self.dirty = True
 
-    # -- structural edits ---------------------------------------------------
+    # -- drawing ------------------------------------------------------------
 
-    def add_at(self, x: float, y: float, kind: Optional[str] = None) -> RoadNode:
-        """Place a node, chained from the chain head when there is one."""
+    def add_at(self, x: float, y: float) -> RoadNode:
+        """Place a point, continuing the road being drawn when there is one."""
         self._push_undo()
-        node_kind = kind or self._kind_for_new()
-        node = self.net.add_node(x, y, kind=node_kind)
+        node = self.net.add_node(x, y, kind=KIND_WAYPOINT)
         if self.chain is not None and self.chain != node.id:
             if self.net.connect(self.chain, node.id) is not None:
-                self._say(f"{self.chain} -> {node.id} ({KIND_NAMES[node.kind]})")
+                self._say(f"road continues to {node.id}")
             else:
-                self._say(f"could not connect {self.chain} to {node.id}", "warn")
+                self._say(f"could not extend the road to {node.id}", "warn")
         else:
-            self._say(f"{node.id} ({KIND_NAMES[node.kind]}) - chain started")
+            self._say("road started - click along the way cars drive")
         self.chain = node.id
         self.select(self.net.index_of(node.id))
         self.dirty = True
         return node
 
-    def _kind_for_new(self) -> str:
-        """New nodes inherit the kind of the chain head, so a run of junctions is one key.
-
-        The first node of a road is where a car comes in, so it defaults to an entrance -
-        that is the common case when starting to draw.
-        """
-        head = self.net.node(self.chain) if self.chain else None
-        if head is None:
-            return "entrance"
-        return head.kind if head.kind != "entrance" else "waypoint"
-
     def connect_to(self, index: int) -> bool:
-        """Connect the chain head to an existing node: how a road joins another one."""
+        """Join the road being drawn to an existing road: how two roads meet."""
         if index is None or not (0 <= index < len(self.net.nodes)):
             return False
         target = self.net.nodes[index]
         if self.chain is None or self.chain == target.id:
             self.select(index)
-            self._say(f"{target.id} selected - click empty space to extend from it")
+            self._say(f"{target.id} selected - click empty space to continue from here")
             return False
         if self.net.node(self.chain) is None:
             self.chain = target.id
             return False
         self._push_undo()
         if self.net.connect(self.chain, target.id) is None:
-            self._say(f"{self.chain} and {target.id} are already connected", "warn")
+            self._say("these two points are already joined", "warn")
         else:
-            self._say(f"{self.chain} -> {target.id} joined")
+            self._say("roads joined")
             self.dirty = True
         self.chain = target.id
         self.select(index)
         return True
 
     def break_chain(self) -> None:
-        if self.chain is None:
-            self._say("no chain to break: the next click starts a new road")
-        else:
-            self._say("chain broken: the next click starts a new road")
+        self._say("next click starts another road")
         self.chain = None
 
     def delete_selected(self) -> bool:
@@ -206,104 +196,32 @@ class RoadEditor:
             self.chain = None
         self.selected = None
         self.dirty = True
-        self._say(f"deleted {node.id} and its {edges} edge(s)")
+        self._say(f"deleted {node.id}" + (f" and its {edges} road segment(s)" if edges else ""))
         return True
 
-    def cycle_kind(self) -> str:
-        node = self.selected_node()
-        if node is None:
-            self._say("select a node first (Tab, or click one)", "warn")
-            return ""
-        self._push_undo()
-        node.kind = NODE_KINDS[(NODE_KINDS.index(node.kind) + 1) % len(NODE_KINDS)]
-        if node.kind != KIND_SPOT:
-            node.spot = ""
-        self.dirty = True
-        self._say(f"{node.id} is now a {KIND_NAMES[node.kind]}")
-        return node.kind
+    def toggle_entrance(self) -> bool:
+        """Mark the selected point as the way in from outside, or unmark it.
 
-    def connect_bay(self, spot) -> Optional[RoadNode]:
-        """Give one bay a connection point on the nearest road.
-
-        Where the point goes is derived, not detected: a bay's mouth is the midpoint of
-        whichever of its sides faces the road. The bay polygon and the road are both human
-        decisions, and this only joins them - nothing here looks at the image.
-        """
-        if not self.net.nodes:
-            self._say("draw the roads first - a bay connects to the nearest road", "warn")
-            return None
-        pts = np.asarray(spot.polygon, dtype=np.float64)
-        centre = pts.mean(axis=0)
-        near = self.net.closest_point(float(centre[0]), float(centre[1]), skip_stubs=True)
-        if near is None:
-            return None
-        mx, my = bay_mouth(pts, (near.x, near.y))
-        return self.net.attach(mx, my, kind=KIND_SPOT, spot=spot.id, skip_stubs=True)
-
-    def connect_all_bays(self, spots: Sequence) -> int:
-        """Connect every bay that has no connection point yet. Idempotent.
-
-        This is the answer to "do I have to place 48 points by hand": no. Draw the aisles,
-        then let this put one point at each bay's mouth. Running it again after adding a bay
-        connects only the new one, so it is safe to press whenever.
-
-        One undo step for the whole batch: 48 separate ones would make 'z' useless.
-        """
-        if not self.net.nodes:
-            self._say("draw the roads first: click along the aisle, then press B again",
-                      "warn")
-            return 0
-        taken = set(self.net.spot_nodes())
-        missing = [s for s in spots if s.id not in taken]
-        if not missing:
-            self._say("every bay already has a connection point")
-            return 0
-        self._push_undo()
-        done, failed = 0, []
-        for spot in missing:
-            if self.connect_bay(spot) is not None:
-                done += 1
-            else:
-                failed.append(spot.id)
-        self.dirty = True
-        left = len(missing) - done
-        if failed:
-            self._say(f"connected {done} bay(s), {len(failed)} failed: "
-                      f"{', '.join(failed[:4])}", "warn")
-        else:
-            self._say(f"connected {done} bay(s) to the nearest road "
-                      f"({left} still without a connection)")
-        return done
-
-    def bind_next_bay(self, spot_ids: Sequence[str]) -> Optional[str]:
-        """Turn the selected node into the connection point for the next unconnected bay.
-
-        Walking the bays in order is how this actually gets done: 48 connections is a lot
-        of typing, and the order is already in the spot list.
+        Only an override: the entrance is worked out as the road point closest to the edge
+        of the picture, so a person normally does not have to say anything about it.
         """
         node = self.selected_node()
         if node is None:
-            self._say("select the node that should connect to a bay", "warn")
-            return None
-        taken = self.net.spot_nodes()
-        free = [s for s in spot_ids if s not in taken]
-        if not free:
-            self._say("every bay already has a connection point", "warn")
-            return None
+            self._say("select the road point that is the way in", "warn")
+            return False
         self._push_undo()
-        previous = node.spot if node.kind == KIND_SPOT and node.spot else ""
-        node.kind = KIND_SPOT
-        node.spot = free[0]
-        self.dirty = True
-        left = len(free) - 1
-        if previous and previous != node.spot:
-            # Saying so matters: pressing 'b' again is how you walk to the bay you want,
-            # and silently losing the previous binding would look like a bug.
-            self._say(f"{node.id} rebound from bay {previous} to {free[0]} "
-                      f"({left} bay(s) left)")
+        if node.kind == KIND_ENTRANCE:
+            node.kind = KIND_WAYPOINT
+            self._say(f"{node.id} is no longer marked as the way in "
+                      f"(the automatic choice will be used)")
         else:
-            self._say(f"{node.id} now connects to bay {free[0]} ({left} bay(s) left)")
-        return free[0]
+            for other in self.net.nodes:
+                if other.kind == KIND_ENTRANCE:
+                    other.kind = KIND_WAYPOINT
+            node.kind = KIND_ENTRANCE
+            self.dirty = True
+            self._say(f"{node.id} is where cars come in")
+        return True
 
     def clear(self) -> None:
         self._push_undo()
@@ -311,7 +229,7 @@ class RoadEditor:
         self.selected = None
         self.chain = None
         self.dirty = True
-        self._say("road network cleared")
+        self._say("roads cleared")
 
     def undo(self) -> bool:
         if not self._undo:
@@ -333,26 +251,65 @@ class RoadEditor:
         self.chain = None
         self.dirty = False
         self._undo = []
-        self._say(f"loaded {len(self.net.nodes)} node(s), {len(self.net.edges)} edge(s)")
+        self._say(f"loaded {len(self.net.nodes)} road point(s)")
         return True
 
     def save(self, path: str) -> bool:
         self.net.shape = self.shape
         self.net.save(path)
         self.dirty = False
-        self._say(f"saved {len(self.net.nodes)} node(s), {len(self.net.edges)} edge(s)")
+        self._say(f"saved {len(self.net.nodes)} road point(s)")
         return True
 
     # -- reporting ----------------------------------------------------------
 
-    def problems(self, spot_ids: Sequence[str]) -> List[str]:
-        return self.net.validate(spot_ids)
+    def problems(self, spots: Sequence) -> List[str]:
+        """What is wrong with the map, in map terms.
 
-    def summary(self) -> str:
-        return self.net.summary()
+        Deliberately not a graph report. Whoever is drawing roads can only act on "no roads
+        yet", "this bay is far from any road" and "this bay cannot be reached", so that is
+        what comes out.
+        """
+        if not self.net.nodes:
+            return ["no roads drawn yet"]
+
+        problems: List[str] = []
+        graph_net = self.derived(spots)
+        problems.extend(graph_net.validate())
+
+        far = self.net.far_bays(spots, FAR_BAY_LIMIT)
+        if far:
+            shown = ", ".join(f"{sid} ({d:.0f}px)" for sid, d in far[:4])
+            more = f" (+{len(far) - 4} more)" if len(far) > 4 else ""
+            problems.append(f"{len(far)} bay(s) are a long way from any road: {shown}{more}")
+
+        adjacency = graph_net.adjacency()
+        start = next((n.id for n in graph_net.nodes if n.kind == KIND_ENTRANCE), None)
+        reachable = set()
+        if start:
+            stack = [start]
+            reachable.add(start)
+            while stack:
+                for nxt, _ in adjacency.get(stack.pop(), []):
+                    if nxt not in reachable:
+                        reachable.add(nxt)
+                        stack.append(nxt)
+        stranded = [sid for sid, nid in graph_net.spot_nodes().items()
+                    if nid not in reachable]
+        if stranded:
+            problems.append(f"{len(stranded)} bay(s) cannot be reached from the entrance: "
+                            + ", ".join(stranded[:5]))
+        return problems
+
+    def stats(self, spots: Sequence) -> str:
+        """One line for the header: what is drawn, and what was derived from it."""
+        if not self.net.nodes:
+            return "ROADS   nothing drawn yet - click along where cars drive"
+        graph_net = self.derived(spots)
+        bays = len(graph_net.spot_nodes())
+        segments = len(self.net.edges)
+        return (f"ROADS   {len(self.net.nodes)} points, {segments} segments   |   "
+                f"{bays}/{len(spots)} bay entrances derived")
 
     def node_tag(self, node: RoadNode) -> str:
-        tag = KIND_TAG.get(node.kind, "?")
-        if node.kind == KIND_SPOT and node.spot:
-            return f"{tag}{node.spot}"
-        return tag
+        return KIND_TAG.get(node.kind, ".")
