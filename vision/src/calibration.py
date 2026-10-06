@@ -31,11 +31,19 @@ Parking Spots layer (what the camera answers: is this bay free?)
     d  delete the selected bay
     r  rename the selected bay (type the id in the terminal)
     i  set the inner detection scale of the selected bay (terminal)
+    j  send the selected bay's entrance back to automatic (see below)
     s  save the map      o  load it
     z  undo              c  reset (clear all bays)
     l  toggle the detected lines overlay      v  toggle inner detection polygons
     m  cycle what 2/4/6/8 move: this bay -> its row -> every bay
     Tab cycle selection      2/4/6/8 nudge by 5 px
+
+Where a car drives into a bay is worked out from the roads - the side facing the nearest
+one - which is right almost everywhere. At the end of a row or on a corner two roads are
+about equally close and the choice is a judgement, so those can be corrected: in the Road
+layer, drag a bay's orange entrance dot onto the side cars actually come in from. 'j' here
+sends one back to being worked out. The correction is saved with the bay, and the
+connection point and the graph follow from it with no further steps.
 
 Road Network layer (what the navigator needs: how does a car get there?)
     click            place a node; it connects to the one before it, so a road is
@@ -80,7 +88,7 @@ from detector import (DetectorParams, detect_bays, draw_debug,  # noqa: E402
                       sort_reading_order)
 from road_editor import RoadEditor                             # noqa: E402
 from road_network import (KIND_ENTRANCE, KIND_JUNCTION,        # noqa: E402
-                          KIND_SPOT, KIND_WAYPOINT)
+                          KIND_SPOT, KIND_WAYPOINT, nearest_edge)
 from spot_config import DEFAULT_INNER_SCALE                    # noqa: E402
 from spot_editor import SpotEditor                             # noqa: E402
 
@@ -149,6 +157,9 @@ class CalibrationApp:
         self.nudge_scope = "bay"
         # Two layers over one document: the camera's questions and the navigator's.
         self.layer = "spots"
+        # Set while a bay's derived entrance is being dragged, so that drag is not taken for
+        # moving a road point or for drawing a new one.
+        self._entrance_drag: Optional[str] = None
         self.road = RoadEditor(editor.shape)
         # The roads live in the same document as the bays, so they have to be opened with
         # it. Without this the road layer started empty every time and saving would have
@@ -213,11 +224,10 @@ class CalibrationApp:
 
         if self.layer == "spots":
             hint = ("drag | A align | a auto | g row | n add | d del | r rename | i inner | "
-                    "s save | z undo | c reset | 2468 nudge (m=scope) | Tab | t roads | q")
+                    "j ent | s save | z undo | c reset | 2468 (m) | Tab | t roads | q")
         else:
-            hint = ("click = draw the road | drag a point | right-click = join roads | "
-                    "2/4/6/8 move | n new road | k way in | d del | z undo | s save | "
-                    "p check | t spots | q")
+            hint = ("click = draw road | drag orange dot = fix a bay's way in | "
+                    "right-click = join roads | k = way in | d del | z undo | s save | q")
         cv2.putText(canvas, hint[:135], (8, h - BAR_H - 28),
                     cv2.FONT_HERSHEY_PLAIN, 1.0, (0, 0, 0), 3)
         cv2.putText(canvas, hint[:135], (8, h - BAR_H - 28),
@@ -301,6 +311,11 @@ class CalibrationApp:
                     continue
                 cv2.circle(canvas, centre, 4, COL_DERIVED, -1)
                 cv2.circle(canvas, centre, 4, (0, 0, 0), 1)
+                if any(s.id == node.spot and s.entrance_edge is not None
+                       for s in self.ed.spots):
+                    # A ring marks an entrance whose side was chosen by hand, so it is clear
+                    # which of these were worked out and which were decided.
+                    cv2.circle(canvas, centre, 7, COL_CHAIN, 1)
                 continue
             if faint:
                 cv2.circle(canvas, centre, 3, COL_ROAD_FAINT, -1)
@@ -358,25 +373,57 @@ class CalibrationApp:
                 pass
 
     def _mouse_roads(self, event, x, y, flags) -> None:
-        """Click to place and chain; click an existing node to grab or join it."""
+        """Draw a road with clicks; grab a bay's entrance to move it."""
         road = self.road
         if event == cv2.EVENT_LBUTTONDOWN:
             key = self._button_at(x, y)
             if key is not None:
                 self.act(key)
                 return
+            grabbed = self._entrance_under(x, y)
+            if grabbed is not None:
+                # Grabbing a bay's entrance means "that is the wrong side": whichever side it
+                # is dropped on becomes the side cars drive in from.
+                self._entrance_drag = grabbed
+                road._say(f"drop it on the side cars drive in from (bay {grabbed})")
+                return
             if not road.begin_drag(x, y):
-                road.add_at(x, y)          # empty space: place a node, chained
+                road.add_at(x, y)          # empty space: draw the road along here
         elif event == cv2.EVENT_MOUSEMOVE and flags & cv2.EVENT_FLAG_LBUTTON:
-            road.update_drag(x, y)
+            if self._entrance_drag is None:
+                road.update_drag(x, y)
         elif event == cv2.EVENT_LBUTTONUP:
-            road.end_drag()
+            if self._entrance_drag is not None:
+                self._drop_entrance(self._entrance_drag, x, y)
+                self._entrance_drag = None
+            else:
+                road.end_drag()
         elif event == cv2.EVENT_RBUTTONDOWN:
             idx = road.hit_test(x, y)
             if idx is not None:
-                road.connect_to(idx)       # join the chain head to this node
+                road.connect_to(idx)       # join the road being drawn to this one
             else:
-                road.break_chain()         # right click on nothing: start a new road
+                road.break_chain()         # right click on nothing: start another road
+
+    def _entrance_under(self, x: float, y: float, tol: float = 14.0) -> Optional[str]:
+        """The bay whose derived entrance sits under the pointer, if any."""
+        derived = self.road.derived(self.ed.spots)
+        best: Optional[str] = None
+        best_d = tol
+        for node in derived.nodes:
+            if node.kind != KIND_SPOT or not node.spot:
+                continue
+            d = ((node.x - x) ** 2 + (node.y - y) ** 2) ** 0.5
+            if d <= best_d:
+                best, best_d = node.spot, d
+        return best
+
+    def _drop_entrance(self, bay_id: str, x: float, y: float) -> None:
+        """Record which side of that bay the entrance was dropped nearest to."""
+        for i, spot in enumerate(self.ed.spots):
+            if spot.id == bay_id:
+                self.ed.set_entrance(i, nearest_edge(spot.polygon, x, y))
+                return
 
     def bay_pitch(self) -> Optional[float]:
         """Median bay width - the scale for the "is this shift a whole bay" check."""
@@ -508,6 +555,9 @@ class CalibrationApp:
             self._pending_prompt = "rename"
         elif key == "i":
             self._pending_prompt = "inner"
+        elif key == "j":
+            # Back to working the entrance out, for a bay whose side was set by hand.
+            ed.set_entrance(ed.selected, None)
         elif key == "s":
             ed.save(self.out_path)
         elif key == "o":

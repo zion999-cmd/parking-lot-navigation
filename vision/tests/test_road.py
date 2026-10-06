@@ -615,6 +615,84 @@ def test_switching_layers_with_both_a_map_and_roads_loaded() -> None:
         assert app.layer == "spots"
 
 
+def test_a_bays_entrance_can_be_pinned_to_a_side() -> None:
+    """At the end of a row two roads are equally close, so the side a car comes in from is
+    a judgement. Pinning it is how that judgement is recorded - and the connection point and
+    the graph then follow from it with nothing else to do."""
+    bays = two_bays()
+    roads = roads_with_aisle()
+
+    auto = roads.derive(bays)
+    auto_mouth = auto.node(auto.spot_nodes()["38"])
+    assert (round(auto_mouth.x), round(auto_mouth.y)) == (125, 260), \
+        "with the road below, the automatic entrance is the bottom side"
+
+    # side 1 of this polygon is its right-hand edge (midpoint 150,180)
+    bays[0].entrance_edge = 1
+    pinned = roads.derive(bays)
+    pinned_mouth = pinned.node(pinned.spot_nodes()["38"])
+    assert (round(pinned_mouth.x), round(pinned_mouth.y)) == (150, 180), \
+        (pinned_mouth.x, pinned_mouth.y)
+
+
+def test_pinning_one_bay_leaves_the_others_alone() -> None:
+    bays = two_bays()
+    roads = roads_with_aisle()
+    bays[0].entrance_edge = 1
+    graph = roads.derive(bays)
+    other = graph.node(graph.spot_nodes()["39"])
+    assert (round(other.x), round(other.y)) == (185, 260), (other.x, other.y)
+
+
+def test_dropping_a_bays_entrance_records_the_side_it_was_dropped_on() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "map.json")
+        save_spots(path, two_bays(), (H, W))
+        roads = RoadNetwork.load(path, (H, W))
+        a, b = roads.add_node(0, 400), roads.add_node(880, 400)
+        roads.connect(a.id, b.id)
+        roads.save(path)
+
+        ed = SpotEditor((H, W))
+        ed.load(path)
+        app = CalibrationApp(ed, path)
+        app.layer = "roads"
+        app.render(frame())
+
+        assert app._entrance_under(125, 260) == "38", "the derived entrance should be grabbable"
+        app._entrance_drag = "38"
+        app._drop_entrance("38", 170, 180)          # dropped beside the right-hand edge
+        pinned = [s for s in ed.spots if s.id == "38"][0]
+        assert pinned.entrance_edge == 1, pinned.entrance_edge
+        app._entrance_drag = None
+
+        app.act("s")
+        saved = {s["id"]: s.get("entrance") for s in read(path)["spots"]}
+        assert saved["38"] == 1, saved
+
+        again = load_spots(path, (H, W))
+        assert [s.entrance_edge for s in again if s.id == "38"] == [1]
+
+
+def test_an_entrance_can_be_sent_back_to_automatic() -> None:
+    bays = two_bays()
+    roads = roads_with_aisle()
+    bays[0].entrance_edge = 1
+    assert roads.derive(bays).node(
+        roads.derive(bays).spot_nodes()["38"]).x == 150
+
+    ed = SpotEditor((H, W))
+    ed.spots = bays
+    ed.select(0)
+    assert ed.set_entrance(0, None) is True
+    assert bays[0].entrance_edge is None
+    back = roads.derive(bays).node(roads.derive(bays).spot_nodes()["38"])
+    assert (round(back.x), round(back.y)) == (125, 260), (back.x, back.y)
+    assert ed.undo() is True
+    # undo() swaps in deep copies, so the live list is ed.spots, not the one passed in.
+    assert ed.spots[0].entrance_edge == 1, "undo should bring the pinned side back"
+
+
 def main() -> int:
     tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith("test_") and callable(f)]

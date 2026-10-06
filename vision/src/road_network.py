@@ -78,23 +78,55 @@ def _project_on_segment(px: float, py: float, ax: float, ay: float,
 
 
 def bay_mouth(polygon: Sequence[Sequence[float]],
-              target: Tuple[float, float]) -> Tuple[float, float]:
-    """The midpoint of the bay edge that faces `target`.
+              target: Tuple[float, float],
+              entrance_edge: Optional[int] = None) -> Tuple[float, float]:
+    """The midpoint of the side of the bay that faces `target`.
 
     A bay's polygon is the visual truth for where a car parks; which of its sides is the
     entrance is decided by which one faces the road the human drew. That is a derivation
     from two decisions a person already made, not a detection - nothing here looks at the
     image.
+
+    `entrance_edge` overrides that with a decided side. It is needed because the rule is
+    genuinely ambiguous at the end of a row or on a corner, where two roads are about
+    equally close: there, which side a car drives in from is a judgement, not a
+    measurement, and the person drawing can see it.
     """
     pts = np.asarray(polygon, dtype=np.float64)
+    n = len(pts)
+    if entrance_edge is not None:
+        i = int(entrance_edge) % n
+        mid = (pts[i] + pts[(i + 1) % n]) / 2.0
+        return (float(mid[0]), float(mid[1]))
+
     target_arr = np.asarray(target, dtype=np.float64)
     best: Optional[Tuple[float, np.ndarray]] = None
-    for i in range(len(pts)):
-        mid = (pts[i] + pts[(i + 1) % len(pts)]) / 2.0
+    for i in range(n):
+        mid = (pts[i] + pts[(i + 1) % n]) / 2.0
         d = float(np.linalg.norm(mid - target_arr))
         if best is None or d < best[0]:
             best = (d, mid)
     return (float(best[1][0]), float(best[1][1]))
+
+
+def nearest_edge(polygon: Sequence[Sequence[float]], x: float, y: float) -> int:
+    """Index of the side the point is nearest to.
+
+    This is what turns dropping a bay's entrance somewhere into a side of that bay: the
+    person points at the side a car comes in from, and the side is what gets remembered.
+    Distance to the side itself, not to its midpoint, because that is what pointing at a
+    side means - and a long side should be easier to hit than a short one.
+    """
+    pts = np.asarray(polygon, dtype=np.float64)
+    best_i, best_d = 0, None
+    for i in range(len(pts)):
+        a, b = pts[i], pts[(i + 1) % len(pts)]
+        px, py = _project_on_segment(float(x), float(y), float(a[0]), float(a[1]),
+                                     float(b[0]), float(b[1]))
+        d = float(np.hypot(px - x, py - y))
+        if best_d is None or d < best_d:
+            best_i, best_d = i, d
+    return best_i
 
 
 @dataclass
@@ -393,7 +425,7 @@ class RoadNetwork:
         near = self.closest_point(float(centre[0]), float(centre[1]), skip_stubs=True)
         if near is None:
             return None
-        mx, my = bay_mouth(pts, (near.x, near.y))
+        mx, my = bay_mouth(pts, (near.x, near.y), getattr(spot, "entrance_edge", None))
         return self.attach(mx, my, kind=KIND_SPOT, spot=spot.id, skip_stubs=True)
 
     def derive(self, spots: Sequence) -> "RoadNetwork":

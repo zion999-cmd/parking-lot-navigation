@@ -304,6 +304,30 @@ class SpotEditor:
         self._say(f"renamed {old} -> {new_id}")
         return True
 
+    def set_entrance(self, index: Optional[int], edge: Optional[int]) -> bool:
+        """Say which side of a bay a car drives in from, or go back to working it out.
+
+        At the end of a row, or in a corner, two roads are about equally close, so which
+        side is the entrance is a judgement rather than something the map can measure. This
+        records that judgement with the bay. Everything downstream follows from it on its
+        own: the connection point moves to that side, the road gains a point where it lands,
+        and the graph is rebuilt - none of which has to be set by hand.
+        """
+        if index is None or not (0 <= index < len(self.spots)):
+            self._say("select a bay first (Tab, or click one)", "warn")
+            return False
+        spot = self.spots[index]
+        self._push_undo()
+        spot.entrance_edge = None if edge is None else int(edge) % len(spot.polygon)
+        self.dirty = True
+        if spot.entrance_edge is None:
+            self._say(f"bay {spot.id}: the entrance is worked out again (whichever side "
+                      f"faces the road)")
+        else:
+            self._say(f"bay {spot.id}: cars come in from side {spot.entrance_edge + 1} of "
+                      f"its outline")
+        return True
+
     def set_inner_scale(self, value: float) -> bool:
         spot = self.selected_spot()
         if spot is None:
