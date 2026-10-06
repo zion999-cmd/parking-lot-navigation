@@ -148,6 +148,96 @@ def test_validate_is_quiet_about_a_fully_connected_map() -> None:
 # caught the bays vanishing because someone saved a road.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Connecting bays in bulk
+#
+# "Do all 48 bays need a point by hand?" No. But the first version derived each bay's mouth
+# from a network it was itself extending, so every new connection stub became the "nearest
+# road" for the next bay and the mouths ended up on the wrong side of their own bay. The
+# regression test for that is test_a_stub_is_never_used_as_another_bays_road below.
+# ---------------------------------------------------------------------------
+
+def row_and_aisle():
+    """Two bays side by side with a straight aisle below them."""
+    bays = two_bays()                       # y 100..260, x 100..150 and 160..210
+    ed = RoadEditor((H, W))
+    ed.add_at(40, 400)
+    ed.add_at(500, 400)
+    ed.net.nodes[0].kind = KIND_ENTRANCE
+    return ed, bays
+
+
+def test_each_mouth_lands_on_the_side_facing_the_road() -> None:
+    ed, bays = row_and_aisle()
+    assert ed.connect_all_bays(bays) == 2
+    for spot in bays:
+        node = ed.net.node(ed.net.spot_nodes()[spot.id])
+        assert abs(node.y - 260) < 1, \
+            f"bay {spot.id}: mouth at y={node.y}; the road is below, so it belongs at y=260"
+        cx = float(np.asarray(spot.polygon, dtype=float)[:, 0].mean())
+        assert abs(node.x - cx) < 1, (spot.id, node.x, cx)
+
+
+def test_a_stub_is_never_used_as_another_bays_road() -> None:
+    """The bug this guards: connecting bay 2 must not attach it to bay 1's stub."""
+    ed, bays = row_and_aisle()
+    ed.connect_all_bays(bays)
+    for node_id, edges in ed.net.adjacency().items():
+        node = ed.net.node(node_id)
+        if node.kind != KIND_SPOT:
+            continue
+        assert len(edges) == 1, (node_id, edges)
+        partner = ed.net.node(edges[0][0])
+        assert partner.kind != KIND_SPOT, \
+            f"{node_id} hangs off another bay's stub ({partner.id})"
+        assert abs(partner.y - 400) < 1, (node_id, partner.id, partner.y)
+
+
+def test_connecting_all_bays_twice_changes_nothing() -> None:
+    ed, bays = row_and_aisle()
+    ed.connect_all_bays(bays)
+    nodes, edges = len(ed.net.nodes), len(ed.net.edges)
+    assert ed.connect_all_bays(bays) == 0
+    assert (len(ed.net.nodes), len(ed.net.edges)) == (nodes, edges)
+    assert len(ed.net.spot_nodes()) == 2
+
+
+def test_connecting_bays_with_no_road_yet_creates_nothing() -> None:
+    ed = RoadEditor((H, W))
+    assert ed.connect_all_bays(two_bays()) == 0
+    assert ed.net.nodes == [] and ed.net.edges == []
+    assert "roads first" in ed.message.text, ed.message.text
+
+
+def test_splitting_an_edge_keeps_the_road_connected() -> None:
+    net = RoadNetwork(shape=(H, W))
+    a, b = net.add_node(0, 300, kind=KIND_ENTRANCE), net.add_node(400, 300)
+    net.connect(a.id, b.id)
+    mid = net.split_edge(0, 200, 300)
+    assert mid is not None
+    pairs = {(e.a, e.b) for e in net.edges}
+    assert pairs == {(a.id, mid.id), (b.id, mid.id)}, pairs
+    graph = net.adjacency()
+    assert len(graph) == 3
+    assert len(graph[a.id]) == 1 and len(graph[mid.id]) == 2
+
+
+def test_every_bay_is_reachable_from_the_entrance_after_connecting_all() -> None:
+    ed, bays = row_and_aisle()
+    ed.connect_all_bays(bays)
+    graph = ed.net.adjacency()
+    start = [n.id for n in ed.net.nodes if n.kind == KIND_ENTRANCE][0]
+    seen, stack = {start}, [start]
+    while stack:
+        for nxt, _ in graph[stack.pop()]:
+            if nxt not in seen:
+                seen.add(nxt)
+                stack.append(nxt)
+    for bay, node in ed.net.spot_nodes().items():
+        assert node in seen, f"bay {bay} is not reachable from the entrance"
+    assert ed.net.validate([s.id for s in bays]) == []
+
+
 def test_saving_the_roads_keeps_the_bays() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "map.json")

@@ -23,8 +23,10 @@ from __future__ import annotations
 import copy
 from typing import Dict, List, Optional, Sequence, Tuple
 
+import numpy as np
+
 from road_network import (KIND_NAMES, KIND_SPOT, KIND_TAG, NODE_KINDS,
-                          RoadNetwork, RoadNode)
+                          RoadNetwork, RoadNode, bay_mouth)
 from spot_editor import EditMessage
 
 MAX_UNDO = 50
@@ -219,6 +221,59 @@ class RoadEditor:
         self.dirty = True
         self._say(f"{node.id} is now a {KIND_NAMES[node.kind]}")
         return node.kind
+
+    def connect_bay(self, spot) -> Optional[RoadNode]:
+        """Give one bay a connection point on the nearest road.
+
+        Where the point goes is derived, not detected: a bay's mouth is the midpoint of
+        whichever of its sides faces the road. The bay polygon and the road are both human
+        decisions, and this only joins them - nothing here looks at the image.
+        """
+        if not self.net.nodes:
+            self._say("draw the roads first - a bay connects to the nearest road", "warn")
+            return None
+        pts = np.asarray(spot.polygon, dtype=np.float64)
+        centre = pts.mean(axis=0)
+        near = self.net.closest_point(float(centre[0]), float(centre[1]), skip_stubs=True)
+        if near is None:
+            return None
+        mx, my = bay_mouth(pts, (near.x, near.y))
+        return self.net.attach(mx, my, kind=KIND_SPOT, spot=spot.id, skip_stubs=True)
+
+    def connect_all_bays(self, spots: Sequence) -> int:
+        """Connect every bay that has no connection point yet. Idempotent.
+
+        This is the answer to "do I have to place 48 points by hand": no. Draw the aisles,
+        then let this put one point at each bay's mouth. Running it again after adding a bay
+        connects only the new one, so it is safe to press whenever.
+
+        One undo step for the whole batch: 48 separate ones would make 'z' useless.
+        """
+        if not self.net.nodes:
+            self._say("draw the roads first: click along the aisle, then press B again",
+                      "warn")
+            return 0
+        taken = set(self.net.spot_nodes())
+        missing = [s for s in spots if s.id not in taken]
+        if not missing:
+            self._say("every bay already has a connection point")
+            return 0
+        self._push_undo()
+        done, failed = 0, []
+        for spot in missing:
+            if self.connect_bay(spot) is not None:
+                done += 1
+            else:
+                failed.append(spot.id)
+        self.dirty = True
+        left = len(missing) - done
+        if failed:
+            self._say(f"connected {done} bay(s), {len(failed)} failed: "
+                      f"{', '.join(failed[:4])}", "warn")
+        else:
+            self._say(f"connected {done} bay(s) to the nearest road "
+                      f"({left} still without a connection)")
+        return done
 
     def bind_next_bay(self, spot_ids: Sequence[str]) -> Optional[str]:
         """Turn the selected node into the connection point for the next unconnected bay.

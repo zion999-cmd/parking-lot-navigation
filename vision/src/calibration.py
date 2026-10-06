@@ -166,8 +166,8 @@ class CalibrationApp:
 
         actions = (("Auto Detect", "a"), ("Gen Row", "g"), ("Save", "s"), ("Undo", "z"),
                    ("Reset", "c")) if self.layer == "spots" else \
-                  (("Break Chain", "n"), ("Kind", "k"), ("Bind Bay", "b"),
-                   ("Save", "s"), ("Undo", "z"), ("Clear", "c"))
+                  (("Connect Bays", "B"), ("Bind One", "b"), ("Kind", "k"),
+                   ("Save", "s"), ("Undo", "z"), ("Check", "p"))
         x = 8
         for label, key in actions:
             bw = 12 + len(label) * 9
@@ -186,8 +186,9 @@ class CalibrationApp:
             hint = ("drag | A align | a auto | g row | n add | d del | r rename | i inner | "
                     "s save | z undo | c reset | 2468 nudge (m=scope) | Tab | t roads | q")
         else:
-            hint = ("click = place node+chain | drag node | right-click = join | 2/4/6/8 move | "
-                    "k kind | b bind bay | n break | d del | z undo | s save | Tab | t spots | q")
+            hint = ("click = node+chain | right-click = join | 2/4/6/8 move | k kind | "
+                    "b one bay | B all bays | n new road | d del | z undo | s save | "
+                    "p check | t spots | q")
         cv2.putText(canvas, hint[:135], (8, h - BAR_H - 28),
                     cv2.FONT_HERSHEY_PLAIN, 1.0, (0, 0, 0), 3)
         cv2.putText(canvas, hint[:135], (8, h - BAR_H - 28),
@@ -537,6 +538,9 @@ class CalibrationApp:
             road.cycle_kind()
         elif key == "b":
             road.bind_next_bay([s.id for s in self.ed.spots])
+        elif key == "B":
+            # The answer to "do all 48 bays need a point by hand": no.
+            road.connect_all_bays(self.ed.spots)
         elif key in ("d", "x"):
             road.delete_selected()
         elif key == "s":

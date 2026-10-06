@@ -35,6 +35,8 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import numpy as np
+
 import map_document
 
 KIND_ENTRANCE = "entrance"
@@ -47,6 +49,52 @@ NODE_KINDS: Tuple[str, ...] = (KIND_ENTRANCE, KIND_JUNCTION, KIND_WAYPOINT, KIND
 KIND_TAG = {KIND_ENTRANCE: "IN", KIND_JUNCTION: "X", KIND_WAYPOINT: ".", KIND_SPOT: "P"}
 KIND_NAMES = {KIND_ENTRANCE: "entrance", KIND_JUNCTION: "junction",
               KIND_WAYPOINT: "waypoint", KIND_SPOT: "spot"}
+
+
+@dataclass
+class ClosestPoint:
+    """Where the network passes nearest to some point.
+
+    Either `node_id` is set (the nearest thing is a node) or `edge_index` is (the point
+    lies along an edge), never both.
+    """
+    distance: float
+    x: float
+    y: float
+    node_id: Optional[str] = None
+    edge_index: Optional[int] = None
+
+
+def _project_on_segment(px: float, py: float, ax: float, ay: float,
+                        bx: float, by: float) -> Tuple[float, float]:
+    """The point on segment AB closest to P, clamped to the segment."""
+    dx, dy = bx - ax, by - ay
+    length_sq = dx * dx + dy * dy
+    if length_sq <= 1e-9:
+        return ax, ay
+    t = ((px - ax) * dx + (py - ay) * dy) / length_sq
+    t = min(max(t, 0.0), 1.0)
+    return ax + t * dx, ay + t * dy
+
+
+def bay_mouth(polygon: Sequence[Sequence[float]],
+              target: Tuple[float, float]) -> Tuple[float, float]:
+    """The midpoint of the bay edge that faces `target`.
+
+    A bay's polygon is the visual truth for where a car parks; which of its sides is the
+    entrance is decided by which one faces the road the human drew. That is a derivation
+    from two decisions a person already made, not a detection - nothing here looks at the
+    image.
+    """
+    pts = np.asarray(polygon, dtype=np.float64)
+    target_arr = np.asarray(target, dtype=np.float64)
+    best: Optional[Tuple[float, np.ndarray]] = None
+    for i in range(len(pts)):
+        mid = (pts[i] + pts[(i + 1) % len(pts)]) / 2.0
+        d = float(np.linalg.norm(mid - target_arr))
+        if best is None or d < best[0]:
+            best = (d, mid)
+    return (float(best[1][0]), float(best[1][1]))
 
 
 @dataclass
@@ -145,6 +193,75 @@ class RoadNetwork:
         if na is None or nb is None:
             return float("inf")
         return math.hypot(na.x - nb.x, na.y - nb.y)
+
+    def closest_point(self, x: float, y: float,
+                      skip_stubs: bool = False) -> Optional[ClosestPoint]:
+        """Nearest point on the network: a node when one is close, otherwise a point along
+        an edge. None for an empty network.
+
+        `skip_stubs` ignores bay connection points and the edges hanging off them. That is
+        not a tweak: a bay's stub is not a road, and letting one be the "nearest road" for
+        the next bay makes the result tangle. Each new stub becomes a candidate for the one
+        after it, and the mouths end up pointing at the wrong side of their own bay.
+        """
+        stubs = {n.id for n in self.nodes if n.kind == KIND_SPOT} if skip_stubs else set()
+
+        best: Optional[ClosestPoint] = None
+        for n in self.nodes:
+            if n.id in stubs:
+                continue
+            d = math.hypot(n.x - x, n.y - y)
+            if best is None or d < best.distance:
+                best = ClosestPoint(distance=d, x=n.x, y=n.y, node_id=n.id)
+        for i, e in enumerate(self.edges):
+            if e.a in stubs or e.b in stubs:
+                continue
+            a, b = self.node(e.a), self.node(e.b)
+            if a is None or b is None:
+                continue
+            px, py = _project_on_segment(x, y, a.x, a.y, b.x, b.y)
+            d = math.hypot(px - x, py - y)
+            if best is None or d < best.distance:
+                best = ClosestPoint(distance=d, x=px, y=py, edge_index=i)
+        return best
+
+    def split_edge(self, index: int, x: float, y: float,
+                   kind: str = KIND_JUNCTION) -> Optional[RoadNode]:
+        """Insert a node into an edge, replacing it with two edges.
+
+        Needed so a bay's connection stub joins the aisle where the bay actually is, rather
+        than being dragged to whichever end of the aisle happens to be nearest: on a
+        sixteen-bay row that difference is hundreds of pixels, and the stub would run
+        across other bays.
+        """
+        if not (0 <= index < len(self.edges)):
+            return None
+        edge = self.edges[index]
+        node = self.add_node(x, y, kind=kind)
+        self.edges.pop(index)
+        self.connect(edge.a, node.id, oneway=edge.oneway)
+        self.connect(edge.b, node.id, oneway=edge.oneway)
+        return node
+
+    def attach(self, x: float, y: float, kind: str = KIND_SPOT,
+               spot: str = "", skip_stubs: bool = True) -> Optional[RoadNode]:
+        """Add a node beside the network and connect it to the closest point on it.
+
+        This is how a bay gets its connection point: the caller works out *where* (the bay's
+        mouth, derived from its polygon and the road), and the network works out *what to
+        join it to*, splitting an edge when the join is mid-segment.
+        """
+        near = self.closest_point(x, y, skip_stubs=skip_stubs)
+        if near is None:
+            return None
+        node = self.add_node(x, y, kind=kind, spot=spot)
+        if near.node_id is not None:
+            self.connect(node.id, near.node_id)
+            return node
+        junction = self.split_edge(int(near.edge_index), near.x, near.y)
+        if junction is not None:
+            self.connect(node.id, junction.id)
+        return node
 
     def next_id(self) -> str:
         """n1, n2, ... never reusing a freed number.
