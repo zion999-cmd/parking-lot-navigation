@@ -53,7 +53,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from camera import CameraError, open_camera                    # noqa: E402
 from alignment import Aligner, transform_points                 # noqa: E402
 from detector import (DetectorParams, detect_bays, draw_debug,  # noqa: E402
-                      render_profile_ascii, sort_reading_order)
+                      render_profile_ascii, roi_offset_from_bay_lines,
+                      sort_reading_order)
 from spot_config import DEFAULT_INNER_SCALE                    # noqa: E402
 from spot_editor import SpotEditor                             # noqa: E402
 
@@ -222,6 +223,8 @@ class CalibrationApp:
             print("  nothing moved")
             return False
 
+        before_off, n_edges = roi_offset_from_bay_lines(frame, self.ed.spots)
+
         inv = aligner.matrix_to_current(res.matrix)
         self.ed._push_undo()
         for spot in self.ed.spots:
@@ -231,8 +234,13 @@ class CalibrationApp:
         self.ed.dirty = True
         self.template = frame.copy()
 
+        after_off, _ = roi_offset_from_bay_lines(frame, self.ed.spots)
         text = (f"aligned {len(self.ed.spots)} bay(s) by "
                 f"({res.dx:+.1f}, {res.dy:+.1f}) px, corr {res.correlation:.2f}")
+        if n_edges:
+            print(f"  bays vs detected lines: {before_off:.1f} px off -> "
+                  f"{after_off:.1f} px off ({n_edges} edges measured)")
+            text += f", bays now {after_off:.1f} px off the bay lines"
         for warning in res.warnings:
             text += f" | {warning}"
         self.ed._say(text + (" - saved" if save else " - press s to save"),

@@ -1086,6 +1086,38 @@ def render_profile_ascii(result: DetectorResult, cols: int = 118) -> List[str]:
     return out
 
 
+def roi_offset_from_bay_lines(frame: np.ndarray, spots,
+                             params: Optional[DetectorParams] = None
+                             ) -> Tuple[float, int]:
+    """Mean distance between a bay's side edges and the nearest detected divider.
+
+    This is the number that matches "the camera moved and the ROIs no longer sit on
+    the bays". ``changed_ratio`` cannot show it - a sub-bay nudge on a flat floor
+    only moves it from 0.004 to 0.000 - but measuring the ROIs against the lines the
+    detector actually finds does: a 14 px nudge leaves the edges 13.8 px off, and
+    compensating drops them to 1.5 px, which is just line width.
+
+    Returns (mean offset in px, number of edges measured).
+    """
+    res = detect_bays(frame, params or DetectorParams())
+    lines: List[Tuple[float, float, float]] = []
+    for row in res.plot:
+        y0, y1 = row["y"]
+        for x in row["positions"]:
+            lines.append((float(x), float(y0), float(y1)))
+    distances: List[float] = []
+    for spot in spots:
+        pts = np.asarray(spot.polygon, dtype=np.float64)
+        y_mid = float(pts[:, 1].mean())
+        near = [x for x, y0, y1 in lines if y0 - 6 <= y_mid <= y1 + 6]
+        if not near:
+            continue
+        for edge in (pts[:, 0].min(), pts[:, 0].max()):
+            distances.append(min(abs(edge - x) for x in near))
+    return ((float(np.mean(distances)) if distances else float("nan")),
+            len(distances))
+
+
 def sort_reading_order(polys: List[List[List[float]]]) -> List[List[List[float]]]:
     """Top to bottom, then left to right - the numbering the user expects."""
     def key(poly):
