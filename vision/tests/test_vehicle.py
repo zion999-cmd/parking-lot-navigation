@@ -232,9 +232,15 @@ def test_the_front_direction_agrees_with_the_axis_or_is_opposite_it() -> None:
 # ---------------------------------------------------------------------------
 
 def a_pose(taper: float, heading: float = 0.0, elongation: float = 2.5,
-           x: float = 400.0, y: float = 400.0) -> vehicle.VehiclePose:
+           x: float = 400.0, y: float = 400.0,
+           evidence: float = None) -> vehicle.VehiclePose:
+    """A synthetic sighting. With no evidence given, the taper is turned into it, the way the
+    module falls back to the taper when there is no usable dark band."""
+    if evidence is None and abs(taper) >= vehicle.MIN_TAPER:
+        evidence = max(-1.0, min(1.0, taper / vehicle.TAPER_SCALE))
     return vehicle.VehiclePose(x=x, y=y, heading=heading, area=1600, elongation=elongation,
-                               fill=0.7, bbox=(370, 390, 60, 20), taper=taper)
+                               fill=0.7, bbox=(370, 390, 60, 20), taper=taper,
+                               front_evidence=evidence)
 
 
 def test_a_noisy_taper_does_not_make_the_front_flap() -> None:

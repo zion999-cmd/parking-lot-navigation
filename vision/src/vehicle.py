@@ -90,6 +90,12 @@ class VehiclePose:
     # How much wider one end of the shape is than the other. Positive means the end in the
     # +heading direction is the wider one.
     taper: float = 0.0
+    # Where the darkest stretch sits along the axis, as a fraction from the -axis end, and how
+    # much darker it is than the rest. Both are diagnostic; they feed front_evidence.
+    band_pos: Optional[float] = None
+    band_contrast: float = 0.0
+    # Signed and normalised: +1 means the front is at the +axis end.
+    front_evidence: Optional[float] = None
     front_heading: Optional[float] = None
     front_is_known: bool = False
 
@@ -140,6 +146,28 @@ def touches_border(bbox: Sequence[int], shape: Sequence[int],
             or x + w >= shape[1] - margin or y + h >= shape[0] - margin)
 
 
+# ---------------------------------------------------------------------------
+# Which end is the front.
+#
+# Two cues, and the weaker one turned out to be the one that was used first.
+#
+#   the dark band    the windscreen, presumably. Measured on this car at 65% along the axis
+#                    with 45 grey levels of contrast and a spread of 2%. On the other car it
+#                    sat at 30% or 67% depending on which way round it was.
+#   the taper        how much wider one end of the silhouette is. -0.10 to -0.17 on the first
+#                    car, but +0.012 on the car measured now, where the two ends differ by one
+#                    pixel. Silhouettes are easy to make symmetric by accident: a shadow across
+#                    one end, or simply looking at the car from a slightly different angle.
+#
+# So the band leads and the taper is the fallback. Both are expressed as a signed "evidence"
+# in -1..1 pointing along the axis, normalised by how strong that cue usually gets, so one set
+# of thresholds works for either.
+BAND_MIN_CONTRAST = 15.0     # grey levels; below this there is no band to speak of
+BAND_SCALE = 0.5             # a band this far from the middle is fully convincing
+TAPER_SCALE = 0.20           # likewise for the taper
+KEEP_EVIDENCE = 0.25         # below this, do not claim a front at all
+FLIP_EVIDENCE = 0.60         # to change an established front, this much the other way...
+
 # To turn the front round, the evidence for the other end has to be much stronger than the
 # evidence needed to keep the one already known, and it has to hold for several frames.
 #
@@ -178,17 +206,17 @@ class VehicleTracker:
     """
 
     def __init__(self, alpha: float = 0.3, position_alpha: float = 0.5,
-                 min_taper: float = MIN_TAPER, flip_taper: float = FLIP_TAPER,
+                 keep_evidence: float = KEEP_EVIDENCE, flip_evidence: float = FLIP_EVIDENCE,
                  flip_frames: int = FLIP_FRAMES, max_misses: int = MAX_MISSES,
                  position_reset_px: float = 40.0):
         self.alpha = alpha
         self.position_alpha = position_alpha
-        self.min_taper = min_taper
-        self.flip_taper = flip_taper
+        self.keep_evidence = keep_evidence
+        self.flip_evidence = flip_evidence
         self.flip_frames = flip_frames
         self.max_misses = max_misses
         self.position_reset_px = position_reset_px
-        self._taper: Optional[float] = None
+        self._evidence: Optional[float] = None
         self._ax = 0.0
         self._ay = 0.0
         self._x: Optional[float] = None
@@ -201,7 +229,7 @@ class VehicleTracker:
 
     def reset(self) -> None:
         """Start again: the car has been out of sight long enough to be a new situation."""
-        self._taper = None
+        self._evidence = None
         self._x = self._y = None
         self._front_is_plus = None
         self._opposite_streak = 0
@@ -223,8 +251,12 @@ class VehicleTracker:
             self._x = self._y = None
 
         a = self.alpha
-        self._taper = (pose.taper if self._taper is None
-                       else a * pose.taper + (1 - a) * self._taper)
+        # The evidence is smoothed, not the taper: it is what decides, and it has the same
+        # meaning whichever cue produced it. A frame with no usable cue leaves it alone rather
+        # than dragging it towards zero.
+        if pose.front_evidence is not None:
+            self._evidence = (pose.front_evidence if self._evidence is None
+                              else a * pose.front_evidence + (1 - a) * self._evidence)
         # The axis is an angle in 0..180, where 0 and 180 are the same; doubling it makes the
         # average well defined instead of cancelling itself out.
         doubled = math.radians(2.0 * pose.heading)
@@ -239,31 +271,60 @@ class VehicleTracker:
         self._x = pose.x if self._x is None else pa * pose.x + (1 - pa) * self._x
         self._y = pose.y if self._y is None else pa * pose.y + (1 - pa) * self._y
 
-        # Which end the shape says is the front, and whether to believe it.
+        # Which end the car says is the front, and whether to believe it.
         #
-        # The *raw* taper drives the flip and the smoothed one only holds it. Using the
-        # smoothed value for both made a real turn take about a second to register, because the
+        # The *raw* evidence drives the flip and the smoothed one only holds it. Using the
+        # smoothed value for both made a real turn take about a second to register, because an
         # average needs several frames to cross zero - too slow for a car that can be turned
         # round in one movement. The raw value is safe for the flip because the trigger demands
-        # 0.10 on the *opposite* side for several consecutive frames: with the noise at 0.05
-        # around a mean of -0.12 that is a four-sigma excursion, and it has to happen three
-        # times in a row.
-        wider_is_plus = pose.taper > 0
-        wants_plus = wider_is_plus == FRONT_IS_THE_WIDER_END
-        if self._front_is_plus is None:
-            self._front_is_plus = wants_plus
-        elif wants_plus != self._front_is_plus and abs(pose.taper) >= self.flip_taper:
-            self._opposite_streak += 1
-            if self._opposite_streak >= self.flip_frames:
-                self._front_is_plus = not self._front_is_plus
+        # strong evidence the other way for several consecutive frames, which noise does not
+        # produce.
+        raw = pose.front_evidence
+        if raw is not None:
+            wants_plus = raw > 0
+            # Establishing the front needs solid evidence; keeping it does not need to be
+            # re-justified every frame. Which end is the front is a property of this car, not of
+            # the last frame, so a frame with a weak cue - or the smoothed evidence dipping
+            # while one contrary frame is being ignored - must not make the front disappear.
+            # Only sustained contrary evidence changes it, which is what the trigger below is.
+            if self._front_is_plus is None and abs(raw) >= self.keep_evidence:
+                self._front_is_plus = wants_plus
+            elif wants_plus != self._front_is_plus and abs(raw) >= self.flip_evidence:
+                self._opposite_streak += 1
+                if self._opposite_streak >= self.flip_frames:
+                    self._front_is_plus = not self._front_is_plus
+                    self._opposite_streak = 0
+            else:
                 self._opposite_streak = 0
-        else:
-            self._opposite_streak = 0
 
-        known = pose.elongation >= 1.6 and abs(self._taper) >= self.min_taper
-        front = heading if self._front_is_plus else (heading + 180.0) % 360.0
-        return replace(pose, x=self._x, y=self._y, heading=heading, taper=self._taper,
+        known = self._front_is_plus is not None and pose.elongation >= 1.6
+        front = ((heading if self._front_is_plus else (heading + 180.0) % 360.0)
+                 if self._front_is_plus is not None else None)
+        return replace(pose, x=self._x, y=self._y, heading=heading,
                        front_heading=front if known else None, front_is_known=known)
+
+
+def band_of(along: np.ndarray, tones: np.ndarray, bins: int = 12
+            ) -> Tuple[Optional[float], float]:
+    """Where the dark stretch sits along the axis, and how dark it is against the rest.
+
+    No rotation is needed: the pixels are projected onto the axis, and the grey values are
+    averaged per slice. Same quantity as measuring the brightness profile of an aligned crop,
+    for a fraction of the cost.
+    """
+    if len(along) < 20:
+        return None, 0.0
+    lo, hi = float(along.min()), float(along.max())
+    if hi - lo < 8:
+        return None, 0.0
+    index = np.clip(((along - lo) / (hi - lo) * bins).astype(int), 0, bins - 1)
+    sums = np.bincount(index, weights=tones, minlength=bins)
+    counts = np.bincount(index, minlength=bins)
+    if not counts.all():
+        return None, 0.0
+    profile = sums / counts
+    contrast = float(profile.max() - profile.min())
+    return float((int(np.argmin(profile)) + 0.5) / bins), contrast
 
 
 def taper_of(points: np.ndarray, heading: float, bins: int = 12) -> float:
@@ -300,6 +361,7 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
     if frame is None or frame.size == 0:
         return []
     mask = red_mask(cv2.cvtColor(frame, cv2.COLOR_BGR2HSV), close_kernel)
+    gray_image = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
     out: List[VehiclePose] = []
     for i in range(1, count):
@@ -312,6 +374,7 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
             continue
         ys, xs = np.where(labels == i)
         points = np.column_stack([xs, ys]).astype(np.float32)
+        gray_values = gray_image[ys, xs].astype(np.float64)
         centre = points.mean(axis=0)
         values, vectors = np.linalg.eigh(np.cov((points - centre).T))
         major = vectors[:, int(np.argmax(values))]
@@ -323,19 +386,31 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
         # flickers, because the rectangle depends on the extremes rather than every pixel.
         heading = (angle if rw >= rh else angle + 90.0) % 180.0
         taper = taper_of(points, heading)
+        radians = np.radians(heading)
+        along = points[:, 0] * np.cos(radians) + points[:, 1] * np.sin(radians)
+        band_pos, band_contrast = band_of(along, gray_values)
+
+        # Which end the front is on, as a signed evidence along the axis.
+        evidence: Optional[float] = None
+        if band_pos is not None and band_contrast >= BAND_MIN_CONTRAST:
+            evidence = float(np.clip((band_pos - 0.5) * 2.0 / BAND_SCALE, -1.0, 1.0))
+        elif abs(taper) >= MIN_TAPER:
+            signed = taper if FRONT_IS_THE_WIDER_END else -taper
+            evidence = float(np.clip(signed / TAPER_SCALE, -1.0, 1.0))
+        if elongation < 1.6:
+            evidence = None          # a blob with no axis cannot have a front either
+
         front_heading = None
         front_known = False
-        if elongation >= 1.6 and abs(taper) >= MIN_TAPER:
-            # `taper` is positive when the end in the +heading direction is wider, and
-            # FRONT_IS_THE_WIDER_END records which end of this car that is.
-            wider_is_plus = taper > 0
-            plus_is_front = wider_is_plus == FRONT_IS_THE_WIDER_END
-            front_heading = heading if plus_is_front else (heading + 180.0) % 360.0
+        if evidence is not None and abs(evidence) >= KEEP_EVIDENCE:
+            front_heading = heading if evidence > 0 else (heading + 180.0) % 360.0
             front_known = True
         out.append(VehiclePose(x=float(centre[0]), y=float(centre[1]), heading=heading,
                                area=area, elongation=elongation,
                                fill=area / max(w * h, 1), bbox=(x, y, w, h),
                                heading_pca=heading_pca, taper=taper,
+                               band_pos=band_pos, band_contrast=band_contrast,
+                               front_evidence=evidence,
                                front_heading=front_heading, front_is_known=front_known))
     out.sort(key=lambda p: -p.area)
     return out

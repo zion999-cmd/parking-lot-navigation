@@ -123,8 +123,11 @@ def annotate(frame: np.ndarray, spots: List[Spot], results: Dict[str, SpotResult
         else:
             text = (f"car ({pose.x:.0f},{pose.y:.0f}) axis {pose.heading:.0f}deg"
                     f"  front unknown{where}")
+        band = (f"band {pose.band_pos * 100:.0f}%/{pose.band_contrast:.0f}"
+                if pose.band_pos is not None else "band -")
+        ev = f"{pose.front_evidence:+.2f}" if pose.front_evidence is not None else "  -  "
         detail = (f"elon {pose.elongation:.2f}  pca {pose.heading_pca:.0f}deg  d{agree:.0f}deg"
-                  f"  taper {pose.taper:+.2f}")
+                  f"  taper {pose.taper:+.2f}  {band}  ev {ev}")
         if pose.elongation < 1.6:
             detail += "  NO CLEAR AXIS"
         if agree > 10:
