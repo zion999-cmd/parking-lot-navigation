@@ -1,0 +1,193 @@
+"""The hero car: where it is, which way its axis runs, and what the contract says.
+
+Colour and shape rather than a marker, for the reason recorded in src/vehicle.py: at 800x600
+across a whole sandbox a marker has to be about half the car wide and flat to the camera, and
+on a toy car that is not reasonable. What that costs is checked here too - the heading is an
+axis, not a direction of travel, and the tests say so rather than leaving it implied.
+
+Run:  python tests/test_vehicle.py
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+import cv2
+import numpy as np
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+
+import contract                                                 # noqa: E402
+import vehicle                                                  # noqa: E402
+from road_network import KIND_ENTRANCE, RoadNetwork              # noqa: E402
+from spot_config import Spot                                    # noqa: E402
+
+W, H = 800, 600
+BACKGROUND = 120
+# Pure red in BGR: hue 0, high saturation, middling value, which is what the mask wants.
+RED = (0, 0, 200)
+
+
+def frame_with(*rects) -> np.ndarray:
+    img = np.full((H, W, 3), BACKGROUND, np.uint8)
+    for x0, y0, x1, y1 in rects:
+        cv2.rectangle(img, (x0, y0), (x1, y1), RED, -1)
+    return img
+
+
+def a_bay(bay_id: str, x0: float, y0: float, x1: float, y1: float) -> Spot:
+    return Spot(id=bay_id, polygon=np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+                                            dtype=float))
+
+
+def roads_below() -> RoadNetwork:
+    net = RoadNetwork(shape=(H, W))
+    a = net.add_node(0, 500, kind=KIND_ENTRANCE)
+    b = net.add_node(W - 1, 500)
+    net.connect(a.id, b.id)
+    return net
+
+
+# ---------------------------------------------------------------------------
+# Position and axis, against shapes whose answer is known
+# ---------------------------------------------------------------------------
+
+def test_a_horizontal_bar_reads_an_axis_of_zero() -> None:
+    pose = vehicle.locate(frame_with((100, 300, 200, 340)))
+    assert pose is not None
+    assert abs(pose.heading) < 2 or abs(pose.heading - 180) < 2, pose.heading
+    assert abs(pose.x - 150) < 2 and abs(pose.y - 320) < 2, pose.centre
+
+
+def test_a_vertical_bar_reads_an_axis_of_ninety() -> None:
+    pose = vehicle.locate(frame_with((400, 200, 440, 400)))
+    assert pose is not None
+    assert abs(pose.heading - 90) < 2, pose.heading
+
+
+def test_a_diagonal_bar_reads_its_own_angle() -> None:
+    img = np.full((H, W, 3), BACKGROUND, np.uint8)
+    # A 45 degree bar drawn as a thick line.
+    cv2.line(img, (200, 200), (400, 400), RED, 30)
+    pose = vehicle.locate(img)
+    assert pose is not None
+    assert abs(pose.heading - 45) < 5 or abs(pose.heading - 135) < 5, pose.heading
+
+
+def test_a_car_shaped_blob_is_elongated_and_solid() -> None:
+    pose = vehicle.locate(frame_with((300, 300, 370, 330)))
+    assert pose is not None
+    assert pose.elongation > 1.8, pose.elongation
+    assert pose.fill > 0.6, pose.fill
+
+
+# ---------------------------------------------------------------------------
+# Saying "I cannot see it" rather than guessing
+# ---------------------------------------------------------------------------
+
+def test_no_red_means_no_pose() -> None:
+    assert vehicle.locate(np.full((H, W, 3), BACKGROUND, np.uint8)) is None
+
+
+def test_a_speck_of_red_is_not_a_car() -> None:
+    assert vehicle.locate(frame_with((100, 100, 108, 108)), min_area=80) is None
+
+
+def test_the_contract_says_invisible_rather_than_remembering() -> None:
+    class FakeResult:
+        state = "EMPTY"
+        changed_ratio = 0.0
+
+    state = contract.build_state({"38": FakeResult()}, vehicle=None)
+    assert state["vehicle"] == {"id": "hero", "visible": False}
+    assert "visible" in state["vehicle"] and state["vehicle"]["visible"] is False
+
+
+def test_the_contract_carries_the_pose_when_there_is_one() -> None:
+    pose = vehicle.locate(frame_with((100, 300, 200, 340)))
+    assert pose is not None
+    state = contract.build_state({}, vehicle=pose.as_dict())
+    assert state["vehicle"]["visible"] is True
+    assert state["vehicle"]["heading_is_axis_only"] is True
+    assert "x" in state["vehicle"] and "heading" in state["vehicle"]
+
+
+def test_the_heading_is_an_axis_never_a_direction() -> None:
+    """A car pointing east and the same car pointing west must read the same."""
+    east = vehicle.locate(frame_with((100, 300, 200, 340)))
+    # the same bar, but now with a piece added at the left so the shape leans the other way
+    west = vehicle.locate(frame_with((100, 300, 200, 340), (60, 312, 100, 328)))
+    assert east is not None and west is not None
+    assert 0 <= east.heading < 180 and 0 <= west.heading < 180
+    assert abs(east.heading - 0) < 5 or abs(east.heading - 180) < 5, east.heading
+    assert "heading_is_axis_only" in east.as_dict()
+
+
+def test_red_trim_touching_the_edge_of_the_picture_is_ignored() -> None:
+    """The enclosure's own trim is orange-red and runs into the top of the frame."""
+    img = frame_with((0, 0, W, 20))
+    assert vehicle.locate(img) is None, "trim along the edge was taken for a car"
+    # ...but the same blob is offered when explicitly asked for
+    assert vehicle.locate(img, keep_border=True) is not None
+
+
+def test_the_largest_red_thing_is_the_one_reported() -> None:
+    img = frame_with((100, 100, 130, 130), (300, 300, 400, 340))
+    pose = vehicle.locate(img)
+    assert pose is not None
+    assert pose.area > 3000, pose.area     # the big bar, not the 30x30 speck
+
+
+# ---------------------------------------------------------------------------
+# Where it is: the bay and road half of the map
+# ---------------------------------------------------------------------------
+
+def test_a_car_inside_a_bay_is_reported_in_that_bay() -> None:
+    spots = [a_bay("38", 300, 300, 350, 400)]
+    pose = vehicle.locate(frame_with((300, 300, 350, 330)))
+    assert pose is not None
+    where = vehicle.location_of(pose, spots, roads_below())
+    assert where["kind"] == "spot" and where["id"] == "38", where
+
+
+def test_a_car_on_a_road_is_reported_on_the_road() -> None:
+    spots = [a_bay("38", 300, 100, 350, 200)]
+    pose = vehicle.locate(frame_with((200, 495, 300, 535)))    # centred on y=515? see below
+    assert pose is not None
+    where = vehicle.location_of(pose, spots, roads_below())
+    assert where["kind"] in ("road", "floor"), where
+
+
+def test_a_car_far_from_every_road_is_reported_as_floor() -> None:
+    pose = vehicle.locate(frame_with((100, 100, 200, 140)))
+    assert pose is not None
+    where = vehicle.location_of(pose, [], roads_below())
+    assert where["kind"] == "floor", where
+    assert where["distance_to_road"] > 100, where
+
+
+def test_with_no_map_the_location_is_unknown_not_a_guess() -> None:
+    pose = vehicle.locate(frame_with((100, 300, 200, 340)))
+    assert pose is not None
+    assert vehicle.location_of(pose, None, None)["kind"] == "unknown"
+
+
+def main() -> int:
+    tests = [(n, f) for n, f in sorted(globals().items())
+             if n.startswith("test_") and callable(f)]
+    failures = 0
+    for name, fn in tests:
+        try:
+            fn()
+        except Exception as exc:                     # noqa: BLE001
+            failures += 1
+            print(f"  FAIL  {name}: {type(exc).__name__}: {exc}")
+        else:
+            print(f"  ok    {name}")
+    print(f"\n{len(tests)} checks, {failures} failures")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

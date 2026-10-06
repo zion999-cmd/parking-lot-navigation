@@ -50,7 +50,8 @@ ESP32 导航小车（车位级导航）◄── 下一步
 | 内存 | `heap_internal` ~123 KB（streaming）／~129 KB（idle），**无泄漏** |
 | 视觉阈值 | `changed_ratio ≥ 0.15` 判占用，逐像素阈值 25（灰阶），blur 5 |
 | 车位几何 | 48 个，全部 47~48 × 100~104 px，**两两重叠 0 对** |
-| 测试 | **135 项全绿**（occupancy 17 / detector 17 / editor 37 / alignment 15 / road 49） |
+| 测试 | **165 项全绿**（occupancy 17 / detector 17 / editor 37 / alignment 15 / road 49 / contract 15 / vehicle 15） |
+| 主车定位 | 位置 **±0.25px**、长轴 **±0.8°**（导航需 ±5px / ±15°）—— 颜色+形状，不用标记 |
 
 ### 2.3 还没验证的（诚实清单）
 
@@ -135,7 +136,9 @@ P=/usr/local/Caskroom/miniconda/base/envs/vision-dev/bin/python
 | `src/road_network.py` | **道路数据模型** + `derive()`（车位+道路 → 导航图，纯函数） | — |
 | `src/road_editor.py` | **画道路**的编辑模型（沿路点击、拖点、交汇） | — |
 | `src/contract.py` | **P0002 输出契约**：生成 `parking_map` / `parking_state` 两个文档（§7） | — |
+| `src/vehicle.py` | **主车定位**：颜色 + 形状 → `x/y/heading`，并判定「在哪个车位 / 在路上」（§7.4.1） | — |
 | `src/emit_map.py` | **发射静态契约**：配置 → `out/parking_map.json` | `$P src/emit_map.py [--strict]` |
+| `tests/car_locate.py` | **主车定位的独立检查工具**（`--watch` 每秒打印，挪车看数字跟不跟） | `$P tests/car_locate.py --watch` |
 | `tests/demo_alignment.py` | 对齐演示 / 测当前偏移 | `$P tests/demo_alignment.py --shift 0,0 --frame X.jpg` |
 | `tests/fit_threshold.py` | **从验收案例拟合阈值**（阈值要测量，不要猜） | `$P tests/fit_threshold.py --cases 'data/cases/*.csv'` |
 
@@ -227,7 +230,8 @@ $P src/main.py
 | 键 | 作用 |
 |---|---|
 | `r` | **抓参考帧**（必须是全空状态） |
-| `e` | 进编辑模式（就地改车位框） |
+| `e` | 进编辑模式（就地改车位框 / 画道路） |
+| **`c`** | **切换主车标注**（橙色框 + 双向箭头 = 红车位置与长轴） |
 | `t` | **参考帧体检**：区分「画面整体变了」和「这几格内容真的不同」 |
 | `p` | 打印逐格数字（`*` = 超阈值） |
 | `g` / `d` | 显示内框 / 差异叠加 |
@@ -485,7 +489,9 @@ $P src/emit_map.py --strict        # 有任何车位没接入道路就返回非�
     "39": { "state": "EMPTY" },
     "40": { "state": "UNKNOWN", "reason": "no frames for 4.0s" }
   },
-  "vehicle": { "id": "hero", "x": 423, "y": 286, "heading": 91.4, "visible": true }
+  "vehicle": { "id": "hero", "x": 336, "y": 436, "heading": 0.0,
+                "visible": true, "heading_is_axis_only": true,
+                "location": { "kind": "road", "id": null, "distance_to_road": 1.3 } }
 }
 ```
 
@@ -516,11 +522,39 @@ $P src/emit_map.py --strict        # 有任何车位没接入道路就返回非�
 ### 7.4 当前完成度
 
 **已完成**：48 个车位 polygon　车位 `access`　道路 ＋ 节点/边　停车场大门　车位→道路连接
-　EMPTY / OCCUPIED　**`UNKNOWN` 接口**　两个契约文档
+　EMPTY / OCCUPIED　**`UNKNOWN` 接口**　**主车定位**　两个契约文档
 
-**还差两项**：
-1. **最终阈值实测确定**（现在 0.15 仍是经验值，见 §2.3）
-2. **主车 `x/y/heading`** —— P0002.5，见 §10
+**还差一项**：**最终阈值实测确定**（现在 0.15 仍是经验值，见 §2.3）
+
+### 7.4.1 主车定位（P0002.5）
+
+`vehicle` 字段由**颜色 + 形状**得出（`src/vehicle.py`），**不用标记**：
+
+```json
+"vehicle": { "id": "hero", "x": 336.0, "y": 435.9, "heading": 0.0,
+             "visible": true, "heading_is_axis_only": true,
+             "location": { "kind": "road", "id": null, "distance_to_road": 1.3 } }
+```
+
+| 字段 | 含义 |
+|---|---|
+| `x` / `y` | 车在图像坐标系里的位置（像素） |
+| `heading` | **车的长轴方向**，0~180° |
+| **`heading_is_axis_only`** | **恒为 true** —— 长轴**没有车头**，东向和西向读数相同 |
+| `visible` | 看不到红车就是 **`false`**，**不带上次的位置**（同 `UNKNOWN` 纪律） |
+| `location.kind` | `spot`（在哪个车位）/ `road`（在路上）/ `floor`（在空地）/ `unknown`（没地图） |
+| `location.id` | 在车位时的车位号；在路上时为 null |
+| `location.distance_to_road` | 离最近道路中心线的像素距离 |
+
+**实测精度（车静止、相机不动）**：位置 **±0.25px**（导航需 ±5px）、轴方向 **±0.8°**（需 ±15°）；
+**独立交叉验证**：车停在路上时它算出 0.0°，而那段路的几何方向是 −0.17°
+
+**为什么不用 ArUco**：在 800×600 看整个停车场的前提下，标记要能读需要 **≥40px**，
+而这辆车在画面里只有 **69px 宽** —— **标记得占车宽 58%**，物理上不合理。实测 ArUco 也确实读不到。
+而**颜色+形状不需要参考帧**，因此也不受光照变化和车位线亚像素偏移的影响。
+
+**ArUco 唯一不可替代的地方**：**车头方向**。如果以后导航需要知道「车头朝哪」
+（而不只是「沿哪根轴」），那才需要往车上加东西；`heading_is_axis_only` 就是给消费方看的诚实标记。
 
 ### 7.5 三个文件的分工（别混）
 
@@ -621,9 +655,12 @@ parking-lot-navigation/
 | 1 | **看一眼 LCD 显示了什么** | P0001.2 唯一没验证的 |
 | 2 | **录 5 个验收案例并拟合阈值** | `--headless --csv` → `tests/fit_threshold.py`，把 0.15 从「经验值」变成「测量值」 |
 | 3 | **（可选）看情况补通道** | 现在 0 个车位离路超过 220px（引线 27~38px），**不补也行**；只有以后多了新区域、`p` 报「离路很远」时才需要 |
-| 4 | **P0002.5 — 主车定位** | ESP32-S3-CAM → ArUco 标记 → `x / y / heading / visible`，填进 `parking_state.json` 的 `vehicle` 字段。**这是 P0002 封版前最后一块**：现在「停车场在哪、车位在哪、路在哪、哪个车位有车」都齐了，只差「我这辆车在哪、朝哪」 |
+| 4 | ~~P0002.5 — 主车定位~~ | ✅ **已完成**（见 §7.4.1）：颜色 + 形状，**不用标记**。精度 位置 ±0.25px / 轴向 ±0.8°，实测远超需求 |
 | 5 | **P0003 — 导航** | 拿到 `parking_map + parking_state`（含主车）后做：找可用车位 → A*/Dijkstra → Route。**不再碰视觉** |
 
 > **P0002.5 的依赖已经就绪**：`cv2.aruco` 在当前的 `opencv-python 4.13.0` 里自带（**不需要**装 `opencv-contrib-python`，已实测）。
+>
+> **但最终没用 ArUco** —— 原因见 §7.4.1。相关工具保留着（万一以后需要「车头方向」）：
+> `tools/make-aruco-marker.py`（生成保证可读的标记）与 `tests/aruco_check.py`（可重复测量）
 > 做法：打印并裁出 ArUco 标记贴在主车上 → `cv2.aruco.detectMarkers` 得到四个角点 →
 > 取角点中心得 `x/y`、取一条边的角度得 `heading`、没检测到就 `visible: false` → 写进契约的 `vehicle`。

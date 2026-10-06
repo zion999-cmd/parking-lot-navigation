@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
 import shutil
 import sys
@@ -41,6 +42,8 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import contract                                                # noqa: E402
+import vehicle                                                 # noqa: E402
+from road_network import RoadNetwork                            # noqa: E402
 from alignment import Aligner                                    # noqa: E402
 from calibration import CalibrationApp                           # noqa: E402
 from camera import CameraError, open_camera                      # noqa: E402
@@ -61,9 +64,44 @@ COL_EMPTY = (0, 220, 0)
 COL_OCCUPIED = (0, 0, 255)
 
 
+COL_CAR = (255, 120, 0)
+
+
 def annotate(frame: np.ndarray, spots: List[Spot], results: Dict[str, SpotResult],
-             show_inner: bool, show_diff: bool) -> np.ndarray:
+             show_inner: bool, show_diff: bool,
+             pose: Optional[vehicle.VehiclePose] = None,
+             location: Optional[dict] = None) -> np.ndarray:
     canvas = frame.copy()
+
+    if pose is not None:
+        # The hero car. The axis is drawn with an arrowhead at both ends on purpose: colour
+        # and shape know the car's axis, not which end is the front, and the picture should
+        # not pretend otherwise.
+        x, y, w, h = pose.bbox
+        cv2.rectangle(canvas, (x, y), (x + w, y + h), COL_CAR, 2)
+        length = max(w, h) * 0.65
+        rad = math.radians(pose.heading)
+        dx, dy = length * math.cos(rad), length * math.sin(rad)
+        cv2.arrowedLine(canvas, (int(pose.x), int(pose.y)),
+                        (int(pose.x + dx / 2), int(pose.y + dy / 2)), COL_CAR, 2,
+                        tipLength=0.18)
+        cv2.arrowedLine(canvas, (int(pose.x), int(pose.y)),
+                        (int(pose.x - dx / 2), int(pose.y - dy / 2)), COL_CAR, 2,
+                        tipLength=0.18)
+        cv2.circle(canvas, (int(pose.x), int(pose.y)), 4, COL_CAR, -1)
+        where = ""
+        if location:
+            if location.get("kind") == "spot":
+                where = f"  in {location['id']}"
+            elif location.get("kind") == "road":
+                where = f"  on road ({location['distance_to_road']:.0f}px)"
+            elif location.get("kind") == "floor":
+                where = f"  floor ({location['distance_to_road']:.0f}px from road)"
+        text = f"car ({pose.x:.0f},{pose.y:.0f}) axis {pose.heading:.0f}deg{where}"
+        cv2.putText(canvas, text, (max(x - 20, 6), max(y - 8, 14)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 4)
+        cv2.putText(canvas, text, (max(x - 20, 6), max(y - 8, 14)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, COL_CAR, 1)
 
     if show_diff:
         for s in spots:
@@ -229,14 +267,20 @@ def capture_reference(frame: np.ndarray, path: str) -> bool:
     return True
 
 
-def vehicle_state() -> Optional[dict]:
-    """Where the hero car is, or None when it cannot be seen.
+def vehicle_state(pose: Optional[vehicle.VehiclePose],
+                  location: Optional[dict] = None) -> Optional[dict]:
+    """The car's entry for the contract, or None when it cannot be seen.
 
-    P0002.5 fills this in from a marker on the car (ArUco -> x/y/heading). Until then the
-    contract says visible: false rather than guessing, on the same rule that makes an
-    unseen bay UNKNOWN rather than EMPTY.
+    None rather than a stale position: the same rule that makes an unseen bay UNKNOWN. A
+    navigator can be told "the car is not visible, look again"; it cannot recover from being
+    told where the car was ten seconds ago.
     """
-    return None
+    if pose is None:
+        return None
+    out = pose.as_dict()
+    if location:
+        out["location"] = location
+    return out
 
 
 # How long without a frame before the contract admits it does not know anything.
@@ -244,7 +288,8 @@ STALE_AFTER_S = 2.0
 
 
 def write_state(args, results, spots, have_reference: bool, stall: float,
-                last_written: float) -> Optional[float]:
+                last_written: float, vehicle_doc: Optional[dict] = None
+                ) -> Optional[float]:
     """Write the live half of the P0002 contract. Returns when it wrote, or None.
 
     Throttled: it is a file write, and the state only changes as fast as a car moves.
@@ -271,9 +316,9 @@ def write_state(args, results, spots, have_reference: bool, stall: float,
 
     if reason is not None:
         document = contract.unknown_state([s.id for s in spots], reason,
-                                          vehicle=vehicle_state())
+                                          vehicle=vehicle_doc)
     else:
-        document = contract.build_state(results, vehicle=vehicle_state())
+        document = contract.build_state(results, vehicle=vehicle_doc)
     try:
         contract.write_json(path, document)
     except OSError as exc:
@@ -428,6 +473,12 @@ def main() -> int:
                     help="accept an alignment only at or above this structure "
                          "correlation (default 0.8; measured 0.95-0.97 for a real "
                          "nudge, 0.54-0.64 for a failed one)")
+    ap.add_argument("--no-vehicle", action="store_true",
+                    help="do not look for the hero car (the red one); it is located by "
+                         "colour and shape, see src/vehicle.py")
+    ap.add_argument("--vehicle-min-area", type=int, default=vehicle.DEFAULT_MIN_AREA,
+                    help="ignore red blobs smaller than this (default %d)"
+                         % vehicle.DEFAULT_MIN_AREA)
     ap.add_argument("--state-out", metavar="JSON",
                     default=os.path.join(ROOT, "out", "parking_state.json"),
                     help="write the live half of the P0002 contract here: every bay's "
@@ -467,6 +518,10 @@ def main() -> int:
 
     print(f"loaded {len(spots)} spot(s) from {args.config}: "
           f"{', '.join(s.id for s in spots)}")
+
+    # The road network, for answering "which bay, or on which road" about the car. Only the
+    # geometry is needed here, so it does not matter that the frame size is not known yet.
+    road_net = RoadNetwork.load(args.config) if os.path.exists(args.config) else None
 
     # -- reference -----------------------------------------------------------
     have_reference = False
@@ -549,6 +604,8 @@ def main() -> int:
     last_frame_at = started
     stall_warned = False
     state_written = [0.0]
+    look_for_car = not args.no_vehicle
+    show_car = True
 
     try:
         while True:
@@ -616,8 +673,17 @@ def main() -> int:
             else:
                 results = {}
 
+            # The hero car: found by colour and shape, with no marker and no reference frame.
+            pose = None
+            location = None
+            if look_for_car:
+                pose = vehicle.locate(frame, min_area=args.vehicle_min_area)
+                if pose is not None and any((spots, road_net)):
+                    location = vehicle.location_of(pose, spots, road_net)
+
             wrote = write_state(args, results, spots, have_reference, stall,
-                                state_written[0])
+                                state_written[0],
+                                vehicle_state(pose, location) if pose else None)
             if wrote is not None:
                 state_written[0] = wrote
 
@@ -637,7 +703,8 @@ def main() -> int:
 
             if args.save_debug and not snapshot_done:
                 os.makedirs(os.path.dirname(os.path.abspath(args.save_debug)), exist_ok=True)
-                out = annotate(frame, spots, results, show_inner, show_diff)
+                out = annotate(frame, spots, results, show_inner, show_diff,
+                               pose if show_car else None, location)
                 cv2.imwrite(args.save_debug, out)
                 print(f"saved annotated snapshot -> {args.save_debug}")
                 if have_reference:
@@ -663,7 +730,8 @@ def main() -> int:
                     print(f"t={elapsed:5.1f}s  waiting for a reference (press 'r')")
 
             if not args.headless:
-                canvas = annotate(frame, spots, results, show_inner, show_diff)
+                canvas = annotate(frame, spots, results, show_inner, show_diff,
+                                  pose if show_car else None, location)
                 if aligner is None:
                     align_text = "align off"
                 elif align_result is None:
@@ -681,6 +749,16 @@ def main() -> int:
                           f"ref {'OK' if have_reference else 'MISSING - press r'}  "
                           f"{align_text}  loop {frames / max(elapsed, 1e-6):.1f} fps"
                           f" (source {src_fps:.1f}){stall_note}")
+                if not look_for_car:
+                    car_text = "off"
+                elif pose is None:
+                    car_text = "not visible"
+                else:
+                    car_text = f"({pose.x:.0f},{pose.y:.0f}) axis {pose.heading:.0f}deg"
+                    if location:
+                        car_text += f" {location['kind']}" + (f" {location['id']}"
+                                                              if location.get("id") else "")
+                header += f"   car {car_text}"
                 cv2.putText(canvas, header, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                             (0, 0, 0), 3)
                 cv2.putText(canvas, header, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
@@ -730,6 +808,8 @@ def main() -> int:
                               "empty reference - the current one is from the old view")
                 elif key == ord('g'):
                     show_inner = not show_inner
+                elif key == ord('c'):
+                    show_car = not show_car
                 elif key == ord('d'):
                     show_diff = not show_diff
                 elif key in (ord('+'), ord('=')):
