@@ -149,6 +149,20 @@ class SpotEditor:
         }
         return True
 
+    def _clamp(self, spot: Spot) -> None:
+        """Keep a bay inside the frame.
+
+        OpenCV reports mouse coordinates outside the image while a drag is held and the
+        pointer leaves the window. Without this a bay could be parked at x=1330 on an
+        800 px frame and then saved, and the next start refused to load the calibration
+        at all ("spot 167: detection area is empty after clipping to 800x600").
+        """
+        h, w = self.shape
+        poly = np.asarray(spot.polygon, dtype=np.float64)
+        poly[:, 0] = np.clip(poly[:, 0], 0, w - 1)
+        poly[:, 1] = np.clip(poly[:, 1], 0, h - 1)
+        spot.polygon = poly
+
     def update_drag(self, x: float, y: float) -> None:
         if self._drag is None:
             return
@@ -164,6 +178,7 @@ class SpotEditor:
             self._drag["last"] = (x, y)
         else:
             spot.polygon[corner] = [x, y]
+        self._clamp(spot)
         self._prepare(spot)
         self.dirty = True
 
@@ -188,8 +203,52 @@ class SpotEditor:
             return
         self._push_undo()
         spot.polygon = spot.polygon + np.array([dx, dy], dtype=np.float64)
+        self._clamp(spot)
         self._prepare(spot)
         self.dirty = True
+
+    def nudge_many(self, spots, dx: float, dy: float) -> int:
+        """Move several bays at once as a single undo step.
+
+        The usual repair after the camera has been nudged is that a whole row is off by
+        the same amount, so moving one bay at a time is 48 corrections where four would
+        do.
+        """
+        moved = 0
+        targets = [s for s in spots if s is not None]
+        if not targets:
+            return 0
+        self._push_undo()
+        for spot in targets:
+            spot.polygon = spot.polygon + np.array([dx, dy], dtype=np.float64)
+            self._clamp(spot)
+            self._prepare(spot)
+            moved += 1
+        self.dirty = True
+        return moved
+
+    def rows_by_y(self, tol: float = 30.0) -> List[List[int]]:
+        """Group bay indices into rows by their vertical centre.
+
+        Rows come out top to bottom. tol is generous on purpose: hand-drawn bays in one
+        row are never exactly level.
+        """
+        centres = []
+        for i, s in enumerate(self.spots):
+            poly = np.asarray(s.polygon, dtype=np.float64)
+            centres.append((float(poly[:, 1].mean()), i))
+        rows: List[List[int]] = []
+        row_centres: List[float] = []
+        for yc, i in sorted(centres):
+            for r, best in enumerate(row_centres):
+                if abs(yc - best) <= tol:
+                    rows[r].append(i)
+                    row_centres[r] = (best * (len(rows[r]) - 1) + yc) / len(rows[r])
+                    break
+            else:
+                rows.append([i])
+                row_centres.append(yc)
+        return rows
 
     # -- structural edits ---------------------------------------------------
 
@@ -396,6 +455,21 @@ class SpotEditor:
     def save(self, path: str) -> bool:
         if not self.spots:
             self._say("nothing to save yet", "warn")
+            return False
+        # Never write a calibration that cannot be loaded again. The clamp in
+        # update_drag() and nudge() should make this unreachable, but a broken file on
+        # disk is far worse than a refusal: it stops the viewer from starting at all.
+        h, w = self.shape
+        outside = []
+        for s in self.spots:
+            poly = np.asarray(s.polygon, dtype=np.float64)
+            if (poly[:, 0].min() < 0 or poly[:, 0].max() >= w or
+                    poly[:, 1].min() < 0 or poly[:, 1].max() >= h):
+                outside.append(s.id)
+        if outside:
+            self._say(f"refusing to save: {len(outside)} bay(s) outside {w}x{h} "
+                      f"({', '.join(outside[:4])}) - move them back in, or delete "
+                      f"them with 'd'", "warn")
             return False
         save_spots(path, self.spots, self.shape)
         self.dirty = False

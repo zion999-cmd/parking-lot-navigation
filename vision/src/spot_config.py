@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -158,7 +159,8 @@ def validate(spots: List[Spot], shape: Tuple[int, int], allow_overlap: bool = Tr
     return problems
 
 
-def load_spots(path: str, shape: Optional[Tuple[int, int]] = None) -> List[Spot]:
+def load_spots(path: str, shape: Optional[Tuple[int, int]] = None,
+               skip_bad: bool = False) -> List[Spot]:
     if not os.path.exists(path):
         raise SpotConfigError(
             f"{path} does not exist yet - calibrate the bays first:\n"
@@ -174,8 +176,37 @@ def load_spots(path: str, shape: Optional[Tuple[int, int]] = None) -> List[Spot]
 
     spots = [Spot.from_dict(e, i) for i, e in enumerate(entries)]
     if shape is not None:
-        for s in spots:
-            s.prepare(shape)
+        if not skip_bad:
+            for s in spots:
+                s.prepare(shape)
+        else:
+            kept, dropped = [], []
+            for s in spots:
+                try:
+                    s.prepare(shape)
+                except SpotConfigError as exc:
+                    dropped.append(str(exc))
+                else:
+                    kept.append(s)
+            if dropped:
+                # Loud, but not fatal.
+                #
+                # A single stray bay used to make the viewer refuse to start, and then
+                # there was no way to get into edit mode and delete it - the file could
+                # only be repaired by hand. Skipping it keeps that door open. A bay that
+                # is entirely outside the frame had no detection area anyway.
+                print(f"warning: {len(dropped)} spot(s) do not fit "
+                      f"{shape[1]}x{shape[0]} and were skipped:", file=sys.stderr)
+                for msg in dropped[:5]:
+                    print(f"  {msg}", file=sys.stderr)
+                if kept:
+                    print("  fix them with 'e' in src/main.py, or delete with 'd'",
+                          file=sys.stderr)
+            if not kept:
+                # Every bay is outside the frame. That is a whole-calibration size
+                # mismatch, not a stray bay, so report it instead of starting empty.
+                raise SpotConfigError(dropped[0])
+            spots = kept
     return spots
 
 

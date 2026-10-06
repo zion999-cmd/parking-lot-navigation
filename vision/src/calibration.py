@@ -88,6 +88,8 @@ class CalibrationApp:
         self.show_inner = True
         self.show_overlay = False
         self.cursor: Tuple[int, int] = (0, 0)
+        # What 2/4/6/8 move: the selected bay, its whole row, or everything.
+        self.nudge_scope = "bay"
         self._buttons: List[Tuple[int, int, int, int, str, str]] = []
         self._pending_prompt: Optional[str] = None
 
@@ -141,9 +143,8 @@ class CalibrationApp:
             cv2.putText(canvas, msg.text[:118], (8, h - BAR_H - 50),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.52, colour, 1)
 
-        hint = ("drag handles | A align | a auto | g gen row | n add | d del | "
-                "r rename | i inner | s save | o load | z undo | c reset | l lines | "
-                "v inner | Tab next | 2468 nudge | q quit")
+        hint = ("drag | A align | a auto | g row | n add | d del | r rename | i inner | "
+                "s save | z undo | c reset | 2468 nudge (m=scope) | Tab | q quit")
         cv2.putText(canvas, hint[:135], (8, h - BAR_H - 28),
                     cv2.FONT_HERSHEY_PLAIN, 1.0, (0, 0, 0), 3)
         cv2.putText(canvas, hint[:135], (8, h - BAR_H - 28),
@@ -300,7 +301,7 @@ class CalibrationApp:
             ed.add_at(*self.cursor)
         elif key in ("d", "x"):
             ed.delete_selected()
-        elif key == "r":
+        elif key in ("r", "R"):
             self._pending_prompt = "rename"
         elif key == "i":
             self._pending_prompt = "inner"
@@ -321,15 +322,46 @@ class CalibrationApp:
             self.show_inner = not self.show_inner
         elif key == "\t":
             ed.select_next()
+        elif key == "m":
+            order = ["bay", "row", "all"]
+            self.nudge_scope = order[(order.index(self.nudge_scope) + 1) % len(order)]
+            ed._say(f"2/4/6/8 now move: {self.nudge_scope}")
         elif key == "4":
-            ed.nudge(-NUDGE, 0)
+            self._nudges(-NUDGE, 0)
         elif key == "6":
-            ed.nudge(NUDGE, 0)
+            self._nudges(NUDGE, 0)
         elif key == "8":
-            ed.nudge(0, -NUDGE)
+            self._nudges(0, -NUDGE)
         elif key == "2":
-            ed.nudge(0, NUDGE)
+            self._nudges(0, NUDGE)
         return True
+
+    def _nudges(self, dx: float, dy: float) -> None:
+        """Apply a nudge to whatever the current scope covers.
+
+        A camera that has been nudged usually moves a whole row by the same amount, so
+        correcting 48 bays one at a time is 48 corrections where four will do.
+        """
+        ed = self.ed
+        if self.nudge_scope == "all":
+            n = ed.nudge_many(ed.spots, dx, dy)
+            ed._say(f"moved all {n} bay(s) by {dx:+.0f},{dy:+.0f}")
+            return
+        if self.nudge_scope == "row":
+            rows = ed.rows_by_y()
+            sel = ed.selected
+            targets = None
+            if isinstance(sel, int):
+                for row in rows:
+                    if sel in row:
+                        targets = [ed.spots[i] for i in row]
+                        break
+            if targets is None and rows:
+                targets = [ed.spots[i] for i in rows[0]]
+            n = ed.nudge_many(targets or [], dx, dy)
+            ed._say(f"moved row of {n} bay(s) by {dx:+.0f},{dy:+.0f}")
+            return
+        ed.nudge(dx, dy)
 
     def prompt(self) -> None:
         """Terminal prompts run outside the render loop, with the window closed."""

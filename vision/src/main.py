@@ -138,6 +138,7 @@ def bay_pitch_of(spots: List[Spot]) -> Optional[float]:
 
 
 def run_edit_mode(get_frame, config_path: str, template_path: Optional[str],
+                  reference_path: Optional[str],
                   frame_shape, align_motion: str) -> Optional[int]:
     """Hand the window to the calibration editor until the user leaves it.
 
@@ -179,7 +180,10 @@ def run_edit_mode(get_frame, config_path: str, template_path: Optional[str],
     print("  g / G generate a row right / left from the selected bay")
     print("  a auto detect (an assistant - the human's confirmation is the truth)")
     print("  i inner scale    v inner    l line overlay    A align to the template")
+    print("  m cycles what 2/4/6/8 move: this bay -> its row -> all bays")
     print("  s save to the config file        q / ESC back to detection")
+    print("  r captures the empty reference, exactly as outside edit mode")
+    print("  NOTE: renaming a bay is 'R' here, because 'r' keeps its main.py meaning")
     print("  ------------------------------------------------------------------")
 
     cv2.namedWindow(WINDOW, cv2.WINDOW_AUTOSIZE)
@@ -206,6 +210,15 @@ def run_edit_mode(get_frame, config_path: str, template_path: Optional[str],
         cv2.imshow(WINDOW, app.render(frame))
         key = cv2.waitKey(20) & 0xFF
         if key == 255:
+            continue
+        if key == ord('r'):
+            # 'r' means "capture the empty reference" in main.py, but the editor binds it
+            # to rename, so pressing r here renamed a bay instead of taking a reference -
+            # which is how a bay ended up renamed from 162 to 196. The host app's meaning
+            # wins inside its own window; renaming is 'R'.
+            if reference_path:
+                capture_reference(frame, reference_path)
+                editor._say("empty reference captured from this frame")
             continue
         if not app.act(chr(key)):
             break
@@ -271,7 +284,7 @@ def main() -> int:
                  if os.path.exists(args.reference) else None)
         declared_size = _declared_image_size(args.config)
         if still is not None:
-            spots = load_spots(args.config, still.shape[:2])
+            spots = load_spots(args.config, still.shape[:2], skip_bad=True)
         else:
             # No reference yet, so the frame geometry is unknown. Do NOT invent one:
             # preparing a polygon against a guessed shape is what produced
@@ -505,16 +518,22 @@ def main() -> int:
                     # plainly visible here, which is the whole point.
                     get_frame = (lambda: still_frame) if use_still else cam.read
                     shape = run_edit_mode(get_frame, args.config, args.template,
-                                          frame.shape[:2], args.align)
+                                          args.reference, frame.shape[:2], args.align)
                     if shape is None:
                         continue
                     try:
-                        spots = load_spots(args.config, frame.shape[:2])
+                        spots = load_spots(args.config, frame.shape[:2], skip_bad=True)
                     except SpotConfigError as exc:
                         print(f"  error reloading {args.config}: {exc}", file=sys.stderr)
                         continue
-                    if have_reference:
-                        detector.set_reference(cv2.imread(args.reference), spots)
+                    # Not gated on the earlier flag: a reference can be captured from
+                    # inside edit mode with 'r'.
+                    ref_img = (cv2.imread(args.reference, cv2.IMREAD_COLOR)
+                               if os.path.exists(args.reference) else None)
+                    if ref_img is not None:
+                        detector_ref_frame = ref_img
+                        detector.set_reference(ref_img, spots)
+                        have_reference = True
                         if args.align != "off":
                             aligner = Aligner(detector_ref_frame, motion=args.align,
                                               min_correlation=args.align_min_corr,

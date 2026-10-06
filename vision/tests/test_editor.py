@@ -412,6 +412,104 @@ def test_save_key_writes_the_file():
         assert len(reloaded) == 12
 
 
+
+# ---------------------------------------------------------------------------
+# Bays that leave the frame
+#
+# A drag that leaves the window reports coordinates outside the image, and a bay parked
+# outside was saved, after which the viewer refused to start at all ("spot 167:
+# detection area is empty after clipping to 800x600"). Three guards now stop that, and
+# they are tested separately because each covers a different route into the same broken
+# file - plus the one that lets the viewer start anyway, which is what makes it possible
+# to get into edit mode and delete the offending bay.
+# ---------------------------------------------------------------------------
+
+def test_a_drag_that_leaves_the_window_is_clamped_into_the_frame() -> None:
+    ed = SpotEditor((H, W))
+    ed.add_at(200, 200)
+    ed.select(0)
+    ed.begin_drag(*np.asarray(ed.spots[0].polygon[0], dtype=float))
+    ed.update_drag(5000, -3000)          # what the backend reports when the pointer exits
+    ed.end_drag()
+    poly = np.asarray(ed.spots[0].polygon, dtype=float)
+    assert poly[:, 0].min() >= 0 and poly[:, 0].max() < W, poly
+    assert poly[:, 1].min() >= 0 and poly[:, 1].max() < H, poly
+
+
+def test_a_nudge_cannot_push_a_bay_out_of_the_frame() -> None:
+    ed = SpotEditor((H, W))
+    ed.add_at(60, 60)
+    ed.select(0)
+    for _ in range(40):                  # 40 x 5 px is well past the left edge
+        ed.nudge(-5, 0)
+    assert np.asarray(ed.spots[0].polygon, dtype=float)[:, 0].min() >= 0
+
+
+def test_saving_a_bay_outside_the_frame_is_refused() -> None:
+    ed = SpotEditor((H, W))
+    ed.add_at(200, 200)
+    ed.spots[0].polygon = np.asarray(ed.spots[0].polygon, dtype=float) + [4000, 0]
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, "spots.json")
+        assert ed.save(out) is False
+        # The half that matters: nothing written, so the previous good file survives.
+        assert not os.path.exists(out)
+        assert ed.dirty is True
+
+
+def test_rows_by_y_groups_a_hand_drawn_two_row_calibration() -> None:
+    ed = SpotEditor((H, W))
+    for i in range(4):
+        ed.add_at(100 + i * 80, 120)
+    for i in range(3):
+        ed.add_at(100 + i * 80, 320)     # 200 px lower: unambiguously another row
+    assert sorted(len(r) for r in ed.rows_by_y()) == [3, 4]
+
+
+def test_row_scope_moves_only_the_row_of_the_selected_bay() -> None:
+    ed = SpotEditor((H, W))
+    for i in range(4):
+        ed.add_at(100 + i * 80, 120)
+    for i in range(3):
+        ed.add_at(100 + i * 80, 320)
+    rows = ed.rows_by_y()
+    assert len(rows) == 2, rows
+
+    app = CalibrationApp(ed, "unused.json")
+    app.nudge_scope = "row"
+    ed.select(rows[0][0])
+    before_row = [np.asarray(ed.spots[i].polygon, dtype=float).copy() for i in rows[0]]
+    before_other = [np.asarray(ed.spots[i].polygon, dtype=float).copy() for i in rows[1]]
+
+    app._nudges(10, 0)
+
+    for i, b in zip(rows[0], before_row):
+        assert np.allclose(np.asarray(ed.spots[i].polygon, dtype=float) - b, [10, 0])
+    for i, b in zip(rows[1], before_other):
+        assert np.allclose(np.asarray(ed.spots[i].polygon, dtype=float), b)
+
+
+def test_out_of_frame_bays_are_skipped_so_the_viewer_still_starts() -> None:
+    one = {"id": "1", "polygon": [[10, 10], [50, 10], [50, 60], [10, 60]]}
+    stray = {"id": "167", "polygon": [[1306, 384], [1354, 384], [1354, 488], [1306, 488]]}
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "spots.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"spots": [one], "image_size": [H, W]}, fh)
+        assert len(load_spots(path, (H, W))) == 1
+
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"spots": [one, stray], "image_size": [H, W]}, fh)
+        try:
+            load_spots(path, (H, W))
+        except Exception:
+            pass
+        else:
+            raise AssertionError("a stray bay alone should still be an error by default")
+        # ...but with skip_bad the viewer starts, which is what lets 'e' fix the file.
+        assert len(load_spots(path, (H, W), skip_bad=True)) == 1
+
+
 def main() -> int:
     tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith("test_") and callable(f)]
