@@ -81,8 +81,13 @@ static const char *TAG = "camera";
 /*
  * 2 buffers + CAMERA_GRAB_LATEST keeps latency low while streaming; the
  * reference used 1 buffer because it only captured single photos.
+ *
+ * 3 rather than 2 since the stream can have more than one client: while one task is
+ * sending, the second buffer is being filled and a third has to be able to sit ready,
+ * otherwise a task waiting on the network starves the pipeline. 3 x ~96 KB of PSRAM is
+ * nothing against 8 MB.
  */
-#define CAM_FB_COUNT 2
+#define CAM_FB_COUNT 3
 
 /*
  * Orientation, copied from the proven configuration: the reference set

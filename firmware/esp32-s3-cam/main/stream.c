@@ -3,11 +3,17 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <errno.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
 #include <esp_app_desc.h>
 #include <esp_camera.h>
+#include <esp_heap_caps.h>
 #include <esp_http_server.h>
 #include <esp_log.h>
 #include <esp_ota_ops.h>
@@ -168,7 +174,50 @@ static void stream_task(void *arg)
 
     ESP_LOGI(TAG, "client connected (%d active)", s_clients);
 
+    /*
+     * Nagle off.
+     *
+     * esp_http_server does not touch TCP_NODELAY, so Nagle is on by default for this
+     * socket, and each frame is written as several pieces (chunk header, prefix, JPEG,
+     * terminator). Nagle holds a small piece back until earlier data is acknowledged,
+     * and the peer's delayed ACK adds its own wait on top. Measured on this board that
+     * cost about 281 ms per frame - an 11.7 KB frame taking 281 ms when the link's round
+     * trip was 66 ms - and once the frames were big enough to fill the send buffer the
+     * connection wedged outright: "httpd_sock_err: error in send : 11" (EAGAIN) after the
+     * 10 s send timeout, with the board writing 105 KB while the client received 35 KB.
+     *
+     * A stream is the one case where batching writes is never worth a round trip.
+     */
+    int sock = httpd_req_to_sockfd(req);
+    if (sock >= 0) {
+        int one = 1;
+        if (setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) != 0) {
+            ESP_LOGW(TAG, "could not disable Nagle on the stream socket: errno %d", errno);
+        } else {
+            ESP_LOGI(TAG, "stream socket: TCP_NODELAY on (Nagle disabled)");
+        }
+    } else {
+        ESP_LOGW(TAG, "could not resolve the stream socket, Nagle stays on");
+    }
+
+    /*
+     * Scratch buffer, so a camera frame is never held across network I/O.
+     *
+     * The driver only has fb_count frame buffers, and a streaming task used to hold one
+     * of them for the whole duration of a send - which can be seconds when the network
+     * is unhappy. Two clients then held both of them and the camera pipeline froze: the
+     * board logged 9 frames in 100 s and never recovered. Copying the JPEG to PSRAM and
+     * handing the camera buffer straight back decouples the two, and a slow client can
+     * now only hurt itself.
+     */
+    const size_t scratch_size = 96 * 1024;   /* SVGA JPEGs are ~12 KB, but be generous */
+    uint8_t *scratch = heap_caps_malloc(scratch_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (scratch == NULL) {
+        ESP_LOGW(TAG, "no scratch buffer; frames will be held across the send instead");
+    }
+
     uint32_t stat_frames = 0;
+    uint32_t stat_fails = 0;
     int64_t grab_us = 0, send_us = 0, grab_max_us = 0, send_max_us = 0;
     size_t jpeg_sum = 0, jpeg_min = 0, jpeg_max = 0;
     int64_t window_start_us = esp_timer_get_time();
@@ -196,16 +245,30 @@ static void stream_task(void *arg)
          * the next frame, so reading fb->len (or fb->buf) afterwards is a race.
          */
         size_t len = fb->len;
+        const uint8_t *body = fb->buf;
+
+        /* Better to pay a 12 KB memcpy than to keep a frame buffer from the camera. */
+        if (scratch != NULL && len <= scratch_size) {
+            memcpy(scratch, fb->buf, len);
+            body = scratch;
+            esp_camera_fb_return(fb);
+            fb = NULL;
+        }
 
         char prefix[128];
         int plen = snprintf(prefix, sizeof(prefix), STREAM_PREFIX_FMT, (unsigned)len);
 
         res = httpd_resp_send_chunk(req, prefix, plen);
         if (res == ESP_OK) {
-            res = httpd_resp_send_chunk(req, (const char *)fb->buf, len);
+            res = httpd_resp_send_chunk(req, (const char *)body, len);
         }
 
-        esp_camera_fb_return(fb);
+        if (fb != NULL) {
+            esp_camera_fb_return(fb);
+        }
+        if (res != ESP_OK) {
+            stat_fails++;
+        }
         int64_t t_send = esp_timer_get_time();
         grab_us += t_grab1 - t_grab0;
         send_us += t_send - t_grab1;
@@ -222,14 +285,15 @@ static void stream_task(void *arg)
             }
             ESP_LOGI(TAG, "%u frames in %.1f s (%.1f fps) | grab avg %.1f ms (max %.1f) | "
                           "send avg %.1f ms (max %.1f) | jpeg avg %.1f KB (min %.1f max %.1f) | "
-                          "%.0f KB/s",
+                          "%.0f KB/s | send failures %u",
                      (unsigned)stat_frames, window_s, (double)stat_frames / window_s,
                      (double)grab_us / 1000.0 / stat_frames, (double)grab_max_us / 1000.0,
                      (double)send_us / 1000.0 / stat_frames, (double)send_max_us / 1000.0,
                      (double)jpeg_sum / 1024.0 / stat_frames,
                      (double)jpeg_min / 1024.0, (double)jpeg_max / 1024.0,
-                     (double)jpeg_sum / 1024.0 / window_s);
+                     (double)jpeg_sum / 1024.0 / window_s, (unsigned)stat_fails);
             stat_frames = 0;
+            stat_fails = 0;
             grab_us = send_us = grab_max_us = send_max_us = 0;
             jpeg_sum = jpeg_min = jpeg_max = 0;
             window_start_us = now_us;
@@ -261,6 +325,10 @@ static void stream_task(void *arg)
     /* Finish the chunked response and release the async request / socket. */
     httpd_resp_send_chunk(req, NULL, 0);
     httpd_req_async_handler_complete(req);
+
+    if (scratch != NULL) {
+        free(scratch);
+    }
 
     s_clients--;
     s_last_frame_us = 0;
@@ -315,7 +383,8 @@ esp_err_t stream_server_start(void)
     /* Recycle the least recently used connection instead of refusing new ones. */
     config.lru_purge_enable = true;
     config.recv_wait_timeout = 10;
-    config.send_wait_timeout = 10;
+    /* A stalled client must not tie up a streaming task for long. */
+    config.send_wait_timeout = 3;
 
     esp_err_t err = httpd_start(&s_server, &config);
     if (err != ESP_OK) {
