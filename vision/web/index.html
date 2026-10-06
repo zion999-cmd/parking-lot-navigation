@@ -85,6 +85,20 @@ const REPLAN_AFTER_MS = 1500;    // past a couple of state writes, so a bay take
 // moved enough to change the answer, or when enough time has passed for an occupancy to have
 // changed - someone may park in the bay you are driving to, and that has to turn into a refusal
 // rather than stay a stale yellow line.
+// The route is a list of graph nodes, and the first of them is the node the car is at or nearest
+// to - which can be a bay's mouth, because a bay's access point is a node on the graph. So a line
+// drawn from that node alone can look as if it starts inside a bay. Drawing the car's own leg
+// first says what is true: the car drives there, and the planned route begins after that.
+function routePolyline(stateDoc, routeDoc, nodes) {
+  const ids = (routeDoc && routeDoc.ok && routeDoc.nodes) || [];
+  const points = ids.map(id => nodes[id]).filter(Boolean).map(n => [n.x, n.y]);
+  if (!points.length) return { points: [], carLeg: false };
+  const v = stateDoc && stateDoc.vehicle;
+  if (v && v.visible !== false && typeof v.x === "number" && typeof v.y === "number")
+    return { points: [[v.x, v.y], ...points], carLeg: true };
+  return { points: points, carLeg: false };
+}
+
 function shouldReplan(stateDoc, last, picked, now) {
   if (picked == null) return false;
   if (!last) return true;
@@ -145,19 +159,30 @@ function draw(mapDoc, stateDoc, routeDoc, picked, hover) {
   }
 
   // the planned route
-  if (routeDoc?.ok && routeDoc.nodes?.length) {
+  const leg = routePolyline(stateDoc, routeDoc, nodes);
+  if (leg.points.length > 1) {
+    if (leg.carLeg) {                       // the leg from the car to the graph node it uses
+      ctx.save();
+      ctx.setLineDash([5, 5]);
+      ctx.beginPath();
+      ctx.moveTo(leg.points[0][0], leg.points[0][1]);
+      ctx.lineTo(leg.points[1][0], leg.points[1][1]);
+      ctx.strokeStyle = "rgba(255,122,69,.85)"; ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.restore();
+    }
+    const road = leg.points.slice(leg.carLeg ? 1 : 0);
     ctx.beginPath();
-    routeDoc.nodes.forEach((id, i) => {
-      const n = nodes[id]; if (!n) return;
-      i ? ctx.lineTo(n.x, n.y) : ctx.moveTo(n.x, n.y);
-    });
+    road.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
     ctx.strokeStyle = "#ffd166"; ctx.lineWidth = 4; ctx.lineJoin = "round";
     ctx.stroke();
-    for (const id of routeDoc.nodes) {
-      const n = nodes[id]; if (!n) continue;
-      ctx.beginPath(); ctx.arc(n.x, n.y, 3, 0, Math.PI * 2);
+    for (const p of road) {
+      ctx.beginPath(); ctx.arc(p[0], p[1], 3, 0, Math.PI * 2);
       ctx.fillStyle = "#ffd166"; ctx.fill();
     }
+    // the node the route starts from, named, so nobody has to guess where the line begins
+    ctx.fillStyle = "#ffd166"; ctx.font = "11px system-ui";
+    ctx.fillText(leg.carLeg ? "起点（车先到这）" : "起点", road[0][0] + 8, road[0][1] - 8);
   }
 
   // the bay under the pointer, and the one that was clicked - the latter matters when the

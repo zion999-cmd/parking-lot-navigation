@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -167,15 +168,42 @@ def extract_function(html: str, name: str) -> str:
     raise AssertionError("unbalanced braces")
 
 
-def test_the_replan_gate_follows_the_car_without_hammering_the_api() -> None:
+def node_eval(names: list, call: str, payload: list, constants: bool = True) -> list:
+    """Run the shipped page's own functions in node, over the given cases.
+
+    Copies nothing: the function text is pulled out of web/index.html, so a page that changes
+    without its test changes fails here.
+    """
     if not shutil.which("node"):
-        print("        (node not installed - skipped, not passed)")
-        return
+        raise unittest.SkipTest("node not installed")
     html = open(PAGE, encoding="utf-8").read()
-    source = extract_function(html, "shouldReplan")
-    consts = "\n".join(re.findall(
-        r"^const (?:MAP_EVERY_POLLS|POLL_MS|REPLAN_MOVE_PX|REPLAN_AFTER_MS) = .*$", html, re.M))
-    assert consts.count("const") == 4, consts
+    parts = []
+    if constants:
+        consts = "\n".join(re.findall(
+            r"^const (?:MAP_EVERY_POLLS|POLL_MS|REPLAN_MOVE_PX|REPLAN_AFTER_MS) = .*$", html, re.M))
+        assert consts.count("const") == 4, consts
+        parts.append(consts)
+    parts += [extract_function(html, n) for n in names]
+    parts.append("const cs = JSON.parse(process.argv[2]);\n"
+                 f"console.log(JSON.stringify(cs.map(c => ({call}))));\n")
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:
+        fh.write("\n".join(parts))
+        path = fh.name
+    try:
+        out = subprocess.run(["node", path, json.dumps(payload)],
+                             capture_output=True, text=True, timeout=30)
+    finally:
+        os.unlink(path)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_the_replan_gate_follows_the_car_without_hammering_the_api() -> None:
+    try:
+        node_eval(["shouldReplan"], "0", [])            # a probe, so a missing node shows up here
+    except unittest.SkipTest as exc:
+        print(f"        ({exc} - skipped, not passed)")
+        return
     cases = [
         # picked, last(x, y, at), hero(x, y, visible), now, expected, why
         (None, None, (10, 300, True), 1000, False, "no target"),
@@ -194,21 +222,51 @@ def test_the_replan_gate_follows_the_car_without_hammering_the_api() -> None:
                  "last": None if c[1] is None else {"x": c[1][0], "y": c[1][1], "at": c[1][2]},
                  "state": {"vehicle": {"x": c[2][0], "y": c[2][1], "visible": c[2][2]}},
                  "now": c[3]} for c in cases]
-    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:
-        fh.write(consts + "\n" + source + "\nconst cs = JSON.parse(process.argv[2]);\n"
-                          "console.log(JSON.stringify(cs.map(c => "
-                          "shouldReplan(c.state, c.last, c.picked, c.now))));\n")
-        path = fh.name
-    try:
-        out = subprocess.run(["node", path, json.dumps(js_cases)],
-                             capture_output=True, text=True, timeout=30)
-    finally:
-        os.unlink(path)
-    assert out.returncode == 0, out.stderr
-    got = json.loads(out.stdout)
+    got = node_eval(["shouldReplan"], "shouldReplan(c.state, c.last, c.picked, c.now)", js_cases)
     wrong = [(c[5], g, c[4]) for c, g in zip(cases, got) if g is not c[4]]
     assert not wrong, "the shipped page disagrees: " + "; ".join(
         f"{why}: got {g}, wanted {w}" for why, g, w in wrong)
+
+
+def test_the_line_drawn_starts_from_the_car_not_only_from_a_road_node() -> None:
+    """The regression: the route's first node can be a bay's mouth, so a line drawn from it alone
+    looked as though it connected two bays. The page must draw the car's own leg first.
+
+    The numbers are the real ones: the hero at (743.4, 300.9) and a start node at (664, 400),
+    which is bay 50's access point while the hero is 2.4 px from a road and nowhere near bay 50.
+    """
+    nodes = {"r36": {"x": 664.0, "y": 400.0}, "r37": {"x": 664.1, "y": 436.2}}
+    cases = [
+        {"state": {"vehicle": {"x": 743.4, "y": 300.9, "visible": True}}, "car": True},
+        {"state": {"vehicle": {"x": 743.4, "y": 300.9, "visible": False}}, "car": False},
+        {"state": {"vehicle": {"visible": False}}, "car": False},
+        {"state": {}, "car": False},
+    ]
+    payload = [{"state": c["state"],
+                "route": {"ok": True, "nodes": ["r36", "r37"]},
+                "nodes": nodes} for c in cases]
+    got = node_eval(["routePolyline"],
+                    "routePolyline(c.state, c.route, c.nodes)", payload, constants=False)
+    for case, res in zip(cases, got):
+        assert res["points"], res
+        assert res["carLeg"] is case["car"], (case, res)
+        expected = ([[743.4, 300.9]] if case["car"] else []) + [[664.0, 400.0], [664.1, 436.2]]
+        assert res["points"] == expected, (case, res["points"])
+
+
+def test_a_refused_or_unknown_node_route_draws_nothing_broken() -> None:
+    cases = [
+        ({"ok": False, "code": "spot-not-free", "nodes": []}, {"r1": {"x": 0, "y": 0}}, []),
+        ({"ok": True, "nodes": ["r1", "gone", "r2"]}, {"r1": {"x": 1, "y": 1}, "r2": {"x": 2, "y": 2}},
+         [[1, 1], [2, 2]]),                       # a node missing from the map is skipped, not fatal
+        ({"ok": True, "nodes": ["gone"]}, {"r1": {"x": 1, "y": 1}}, []),
+        (None, {"r1": {"x": 1, "y": 1}}, []),
+    ]
+    got = node_eval(["routePolyline"],
+                    "routePolyline({}, c.route, c.nodes)",
+                    [{"route": r, "nodes": n} for r, n, _ in cases], constants=False)
+    for (route, _, want), res in zip(cases, got):
+        assert res["points"] == want and res["carLeg"] is False, (route, res)
 
 
 def main() -> int:
