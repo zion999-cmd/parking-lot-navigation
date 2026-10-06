@@ -11,7 +11,8 @@ Window keys
     d      toggle the red "changed pixels" overlay
     + / -  raise / lower the changed_ratio threshold by 0.01
     [ / ]  raise / lower the per-pixel threshold by 5
-    p      print the current numbers
+    p      print the current numbers (* marks bays over the threshold)
+    t      reference audit: why a bay is stuck OCCUPIED
     s      save an annotated snapshot to data/debug/
     e      edit mode: correct the calibration on the live view
            (same keys as src/calibration.py; s saves, q/ESC returns here)
@@ -112,18 +113,97 @@ def _declared_image_size(path: str):
     return (int(size[0]), int(size[1]))
 
 
-def status_line(spots: List[Spot], results: Dict[str, SpotResult]) -> str:
+def status_line(spots: List[Spot], results: Dict[str, SpotResult],
+                threshold: Optional[float] = None) -> str:
     parts = []
     for s in spots:
         r = results.get(s.id)
-        parts.append(f"{s.id}:{r.changed_ratio:.3f}({r.state[0]})" if r else f"{s.id}:?")
-    return " ".join(parts)
+        if r is None:
+            parts.append(f"{s.id}:?")
+        else:
+            # '*' marks the bays over the threshold, so the odd one out in a wall of
+            # 0.000s is impossible to miss.
+            parts.append(f"{s.id}:{r.changed_ratio:.3f}{'*' if r.state == OCCUPIED else ''}")
+    head = f"threshold {threshold:.2f}  (* = occupied)  " if threshold is not None else ""
+    return head + " ".join(parts)
+
+
+def reference_audit(ref: np.ndarray, live: np.ndarray, spots: List[Spot],
+                    detector: OccupancyDetector) -> None:
+    """Say *why* a bay reads as occupied, instead of leaving it a mystery.
+
+    A bay that stays OCCUPIED after the car has gone has two possible causes, and the
+    per-bay numbers look identical either way:
+
+      - the reference was captured with a car standing in that bay, so its absence is now
+        the difference, and the bay can never go back to EMPTY on its own
+      - the whole view moved (camera nudged, light changed) and every comparison is
+        against a stale image
+
+    They are told apart by comparing the reference with the current frame *outside* the
+    bays as well as inside them. Nothing changed outside the bays means the scene is
+    stable and only the flagged bays' contents differ. A lot changed outside means the
+    reference itself is stale. The first case is what happened here: 47 bays at exactly
+    0.000 and one at 0.258.
+    """
+    p = detector.params.normalized()
+    a = detector._prep(ref)
+    b = detector._prep(live)
+    if a.shape != b.shape:
+        print("  audit: the reference and the current frame differ in size - press r")
+        return
+
+    mask = cv2.threshold(cv2.absdiff(a, b), p.pixel_threshold, 255,
+                         cv2.THRESH_BINARY)[1]
+    if p.open_ksize > 1:
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (p.open_ksize,) * 2)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k)
+    if p.close_ksize > 1:
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (p.close_ksize,) * 2)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
+
+    # Blank out every bay (plus its border, which is a high-contrast edge) so what is
+    # left is purely "did the scene change".
+    outside = mask.copy()
+    for s in spots:
+        x0, y0, x1, y1 = s.roi
+        cv2.rectangle(outside, (max(x0 - 2, 0), max(y0 - 2, 0)),
+                      (min(x1 + 2, outside.shape[1] - 1),
+                       min(y1 + 2, outside.shape[0] - 1)), 0, -1)
+    outside_pct = 100.0 * cv2.countNonZero(outside) / max(outside.size, 1)
+
+    results = detector.evaluate(live, spots)
+    ranked = sorted(results.values(), key=lambda r: -r.changed_ratio)
+    over = [r for r in ranked if r.changed_ratio >= p.changed_ratio_threshold]
+
+    print("  ---------- reference audit -----------------------------------------")
+    print(f"  pixels changed outside every bay : {outside_pct:.2f}%")
+    print(f"  threshold {p.changed_ratio_threshold:.2f}; over it: {len(over)} bay(s)")
+    for r in ranked[:6]:
+        print(f"    {r.spot_id:>5}  {r.changed_ratio:.3f}  {r.state}")
+    if outside_pct < 1.0:
+        print("  verdict: the scene itself is unchanged - the view and the light are fine.")
+        if over:
+            who = ", ".join(r.spot_id for r in over[:8])
+            print(f"  So the contents of {who} really do differ from the reference:")
+            print("  either a car is standing there now, or the reference was captured while")
+            print("  one was - and then the bay can never return to EMPTY by itself.")
+            print("  Fix: clear every bay and press r.")
+        else:
+            print("  No bay is over the threshold, so nothing needs doing.")
+    else:
+        print(f"  verdict: {outside_pct:.1f}% of the scene outside the bays changed too, so the")
+        print("  whole view moved or the light changed: the reference itself is stale.")
+        print("  Fix: realign the bays with 'e' if needed, then press r with every bay empty.")
+    print("  --------------------------------------------------------------------")
 
 
 def capture_reference(frame: np.ndarray, path: str) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     cv2.imwrite(path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
     print(f"  reference captured -> {path}")
+    print("  every bay must be EMPTY in this frame: whatever is parked here now becomes")
+    print("  a permanent 'occupied', because its absence is what the detector would see.")
     print(f"  frame diagnostics: {OccupancyDetector.describe(frame)}")
 
 
@@ -371,6 +451,7 @@ def main() -> int:
     frames = 0
     sums = {s.id: [0.0, 0, 0] for s in spots}      # sum, occupied frames, total
     snapshot_done = False
+    audit_done = False
     size_warned = False
     frame = still_frame
     last_frame_at = started
@@ -505,6 +586,12 @@ def main() -> int:
                             (0, 0, 0), 3)
                 cv2.putText(canvas, header, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                             (255, 255, 255), 1)
+                if not audit_done and have_reference and detector_ref_frame is not None:
+                    # Once, on the first real frame. Turns "why is that bay stuck?" from a
+                    # mystery into an answer, for the cost of one diff.
+                    audit_done = True
+                    reference_audit(detector_ref_frame, frame, spots, detector)
+
                 cv2.imshow(WINDOW, canvas)
                 key = cv2.waitKey(1) & 0xFF
                 if key in (ord('q'), 27):
@@ -562,7 +649,12 @@ def main() -> int:
                         detector.set_reference(cv2.imread(args.reference), spots)
                 elif key == ord('p'):
                     if have_reference:
-                        print(f"  {status_line(spots, results)}")
+                        print(f"  {status_line(spots, results, detector.params.changed_ratio_threshold)}")
+                elif key == ord('t'):
+                    if have_reference and detector_ref_frame is not None:
+                        reference_audit(detector_ref_frame, frame, spots, detector)
+                    else:
+                        print("  no reference to audit yet - press r with every bay empty")
                 elif key == ord('s'):
                     name = os.path.join(ROOT, "data", "debug",
                                         f"snapshot_{int(time.time())}.png")

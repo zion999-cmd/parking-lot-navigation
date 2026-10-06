@@ -119,7 +119,7 @@ class OccupancyDetector:
             # Camera resolution changed (e.g. someone edited the firmware config).
             raise RuntimeError(
                 f"frame geometry changed: reference ROI is {ref.shape}, current is {cur.shape}. "
-                f"Re-capture the reference with 'R'.")
+                f"Re-capture the reference with 'r'.")
 
         diff = cv2.absdiff(ref, cur)
         _, mask = cv2.threshold(diff, self.params.pixel_threshold, 255, cv2.THRESH_BINARY)
