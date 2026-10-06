@@ -189,10 +189,22 @@ static bool http_get_to_buffer(const char *url, char *buf, size_t buf_len, size_
 
     bool ok = false;
     if (esp_http_client_open(client, 0) == ESP_OK) {
+        /*
+         * fetch_headers() first, then read the status.
+         *
+         * esp_http_client_get_status_code() returns 0 until the response headers have
+         * actually been read, so asking before this reports "HTTP 0" for a request the
+         * server answered with 200 - and then this function bailed out without draining
+         * the body, which showed up on the server as "Connection reset by peer". That
+         * is what the OTA check had been doing all along: the server log had the device
+         * receiving 200 while the board reported a fetch failure.
+         */
+        int content_len = esp_http_client_fetch_headers(client);
         int status = esp_http_client_get_status_code(client);
         if (status != 200) {
             ESP_LOGE(TAG, "GET %s -> HTTP %d", url, status);
         } else {
+            ESP_LOGI(TAG, "GET %s -> HTTP 200, content length %d", url, content_len);
             int total = 0;
             while (total < (int)buf_len - 1) {
                 int n = esp_http_client_read(client, buf + total, buf_len - 1 - total);
@@ -200,10 +212,16 @@ static bool http_get_to_buffer(const char *url, char *buf, size_t buf_len, size_
                     break;
                 }
                 total += n;
+                if (content_len > 0 && total >= content_len) {
+                    break;
+                }
             }
             buf[total] = '\0';
             *out_len = (size_t)total;
             ok = total > 0;
+            if (!ok) {
+                ESP_LOGE(TAG, "GET %s -> 200 but no body (%d bytes)", url, content_len);
+            }
         }
     } else {
         ESP_LOGE(TAG, "could not open %s", url);
@@ -331,6 +349,8 @@ static bool download_and_flash(const char *url, const ota_manifest_t *m)
         set_result("download: connection failed");
         goto cleanup;
     }
+    /* Headers before status: get_status_code() is 0 until the headers are read. */
+    esp_http_client_fetch_headers(client);
     if (esp_http_client_get_status_code(client) != 200) {
         set_result("download: HTTP %d", esp_http_client_get_status_code(client));
         goto cleanup;
