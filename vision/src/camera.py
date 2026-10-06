@@ -15,17 +15,22 @@ need to care which one is in use.
 Measured on 2026-10-05 against http://192.168.3.118/stream:
 ``cv2.VideoCapture`` reports ``isOpened() == False`` ("Couldn't read video stream
 from file"), while :class:`MjpegHttpReader` delivers ~13-14 fps at 800x600.
+
+The reader drains the socket on its own thread, because a caller's cadence must not be able to
+starve the connection - see :meth:`MjpegHttpReader._pump` for the numbers that made that matter.
 """
 
 from __future__ import annotations
 
 import re
 import socket
+import threading
 import time
+from collections import deque
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from typing import Deque, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -38,12 +43,26 @@ DEFAULT_BOUNDARY = b"parkinglotcamboundary"
 # ~25 KB, so 4 MB is several frames of slack before we resynchronise.
 MAX_BUFFER = 4 * 1024 * 1024
 
+# How much to take off the socket in one go. The stream is about 282 KB/s in 25 KB frames, so a
+# 64 KB read is two or three frames and one syscall each, instead of 8192 bytes and four syscalls
+# per frame - which is what used to leave this reader 40% behind the stream.
+READ_SIZE = 64 * 1024
+
+# A single chunk cannot contain more than a few frames; a bound keeps a corrupted buffer from
+# spinning the reader thread forever.
+MAX_FRAMES_PER_READ = 8
+
+# How many decoded frames may wait for the caller. Two: enough that a burst is not thrown away,
+# short enough that the caller is never more than a frame or two behind the camera.
+MAX_PENDING = 2
+
 
 @dataclass
 class StreamStats:
     """Lightweight counters so the caller can report real fps and stalls."""
 
-    frames: int = 0
+    frames: int = 0              # decoded, whether or not the caller was quick enough to take it
+    skipped: int = 0             # decoded but replaced by a newer one before the caller asked
     reconnects: int = 0
     decode_failures: int = 0
     started_at: float = field(default_factory=time.time)
@@ -54,7 +73,7 @@ class StreamStats:
         return self.frames / dt
 
     def summary(self) -> str:
-        return (f"frames={self.frames} fps={self.fps():.1f} "
+        return (f"frames={self.frames} fps={self.fps():.1f} skipped={self.skipped} "
                 f"reconnects={self.reconnects} decode_failures={self.decode_failures}")
 
 
@@ -106,7 +125,8 @@ class MjpegHttpReader:
     _HEADER_RE = re.compile(rb"Content-Type:\s*image/jpeg", re.IGNORECASE)
     _LENGTH_RE = re.compile(rb"Content-Length:\s*(\d+)", re.IGNORECASE)
 
-    def __init__(self, url: str, timeout: float = 6.0, reconnect_delay: float = 1.0):
+    def __init__(self, url: str, timeout: float = 6.0, reconnect_delay: float = 1.0,
+                 threaded: bool = True):
         self.url = url
         self.timeout = timeout
         self.reconnect_delay = reconnect_delay
@@ -116,12 +136,20 @@ class MjpegHttpReader:
         self._boundary = DEFAULT_BOUNDARY
         self._width = 0
         self._height = 0
-        self._connect()
+        self._lock = threading.Lock()
+        self._pending: Deque[np.ndarray] = deque()
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._connect()                     # fail here, not in the background, if the URL is bad
+        if threaded:
+            self._thread = threading.Thread(target=self._pump, name="mjpeg-reader", daemon=True)
+            self._thread.start()
 
     # -- connection handling -------------------------------------------------
 
     def _connect(self) -> None:
         self._close()
+        self._buf.clear()
         req = urllib.request.Request(self.url, headers={"User-Agent": "parking-vision/0.1"})
         try:
             self._resp = urllib.request.urlopen(req, timeout=self.timeout)
@@ -132,7 +160,6 @@ class MjpegHttpReader:
         m = re.search(r"boundary=([^;]+)", ctype)
         if m:
             self._boundary = m.group(1).strip().strip('"').encode()
-        self._buf.clear()
 
     def _close(self) -> None:
         if self._resp is not None:
@@ -182,54 +209,130 @@ class MjpegHttpReader:
         del self._buf[:nxt]
         return jpeg
 
-    def read(self) -> Optional[np.ndarray]:
-        """Return the next decoded frame, or None on a transient problem."""
-        if self._resp is None:
-            self._reconnect()
-            if self._resp is None:
-                return None
+    def _pump(self) -> None:
+        """Drain the socket as fast as it will go, keeping only the newest frame.
 
-        try:
-            chunk = self._resp.read(8192)
-        except (socket.timeout, urllib.error.URLError, OSError):
-            self._reconnect()
-            return None
+        Not an optimization for its own sake. The device stops giving a client its full share when
+        that client does not drain the socket, and this reader used to read 8192 bytes per call,
+        once per frame of the caller's loop - 8 KB x 22 a second = 178 KB/s against a stream
+        offering 282 KB/s, so it fell about 40% behind and the device slowed it down to match.
+        Measured, same reader, same camera: pulling as fast as possible, 10.6 fps; pulling once
+        every 45 ms, which is main.py's loop cadence, 6.2 fps. main.py was not slow because it
+        computed slowly - its whole pipeline is 22 ms a frame - but because it did not read often
+        enough, and its cadence should not be able to starve the connection.
 
-        if not chunk:
-            self._reconnect()
-            return None
+        Frames wait in a queue two deep, oldest handed over first and the oldest dropped when it
+        overflows. One slot would be simpler, and is what this had first, but it throws away a
+        whole burst: measured against the real camera, the reader decoded 9.9 fps while a caller
+        polling every 45 ms - main.py's cadence - took only 4.6, with 66 of 121 frames replaced
+        before anyone asked for them. Two frames keeps the freshest of a burst and the one before
+        it, at the cost of at most one frame of extra delay. `stats.skipped` counts what is lost.
+        """
+        while not self._stop.is_set():
+            if self._resp is None and not self._reconnect():
+                continue
+            try:
+                chunk = self._resp.read(READ_SIZE)
+            except (socket.timeout, urllib.error.URLError, OSError):
+                chunk = b""
+            if self._stop.is_set():
+                break
+            if not chunk:
+                self._reconnect()
+                continue
 
-        self._buf.extend(chunk)
-        if len(self._buf) > MAX_BUFFER:
-            del self._buf[:-MAX_BUFFER // 2]
+            self._buf.extend(chunk)
+            if len(self._buf) > MAX_BUFFER:
+                del self._buf[:-MAX_BUFFER // 2]
 
-        jpeg = self._extract()
-        if jpeg is None:
-            return None
+            # A chunk can hold several frames; take them all, but bound the loop so a buffer full
+            # of rubbish cannot spin here forever.
+            for _ in range(MAX_FRAMES_PER_READ):
+                jpeg = self._extract()
+                if jpeg is None:
+                    break
+                frame = self._decode(jpeg)
+                if frame is None:
+                    continue
+                with self._lock:
+                    if len(self._pending) >= MAX_PENDING:
+                        self._pending.popleft()
+                        self.stats.skipped += 1
+                    self._pending.append(frame)
 
+    def _decode(self, jpeg: bytes) -> Optional[np.ndarray]:
         if len(jpeg) < 4 or jpeg[:2] != b"\xff\xd8":
             self.stats.decode_failures += 1
             return None
-
         frame = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
         if frame is None:
             self.stats.decode_failures += 1
             return None
-
         self._height, self._width = frame.shape[:2]
         self.stats.frames += 1
         self.stats.last_frame_at = time.time()
         return frame
 
-    def _reconnect(self) -> None:
+    def read(self) -> Optional[np.ndarray]:
+        """The newest frame decoded since the last call, or None if there is not a newer one.
+
+        Returning None rather than repeating the last frame is deliberate: the caller's loop keeps
+        the frame it has and works on it, so handing out the same picture twice would only double
+        the detection cost for nothing.
+        """
+        if self._thread is None:                    # threaded=False: read inline, one chunk per call
+            self._pump_once()
+        with self._lock:
+            frame = self._pending.popleft() if self._pending else None
+        return frame
+
+    def _pump_once(self) -> None:
+        """One synchronous read, for threaded=False and for the tests."""
+        if self._resp is None and not self._reconnect():
+            return
+        try:
+            chunk = self._resp.read(READ_SIZE)
+        except (socket.timeout, urllib.error.URLError, OSError):
+            chunk = b""
+        if not chunk:
+            self._reconnect()
+            return
+        self._buf.extend(chunk)
+        if len(self._buf) > MAX_BUFFER:
+            del self._buf[:-MAX_BUFFER // 2]
+        for _ in range(MAX_FRAMES_PER_READ):
+            jpeg = self._extract()
+            if jpeg is None:
+                break
+            frame = self._decode(jpeg)
+            if frame is not None:
+                with self._lock:
+                    if len(self._pending) >= MAX_PENDING:
+                        self._pending.popleft()
+                        self.stats.skipped += 1
+                    self._pending.append(frame)
+
+    def _reconnect(self) -> bool:
+        """Try to get the stream back. False means not now (so the pump can stop promptly)."""
         self.stats.reconnects += 1
+        self._close()
+        if self._stop.is_set():
+            return False
         time.sleep(self.reconnect_delay)
+        if self._stop.is_set():
+            return False
         try:
             self._connect()
+            return True
         except CameraError:
             self._resp = None
+            return False
 
     def close(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(1.0, self.reconnect_delay + 1.0))
+            self._thread = None
         self._close()
 
     @property

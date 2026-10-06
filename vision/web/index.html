@@ -80,7 +80,7 @@ let polls = 0;
 // poll; the state is 3.8 KB and the route 0.5 KB. Reloading the map every 20 s keeps edit-and-
 // look working without spending the poll on it.
 const MAP_EVERY_POLLS = 40;      // 40 x 500 ms
-const POLL_MS = 500;             // main.py writes the state every 0.5 s; that is the cadence to match
+const POLL_MS = 250;             // the state is rewritten when it changes, at least every 0.25 s
 const REPLAN_MOVE_PX = 4;        // road nodes are tens of px apart, so this is smaller than a node
 const REPLAN_AFTER_MS = 1500;    // past a couple of state writes, so a bay taken meanwhile shows up
 
@@ -397,7 +397,7 @@ async function poll() {
 }
 
 reloadAll();
-setInterval(poll, POLL_MS);      // the state is 3.8 KB; the route is a 0.5 KB answer
+setInterval(poll, POLL_MS);      // 3.8 KB four times a second, against a 10-17 fps camera
 </script>
 </body>
 </html>

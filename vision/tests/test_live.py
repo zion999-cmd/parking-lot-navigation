@@ -148,7 +148,8 @@ def test_the_page_polls_the_state_but_not_the_map() -> None:
     loop = html[html.index("async function poll()"):html.index("reloadAll();")]
     assert "DOCS.state" in loop, loop
     assert "DOCS.map" not in loop, "the map is back in the fast loop"
-    assert "POLL_MS = 500" in html, "the poll cadence moved"
+    poll = int(re.search(r"const POLL_MS = (\d+);", html).group(1))
+    assert poll <= 250, f"the poll is {poll} ms; the state is rewritten every 250 ms at least"
 
 
 # ---------------------------------------------------------------------------

@@ -34,7 +34,7 @@ import os
 import shutil
 import sys
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -337,12 +337,41 @@ def vehicle_state(pose: Optional[vehicle.VehiclePose],
 STALE_AFTER_S = 2.0
 
 
-def write_state(args, results, spots, have_reference: bool, stall: float,
-                last_written: float, vehicle_doc: Optional[dict] = None
-                ) -> Optional[float]:
-    """Write the live half of the P0002 contract. Returns when it wrote, or None.
+def state_key(document: dict) -> str:
+    """What makes the state worth rewriting: everything except when it was written.
 
-    Throttled: it is a file write, and the state only changes as fast as a car moves.
+    Compared so that a change can reach the page as soon as it happens instead of waiting for the
+    next heartbeat - which is half the end-to-end lag the page used to have. The grain matters
+    more than the comparison: a parked car's position wanders by tenths of a pixel and its axis by
+    a fraction of a degree, and a bay's ratio jitters by more than it moves, so measuring to the
+    pixel, the degree and the hundredth keeps a still scene still. All three are finer than
+    anything a route can act on, and the heading is rounded the way the overlay prints it.
+    """
+    def canon(value, path: str = ""):
+        if isinstance(value, dict):
+            return {k: canon(v, f"{path}.{k}") for k, v in sorted(value.items())
+                    if k != "timestamp"}
+        if isinstance(value, list):
+            return [canon(v, path) for v in value]
+        if isinstance(value, float):
+            if path.endswith((".x", ".y")):
+                return round(value)                     # to the pixel
+            if path.endswith(("heading", "front_heading")):
+                return round(value)                     # to the degree
+            return round(value, 2)
+        return value
+    return json.dumps(canon(document), sort_keys=True)
+
+
+def write_state(args, results, spots, have_reference: bool, stall: float,
+                last_written: float, vehicle_doc: Optional[dict] = None,
+                last_key: Optional[str] = None
+                ) -> Optional[Tuple[float, str]]:
+    """Write the live half of the P0002 contract. Returns (when, key) if it wrote, else None.
+
+    Written when the state has changed, and otherwise on the heartbeat. A change may go out after
+    half the heartbeat interval rather than a whole one, so a car turning into a bay shows up in
+    about a quarter of a second rather than up to a second later.
 
     Two situations produce UNKNOWN for every bay rather than EMPTY, and both matter: no
     reference frame means nothing can be compared at all, and no recent frames means the
@@ -353,8 +382,6 @@ def write_state(args, results, spots, have_reference: bool, stall: float,
     if not path:
         return None
     now = time.time()
-    if now - last_written < max(args.state_every, 0.0):
-        return None
 
     reason = None
     if stall > STALE_AFTER_S:
@@ -369,11 +396,19 @@ def write_state(args, results, spots, have_reference: bool, stall: float,
                                           vehicle=vehicle_doc)
     else:
         document = contract.build_state(results, vehicle=vehicle_doc)
+
+    every = max(args.state_every, 0.0)
+    key = state_key(document)
+    # A change is worth a write after half the interval; an unchanged state waits for the whole
+    # one, which is what keeps a file being written for a scene that is not moving at all.
+    if now - last_written < (every / 2.0 if key != last_key else every):
+        return None
+
     try:
         contract.write_json(path, document)
     except OSError as exc:
         print(f"  could not write {path}: {exc}", file=sys.stderr)
-    return now
+    return now, key
 
 
 def bay_pitch_of(spots: List[Spot]) -> Optional[float]:
@@ -606,7 +641,7 @@ def main() -> int:
             # document always exists and always says one of EMPTY/OCCUPIED/UNKNOWN, so a
             # consumer never has to cope with a missing file - and "no reference" is
             # exactly the case that must not be reported as EMPTY.
-            write_state(args, {}, spots, False, 0.0, 0.0)
+            write_state(args, {}, spots, False, 0.0, 0.0, None, None)
             return 2
         print(f"WARNING: {msg}")
 
@@ -653,7 +688,7 @@ def main() -> int:
     frame = still_frame
     last_frame_at = started
     stall_warned = False
-    state_written = [0.0]
+    state_written = [0.0, None]      # when it was written, and what was written
     look_for_car = not args.no_vehicle
     show_car = True
     # Smooths the readings: the car does not turn instantly, and a single frame's shape is
@@ -737,9 +772,10 @@ def main() -> int:
 
             wrote = write_state(args, results, spots, have_reference, stall,
                                 state_written[0],
-                                vehicle_state(pose, location) if pose else None)
+                                vehicle_state(pose, location) if pose else None,
+                                state_written[1])
             if wrote is not None:
-                state_written[0] = wrote
+                state_written[0], state_written[1] = wrote
 
             for sid, r in results.items():
                 sums[sid][0] += r.changed_ratio
