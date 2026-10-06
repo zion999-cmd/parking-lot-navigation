@@ -18,6 +18,7 @@ Window
 
 Keys
 ----
+    A  align all bays to the current frame (camera drift; adds/deletes nothing)
     a  Auto Detect (only ADDS candidates; existing work is never touched)
     g  generate the next bay in the row from the selected one (right)
     G  ... same, to the left
@@ -50,6 +51,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from camera import CameraError, open_camera                    # noqa: E402
+from alignment import Aligner, transform_points                 # noqa: E402
 from detector import (DetectorParams, detect_bays, draw_debug,  # noqa: E402
                       render_profile_ascii, sort_reading_order)
 from spot_config import DEFAULT_INNER_SCALE                    # noqa: E402
@@ -74,9 +76,14 @@ NUDGE = 5
 class CalibrationApp:
     """Window + input handling on top of SpotEditor (which holds the state)."""
 
-    def __init__(self, editor: SpotEditor, out_path: str):
+    def __init__(self, editor: SpotEditor, out_path: str,
+                 template: Optional[np.ndarray] = None,
+                 align_motion: str = "translation"):
         self.ed = editor
         self.out_path = out_path
+        self.template = template          # the frame the bays were drawn on
+        self.align_motion = align_motion
+        self.last_align = None
         self.show_inner = True
         self.show_overlay = False
         self.cursor: Tuple[int, int] = (0, 0)
@@ -133,7 +140,7 @@ class CalibrationApp:
             cv2.putText(canvas, msg.text[:118], (8, h - BAR_H - 50),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.52, colour, 1)
 
-        hint = ("click 4 corners / drag handles | a auto | g gen row | n add | d del | "
+        hint = ("drag handles | A align | a auto | g gen row | n add | d del | "
                 "r rename | i inner | s save | o load | z undo | c reset | l lines | "
                 "v inner | Tab next | 2468 nudge | q quit")
         cv2.putText(canvas, hint[:135], (8, h - BAR_H - 28),
@@ -174,6 +181,65 @@ class CalibrationApp:
         elif event == cv2.EVENT_RBUTTONDOWN:
             if self.snap_corner(x, y):
                 pass
+
+    def bay_pitch(self) -> Optional[float]:
+        """Median bay width - the scale for the "is this shift a whole bay" check."""
+        widths = []
+        for sp in self.ed.spots:
+            pts = np.asarray(sp.polygon, dtype=np.float64)
+            widths.append(min(np.linalg.norm(pts[1] - pts[0]),
+                              np.linalg.norm(pts[3] - pts[0])))
+        return float(np.median(widths)) if widths else None
+
+    def align_to_template(self, save: bool = False) -> bool:
+        """Move every polygon onto the current frame, cancelling camera drift.
+
+        This is the "align, do not add or delete bays" action: the polygons keep
+        their ids and their inner scale, only their coordinates move by the
+        estimated drift. On success the template becomes the current frame, because
+        the polygons now describe *this* image.
+        """
+        if self.template is None:
+            self.ed._say("no template frame to align against "
+                         "(pass --frame, or capture a reference first)", "warn")
+            return False
+        frame = getattr(self, "_frame", None)
+        if frame is None:
+            self.ed._say("no live frame yet", "warn")
+            return False
+        if frame.shape[:2] != self.template.shape[:2]:
+            self.ed._say(f"frame size {frame.shape[:2]} does not match the template "
+                         f"{self.template.shape[:2]}", "warn")
+            return False
+
+        aligner = Aligner(self.template, motion=self.align_motion,
+                          bay_pitch=self.bay_pitch())
+        res = aligner.estimate(frame)
+        self.last_align = res
+        print(f"  alignment vs template: {res.describe()}")
+        if not res.ok:
+            self.ed._say(f"alignment refused: {res.reason}", "warn")
+            print("  nothing moved")
+            return False
+
+        inv = aligner.matrix_to_current(res.matrix)
+        self.ed._push_undo()
+        for spot in self.ed.spots:
+            spot.polygon = transform_points(spot.polygon, inv)
+            spot.detect_polygon = None
+            self.ed._prepare(spot)
+        self.ed.dirty = True
+        self.template = frame.copy()
+
+        text = (f"aligned {len(self.ed.spots)} bay(s) by "
+                f"({res.dx:+.1f}, {res.dy:+.1f}) px, corr {res.correlation:.2f}")
+        for warning in res.warnings:
+            text += f" | {warning}"
+        self.ed._say(text + (" - saved" if save else " - press s to save"),
+                     "warn" if res.warnings else "info")
+        if save:
+            self.ed.save(self.out_path)
+        return True
 
     def snap_corner(self, x: float, y: float, search: int = 9) -> bool:
         """Pull the nearest corner of the selected bay onto the strongest edge."""
@@ -234,6 +300,8 @@ class CalibrationApp:
             ed.save(self.out_path)
         elif key == "o":
             ed.load(self.out_path)
+        elif key == "A":
+            self.align_to_template()
         elif key == "z":
             ed.undo()
         elif key == "c":
@@ -429,6 +497,14 @@ def main() -> int:
     ap.add_argument("--start-id", type=int, default=38)
     ap.add_argument("--inner-scale", type=float, default=DEFAULT_INNER_SCALE)
     ap.add_argument("--auto", action="store_true", help="run Auto Detect once at startup")
+    ap.add_argument("--template", metavar="IMAGE",
+                    help="frame the bays were drawn on, for --auto-align "
+                         "(default: --frame, else data/reference/reference.jpg)")
+    ap.add_argument("--auto-align", action="store_true",
+                    help="move every bay onto the current frame and save, then exit. "
+                         "Cancel camera drift without adding or deleting bays.")
+    ap.add_argument("--align-motion", default="translation",
+                    choices=("translation", "euclidean", "affine"))
     ap.add_argument("--grid", nargs="?", const="", metavar="IMAGE",
                     help="write a labelled calibration ruler image and exit")
     ap.add_argument("--write-spots", metavar="JSON",
@@ -514,7 +590,30 @@ def main() -> int:
     else:
         editor._say("no calibration yet: press 'a' to auto detect, or add bays by hand (n)")
 
-    app = CalibrationApp(editor, out_path)
+    template = None
+    template_path = args.template or args.frame or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "data", "reference",
+        "reference.jpg")
+    if os.path.exists(template_path):
+        template = cv2.imread(template_path, cv2.IMREAD_COLOR)
+        if template is not None:
+            print(f"template for alignment: {template_path} "
+                  f"({template.shape[1]}x{template.shape[0]})")
+
+    app = CalibrationApp(editor, out_path, template=template,
+                         align_motion=args.align_motion)
+
+    if args.auto_align:
+        live = still if still is not None else grab(get_frame)
+        if live is None:
+            print("error: no frame to align", file=sys.stderr)
+            return 2
+        app._frame = live
+        ok = app.align_to_template(save=True)
+        if cam is not None:
+            cam.close()
+        return 0 if ok else 1
+
     if args.auto:
         frame = still if still is not None else grab(get_frame)
         if frame is not None:

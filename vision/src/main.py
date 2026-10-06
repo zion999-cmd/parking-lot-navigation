@@ -35,6 +35,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from alignment import Aligner                                    # noqa: E402
 from camera import CameraError, open_camera                      # noqa: E402
 from occupancy import (EMPTY, OCCUPIED, OccupancyDetector,        # noqa: E402
                        OccupancyParams, SpotResult)
@@ -125,6 +126,16 @@ def main() -> int:
     ap.add_argument("--csv", help="write per-frame records to this CSV")
     ap.add_argument("--print-every", type=float, default=0.0,
                     help="seconds between status lines (default 1 headless / 5 window)")
+    ap.add_argument("--align", default="translation",
+                    choices=("off", "translation", "euclidean", "affine"),
+                    help="compensate camera drift by aligning each frame to the "
+                         "reference frame (default translation)")
+    ap.add_argument("--align-every", type=int, default=3,
+                    help="re-estimate the alignment every N frames (default 3)")
+    ap.add_argument("--align-min-corr", type=float, default=0.8,
+                    help="accept an alignment only at or above this structure "
+                         "correlation (default 0.8; measured 0.95-0.97 for a real "
+                         "nudge, 0.54-0.64 for a failed one)")
     ap.add_argument("--save-debug", metavar="PNG",
                     help="save one annotated frame with this path and exit")
     args = ap.parse_args()
@@ -151,13 +162,33 @@ def main() -> int:
 
     # -- reference -----------------------------------------------------------
     have_reference = False
+    detector_ref_frame = None
     if not args.no_reference and os.path.exists(args.reference):
         ref = cv2.imread(args.reference, cv2.IMREAD_COLOR)
         if ref is not None:
+            detector_ref_frame = ref
             detector.set_reference(ref, spots)
             have_reference = True
             print(f"reference: {args.reference} ({ref.shape[1]}x{ref.shape[0]})")
             print(f"  frame diagnostics: {OccupancyDetector.describe(ref)}")
+    aligner = None
+    align_result = None
+    align_stats = {"ok": 0, "failed": 0}
+    if have_reference and args.align != "off":
+        # A bay's width is the natural scale for the "is this shift suspiciously
+        # close to one bay" check, so it comes from the calibration itself.
+        widths = []
+        for sp in spots:
+            pts = np.asarray(sp.polygon, dtype=np.float64)
+            widths.append(min(np.linalg.norm(pts[1] - pts[0]),
+                              np.linalg.norm(pts[3] - pts[0])))
+        pitch = float(np.median(widths)) if widths else None
+        aligner = Aligner(detector_ref_frame, motion=args.align,
+                          min_correlation=args.align_min_corr, bay_pitch=pitch)
+        print(f"alignment: on, model {args.align}, working at "
+              f"{aligner._work_size[0]}px, bay pitch ~{pitch:.0f}px, "
+              f"min correlation {args.align_min_corr}")
+
     if not have_reference:
         msg = (f"no empty-bay reference yet ({args.reference}).\n"
                f"  With all bays empty, run the windowed mode and press 'r'.")
@@ -192,7 +223,8 @@ def main() -> int:
     csv_fh = open(args.csv, "w", newline="", encoding="utf-8") if args.csv else None
     csv_w = csv.writer(csv_fh) if csv_fh else None
     if csv_w:
-        csv_w.writerow(["t_seconds", "spot_id", "changed_ratio", "state"])
+        csv_w.writerow(["t_seconds", "spot_id", "changed_ratio", "state",
+                        "align_ok", "align_dx", "align_dy", "align_corr"])
 
     threshold = params.changed_ratio_threshold
     show_inner = True
@@ -218,8 +250,22 @@ def main() -> int:
             frames += 1
             elapsed = time.time() - started
 
+            # Align the frame to the reference frame the bays were drawn on, so a
+            # camera nudge does not move every ROI off its bay. The ROIs and the
+            # reference ROIs never change; only the incoming frame is moved.
+            eval_frame = frame
+            if aligner is not None and (align_result is None or
+                                        frames % max(args.align_every, 1) == 0):
+                align_result = aligner.estimate(frame)
+                if align_result.ok:
+                    align_stats["ok"] += 1
+                else:
+                    align_stats["failed"] += 1
+            if aligner is not None and align_result is not None and align_result.ok:
+                eval_frame = aligner.warp_frame(frame, align_result.matrix)
+
             if have_reference:
-                results = detector.evaluate(frame, spots, want_debug=True)
+                results = detector.evaluate(eval_frame, spots, want_debug=True)
             else:
                 results = {}
 
@@ -228,8 +274,14 @@ def main() -> int:
                 sums[sid][1] += 1 if r.state == OCCUPIED else 0
                 sums[sid][2] += 1
             if csv_w:
+                a_ok = 1 if (align_result is not None and align_result.ok) else 0
+                a_dx = align_result.dx if align_result else 0.0
+                a_dy = align_result.dy if align_result else 0.0
+                a_cc = align_result.correlation if align_result else 0.0
                 for sid, r in results.items():
-                    csv_w.writerow([f"{elapsed:.3f}", sid, f"{r.changed_ratio:.5f}", r.state])
+                    csv_w.writerow([f"{elapsed:.3f}", sid, f"{r.changed_ratio:.5f}",
+                                    r.state, a_ok, f"{a_dx:.2f}", f"{a_dy:.2f}",
+                                    f"{a_cc:.4f}"])
 
             if args.save_debug and not snapshot_done:
                 os.makedirs(os.path.dirname(os.path.abspath(args.save_debug)), exist_ok=True)
@@ -245,16 +297,32 @@ def main() -> int:
                 last_print = elapsed
                 if have_reference:
                     fps = frames / max(elapsed, 1e-6)
-                    print(f"t={elapsed:5.1f}s fps={fps:4.1f} thr={threshold:.2f} "
+                    if align_result is None:
+                        a = "align=off"
+                    elif align_result.ok:
+                        a = (f"align={align_result.dx:+.0f},{align_result.dy:+.0f}"
+                             f"@{align_result.correlation:.2f}")
+                    else:
+                        a = f"align=FAILED"
+                    print(f"t={elapsed:5.1f}s fps={fps:4.1f} thr={threshold:.2f} {a} "
                           f"{status_line(spots, results)}")
                 else:
                     print(f"t={elapsed:5.1f}s  waiting for a reference (press 'r')")
 
             if not args.headless:
                 canvas = annotate(frame, spots, results, show_inner, show_diff)
+                if aligner is None:
+                    align_text = "align off"
+                elif align_result is None:
+                    align_text = "align ..."
+                elif align_result.ok:
+                    align_text = (f"align dx={align_result.dx:+.0f} "
+                                  f"dy={align_result.dy:+.0f} corr={align_result.correlation:.2f}")
+                else:
+                    align_text = f"align FAILED ({align_result.reason})"
                 header = (f"threshold {threshold:.2f}  pixel {detector.params.pixel_threshold}  "
                           f"ref {'OK' if have_reference else 'MISSING - press r'}  "
-                          f"{frames / max(elapsed, 1e-6):.1f} fps")
+                          f"{align_text}  {frames / max(elapsed, 1e-6):.1f} fps")
                 cv2.putText(canvas, header, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                             (0, 0, 0), 3)
                 cv2.putText(canvas, header, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
@@ -318,6 +386,15 @@ def main() -> int:
     print(f"\nran {elapsed:.1f}s, {frames} frames ({frames / max(elapsed, 1e-6):.1f} fps)")
     if cam is not None:
         print(f"stream stats: {cam.stats.summary()}")
+    if aligner is not None:
+        print(f"alignment: {align_stats['ok']} ok, {align_stats['failed']} failed")
+        if align_stats["failed"]:
+            print("  WARNING: alignment failed on some frames - the ROIs may not sit "
+                  "on the bays. Check for a large camera move, and see the notes on "
+                  "why (estimator scores) in the log above.")
+        if align_result is not None:
+            print(f"  last: {align_result.describe()}")
+
     if have_reference:
         print(f"per-spot changed_ratio over this run:")
         for s in spots:

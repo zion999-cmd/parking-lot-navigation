@@ -234,6 +234,72 @@ Window keys: `r` capture reference · `g` inner ROI · `d` changed-pixel overlay
 The window shows the bay outline (yellow), the inner detection area (green,
 toggleable), the changed pixels in red, and `Spot 38 EMPTY 0.031` per bay.
 
+## 5.1 Camera drift: align instead of redrawing
+
+The camera is meant to be fixed, but a nudge moves the picture by a few pixels and
+then every ROI sits slightly off its bay. There are two ways to handle that, and
+neither of them touches the bay list:
+
+**Runtime compensation (preferred, changes nothing on disk).** `main.py` estimates
+the drift against the reference frame and moves the *incoming frame* back onto it,
+so the ROIs and the reference ROIs stay exactly where they were drawn:
+
+```zsh
+$P src/main.py                       # --align translation is the default
+$P src/main.py --align euclidean     # if the camera also got rotated
+$P src/main.py --align off           # disable it entirely
+```
+
+It re-estimates every `--align-every` frames (default 3) and logs the estimate.
+Each CSV row carries `align_ok, align_dx, align_dy, align_corr`.
+
+**Re-align the stored polygons** (when you would rather fix the file):
+
+```zsh
+# dry report, no change
+$P src/calibration.py --frame data/debug/frame.jpg --template data/reference/reference.jpg
+#   ... in the window, press  A  (moves every bay onto the current frame; s saves)
+
+# or headless: align and save in one go
+$P src/calibration.py --frame <current.jpg> --template data/reference/reference.jpg \
+    --auto-align --out config/parking_spots.json
+```
+
+`A` and `--auto-align` move every polygon by the estimated drift. They never add,
+delete or renumber a bay, and `z` undoes it.
+
+### What it refuses to do, and why
+
+The scene is an evenly spaced grid, and that makes one failure mode fundamentally
+undecidable: **a shift of exactly one bay looks identical to no shift at all.**
+Measured on the real frame, "do nothing" scores *higher* than the correct one-bay
+correction (0.956 against 0.925). So the aligner does not guess. It may answer
+"aligned, no correction needed" and leave the ROIs a bay out - harmless, because it
+applies nothing - but it will never invent a sub-bay correction it cannot justify.
+
+Thresholds come from measurement, not taste. Shifting the real calibrated frame and
+letting ECC correct it:
+
+| applied shift | no-move score | score after | ECC's dx vs truth |
+|---|---|---|---|
+| 3, 2 | 0.522 | **0.973** | +3.0 correct |
+| 7, -4 | 0.190 | **0.974** | +7.0 correct |
+| 15, 8 | 0.050 | **0.957** | +15.3 correct |
+| 40, 0 | 0.504 | 0.545 | +27.7 wrong |
+| 70, 0 | 0.449 | 0.636 | +25.0 wrong |
+| 150, 0 | 0.361 | 0.623 | +105.0 wrong |
+
+A real alignment lands at 0.95-0.97 and every failed one at 0.54-0.64, so the gate
+is 0.8 - 0.16 away from both. Practical range on this scene: a nudge up to about
+15 px (a third of a bay). Anything larger is reported as "cannot align", not
+applied. A rejected alignment means the ROIs are NOT compensated, so the run
+warns loudly instead of quietly returning numbers that look fine.
+
+Two details worth recording. A brightness correlation is useless here (mostly flat
+floor: a 150 px displacement still scored 0.96), so the check compares *edge*
+correlation. And the alignment is property-tested with "an accepted alignment must
+never make the frame worse" as well as with exact synthetic shifts.
+
 ## 6. The algorithm, and its only three knobs
 
 ```
@@ -301,9 +367,11 @@ badly calibrated bay is visible.
 $P tests/test_occupancy.py    # 13 checks - the occupancy maths (unchanged by P0002.1)
 $P tests/test_detector.py     # 17 checks - the bay candidate detector
 $P tests/test_editor.py       # 31 checks - editing model + GUI wiring
+$P tests/test_alignment.py    # 15 checks - camera drift compensation
 ```
 
-61 checks, no camera required.
+76 checks, no camera required.
+
 
 * **occupancy** - inner-polygon shrink maths, identical frame → EMPTY, car inside
   → OCCUPIED, **bay markings ignored**, **bounding-box corner ignored (polygon,
@@ -339,6 +407,7 @@ vision/
 │   ├── camera.py                  video input: cv2.VideoCapture + MJPEG reader
 │   ├── spot_config.py             bay polygons, inner-ROI maths, JSON I/O
 │   ├── occupancy.py               the difference algorithm (untouched by P0002.1)
+│   ├── alignment.py               camera drift estimation (ECC) + guards
 │   ├── detector.py                geometric bay candidate detection (no AI)
 │   ├── spot_editor.py             editing model: drag/add/delete/rename/row/undo
 │   ├── calibration.py             the window, mouse and key map (+ --detect-only)
