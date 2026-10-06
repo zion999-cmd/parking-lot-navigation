@@ -274,7 +274,13 @@ class SpotEditor:
         if spot is None:
             self._say("select a spot first, then generate the row from it", "warn")
             return 0
-        vec = spot.polygon[1] - spot.polygon[0]        # along the row
+        # The row direction is the *shorter* side of the bay. For a normal bay that
+        # is the top edge; for a bay whose dividers run the other way - the sandbox
+        # has a row of six along the bottom - that side is vertical, and using
+        # p1-p0 blindly made "generate row" walk downwards instead of sideways.
+        e0 = spot.polygon[1] - spot.polygon[0]
+        e1 = spot.polygon[3] - spot.polygon[0]
+        vec = e0 if np.linalg.norm(e0) <= np.linalg.norm(e1) else e1
         if np.linalg.norm(vec) < 4:
             self._say("selected spot is too small to replicate", "warn")
             return 0

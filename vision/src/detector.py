@@ -595,6 +595,98 @@ def _rotate_back(quads: List[List[List[float]]], orig_h: int) -> List[List[List[
     return out
 
 
+def _merge_vertical_fragments(polys: List[List[List[float]]],
+                              x_overlap_frac: float = 0.6,
+                              max_gap: float = 20.0,
+                              max_stack: float = 2.2) -> List[List[List[float]]]:
+    """Join the pieces of one sideways bay that an internal line cut in two.
+
+    A row whose dividers run the other way is read by the rotated pass as a stack of
+    bays between *every* pair of horizontal lines, including the line across the far
+    side of the row. On the sandbox the row of six sideways bays came back as eight
+    boxes, two of which were the top and bottom halves of a single bay (y 395..467
+    and y 466..514, which is exactly the y 395..514 of its neighbour).
+
+    Two boxes are joined when they share x and touch vertically. The result is not
+    allowed to be much taller than its tallest member, so a genuine stack of rows
+    cannot be collapsed into nonsense.
+    """
+    items = [np.asarray(p, dtype=np.float64) for p in polys]
+    changed = True
+    while changed:
+        changed = False
+        out: List[np.ndarray] = []
+        for cur in items:
+            merged_into = None
+            for i, kept in enumerate(out):
+                cx0, cx1 = cur[:, 0].min(), cur[:, 0].max()
+                kx0, kx1 = kept[:, 0].min(), kept[:, 0].max()
+                overlap = min(cx1, kx1) - max(cx0, kx0)
+                narrower = min(cx1 - cx0, kx1 - kx0)
+                if narrower <= 1 or overlap / narrower < x_overlap_frac:
+                    continue
+                gap = max(cur[:, 1].min(), kept[:, 1].min()) - min(cur[:, 1].max(), kept[:, 1].max())
+                if gap > max_gap:
+                    continue
+                top = min(cur[:, 1].min(), kept[:, 1].min())
+                bottom = max(cur[:, 1].max(), kept[:, 1].max())
+                tallest = max(cur[:, 1].max() - cur[:, 1].min(),
+                              kept[:, 1].max() - kept[:, 1].min())
+                if bottom - top > max_stack * tallest:
+                    continue
+                merged_into = i
+                break
+            if merged_into is None:
+                out.append(cur)
+            else:
+                a, b = out[merged_into], cur
+                x0 = min(a[:, 0].min(), b[:, 0].min())
+                x1 = max(a[:, 0].max(), b[:, 0].max())
+                y0 = min(a[:, 1].min(), b[:, 1].min())
+                y1 = max(a[:, 1].max(), b[:, 1].max())
+                out[merged_into] = np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+                                            dtype=np.float64)
+                changed = True
+        items = out
+    return [[[float(x), float(y)] for x, y in q] for q in items]
+
+
+def _row_spans(res: DetectorResult) -> List[Tuple[float, float]]:
+    """The y ranges of the rows found by a vertical pass, however it reported them."""
+    spans: List[Tuple[float, float]] = []
+    for row in res.diagnostics.get("rows", []) or []:
+        y = row.get("y")
+        if isinstance(y, (list, tuple)) and len(y) == 2:
+            spans.append((float(y[0]), float(y[1])))
+    for row in res.rows or []:
+        spans.append((float(row.y0), float(row.y1)))
+    return sorted(spans)
+
+
+def _in_vertical_gap(poly: Sequence[Sequence[float]], spans: List[Tuple[float, float]],
+                     frac: float = 0.5) -> bool:
+    """True when a candidate sits in the empty strip *between* two vertical rows.
+
+    Those strips are bounded above and below by the two rows' front/back lines, so
+    the other orientation happily reads those lines as dividers and proposes bays
+    that are not there. On the real sandbox this is what produced four phantom bays
+    at y 126..215, in the strip between the upper row (38..131) and the middle row
+    (199..280) - each of them a real line pair, just not a bay.
+    """
+    if len(spans) < 2:
+        return False
+    pts = np.asarray(poly, dtype=np.float64)
+    top, bottom = float(pts[:, 1].min()), float(pts[:, 1].max())
+    height = max(bottom - top, 1.0)
+    for (_, prev_bottom), (next_top, _) in zip(spans, spans[1:]):
+        if next_top <= prev_bottom:
+            continue
+        overlap = min(bottom, next_top) - max(top, prev_bottom)
+        if overlap > 0 and overlap / height >= frac:
+            return True
+    return False
+
+
 def detect_bays(frame: np.ndarray, params: Optional[DetectorParams] = None
                 ) -> DetectorResult:
     """Find parking bay candidates. Never raises on a hard image; returns empty."""
@@ -614,25 +706,48 @@ def detect_bays(frame: np.ndarray, params: Optional[DetectorParams] = None
 
         merged = list(vert.polygons)
         base = len(merged)
-        added = 0
-        for poly in horiz.polygons:
-            cand = np.asarray(poly, dtype=np.float32)
-            area = abs(cv2.contourArea(cand))
-            clash = False
+        spans = _row_spans(vert)
+
+        # Filter the horizontal candidates *before* joining fragments: a fragment
+        # that overlaps a vertical row must not be stitched onto a sideways bay
+        # below it, or the merge would build a tower across the middle of the lot.
+        def conflicts(cand: Sequence[Sequence[float]]) -> bool:
+            c = np.asarray(cand, dtype=np.float32)
+            area = abs(cv2.contourArea(c))
+            if area <= 0:
+                return True
             for keep in merged:
-                inter, _ = cv2.intersectConvexConvex(cand, np.asarray(keep, dtype=np.float32))
-                if inter > 0 and area > 0 and inter / area > 0.3:
-                    clash = True
-                    break
-            if not clash:
-                merged.append(poly)
-                added += 1
+                inter, _ = cv2.intersectConvexConvex(c, np.asarray(keep, dtype=np.float32))
+                if inter > 0 and inter / area > 0.3:
+                    return True
+            return False
+
+        in_gap = 0
+        survivors = []
+        for poly in horiz.polygons:
+            if _in_vertical_gap(poly, spans):
+                in_gap += 1
+                continue
+            if conflicts(poly):
+                continue
+            survivors.append(poly)
+
+        joined = _merge_vertical_fragments(survivors)
+        added = 0
+        for poly in joined:
+            if conflicts(poly):
+                continue
+            merged.append(poly)
+            added += 1
 
         vert.polygons = merged
         vert.diagnostics["orientation"] = "both"
         vert.diagnostics["merged_from"] = {
             "vertical": base, "horizontal_found": horiz.count,
-            "horizontal_added": added, "horizontal_dropped": horiz.count - added,
+            "horizontal_added": added,
+            "horizontal_dropped": horiz.count - added,
+            "horizontal_dropped_between_rows": in_gap,
+            "horizontal_fragments_joined": len(survivors) - len(joined),
         }
         return vert
 
