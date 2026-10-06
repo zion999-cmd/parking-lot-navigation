@@ -1,0 +1,9 @@
+{
+  "comment": "Fixed parking bay polygons on the camera image. Seeded by Auto Detect and confirmed by hand with src/calibration.py; edit with the same tool.",
+  "image_size": [600, 800],
+  "spots": [
+    { "id": "58", "polygon": [[256, 199], [300, 199], [300, 280], [256, 280]] },
+    { "id": "59", "polygon": [[300, 199], [350, 199], [350, 280], [300, 280]] },
+    { "id": "60", "polygon": [[350, 199], [396, 199], [393, 280], [350, 280]] }
+  ]
+}

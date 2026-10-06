@@ -171,16 +171,42 @@ def load_spots(path: str, shape: Optional[Tuple[int, int]] = None) -> List[Spot]
     return spots
 
 
+def _fmt_polygon(points) -> str:
+    """One line per polygon, so the file stays editable by hand."""
+    return "[" + ", ".join(f"[{float(x):g}, {float(y):g}]" for x, y in points) + "]"
+
+
 def save_spots(path: str, spots: List[Spot], shape: Optional[Tuple[int, int]] = None) -> None:
+    """Write the config in a hand-editable form.
+
+    json.dump(indent=2) puts every number on its own line, which makes a file full
+    of polygons almost impossible to read or fix in an editor. Each spot is written
+    as one line instead, and the result is still plain JSON.
+    """
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    doc = {
-        "comment": "Fixed parking bay polygons on the camera image. "
-                   "Calibrated by hand with src/calibration.py.",
-        "image_size": list(shape) if shape else None,
-        "spots": [s.to_dict() for s in spots],
-    }
+
+    lines = [
+        "{",
+        '  "comment": "Fixed parking bay polygons on the camera image. '
+        'Seeded by Auto Detect and confirmed by hand with src/calibration.py; '
+        'edit with the same tool.",',
+        f'  "image_size": {f"[{shape[0]}, {shape[1]}]" if shape else "null"},',
+        '  "spots": [',
+    ]
+    for i, spot in enumerate(spots):
+        parts = [f'"id": {json.dumps(spot.id)}',
+                 f'"polygon": {_fmt_polygon(spot.polygon)}']
+        if abs(spot.inner_scale - DEFAULT_INNER_SCALE) > 1e-6:
+            parts.append(f'"inner_scale": {spot.inner_scale:g}')
+        if spot.detect_polygon is not None:
+            parts.append(f'"detect_polygon": {_fmt_polygon(spot.detect_polygon)}')
+        if spot.note:
+            parts.append(f'"note": {json.dumps(spot.note)}')
+        comma = "," if i < len(spots) - 1 else ""
+        lines.append("    { " + ", ".join(parts) + " }" + comma)
+    lines += ["  ]", "}"]
+
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(doc, fh, indent=2)
-        fh.write("\n")
+        fh.write("\n".join(lines) + "\n")
     os.replace(tmp, path)

@@ -388,6 +388,37 @@ def detect_only(frame: np.ndarray, params: DetectorParams, out_dir: str,
     return 0
 
 
+def write_detected_spots(frame: np.ndarray, params: DetectorParams, args,
+                        out_path: str) -> None:
+    """Save the detected candidates as an editable config.
+
+    A convenience for the workflow "let the detector propose the whole lot, then
+    delete what is wrong" - the file it writes is the same format the calibrator
+    produces, so it can be opened and corrected in the window.
+    """
+    from detector import detect_bays, sort_reading_order
+    from spot_config import Spot, save_spots, validate
+
+    res = detect_bays(frame, params)
+    spots = []
+    for i, poly in enumerate(sort_reading_order(res.polygons)):
+        cand = Spot(id=str(args.start_id + i),
+                    polygon=np.asarray(poly, dtype=np.float64),
+                    inner_scale=args.inner_scale)
+        try:
+            cand.prepare(frame.shape[:2])
+        except Exception:
+            continue
+        spots.append(cand)
+    if not spots:
+        print("nothing detected, not writing a config")
+        return
+    save_spots(out_path, spots, frame.shape[:2])
+    print(f"wrote {len(spots)} detected candidate(s) to {out_path}")
+    for problem in validate(spots, frame.shape[:2]):
+        print(f"  warning: {problem}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Auto-detect + hand-correct parking bay calibration.")
     ap.add_argument("--source", default="http://192.168.3.118/stream")
@@ -400,6 +431,9 @@ def main() -> int:
     ap.add_argument("--auto", action="store_true", help="run Auto Detect once at startup")
     ap.add_argument("--grid", nargs="?", const="", metavar="IMAGE",
                     help="write a labelled calibration ruler image and exit")
+    ap.add_argument("--write-spots", metavar="JSON",
+                    help="with --detect-only: also write the detected candidates to this "
+                         "config file, as a starting point to correct by hand")
     ap.add_argument("--detect-only", action="store_true",
                     help="run detection once, print the report, save an overlay and exit "
                          "(no window; use this to tune the detector against the real scene)")
@@ -469,6 +503,8 @@ def main() -> int:
             print("error: no frame", file=sys.stderr)
             return 2
         rc = detect_only(img, params, debug_dir, args.start_id)
+        if args.write_spots:
+            write_detected_spots(img, params, args, args.write_spots)
         if cam is not None:
             cam.close()
         return rc
