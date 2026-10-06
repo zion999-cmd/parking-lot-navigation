@@ -149,6 +149,7 @@ def watch(args) -> int:
     print("每秒输出一次；挪车看数字跟不跟。Ctrl-C 结束。\n")
     print(f"{'时间':>6}  {'位置':>15}  {'轴':>7}  {'伸长':>5}  {'面积':>6}  位置")
     started = time.time()
+    tracker = vehicle.VehicleTracker()
     try:
         while True:
             frame = None
@@ -159,8 +160,8 @@ def watch(args) -> int:
             if frame is None:
                 time.sleep(1)
                 continue
-            pose = vehicle.locate(frame, min_area=args.min_area,
-                                  keep_border=args.keep_border)
+            pose = tracker.update(vehicle.locate(frame, min_area=args.min_area,
+                                                keep_border=args.keep_border))
             if pose is None:
                 print(f"{time.time()-started:6.0f}  {'-':>15}  {'-':>7}  {'-':>5}  {'-':>6}  "
                       f"看不到红车 (visible: false)")
@@ -169,8 +170,10 @@ def watch(args) -> int:
                 where = (f"车位 {loc['id']}" if loc["kind"] == "spot"
                          else f"{loc['kind']} (距路 {loc['distance_to_road']}px)"
                          if loc["distance_to_road"] is not None else loc["kind"])
+                front = (f"front {pose.front_heading:5.1f}°"
+                         if pose.front_is_known else "front unknown")
                 print(f"{time.time()-started:6.0f}  ({pose.x:6.1f},{pose.y:6.1f})  "
-                      f"{pose.heading:6.1f}°  {pose.elongation:5.2f}  {pose.area:6d}  {where}")
+                      f"{pose.heading:6.1f}°  {front}  {where}")
             time.sleep(1)
     except KeyboardInterrupt:
         print("\n结束")

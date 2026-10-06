@@ -28,7 +28,8 @@ largest "red object" in the picture.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, replace
 from typing import List, Optional, Sequence, Tuple
 
 import cv2
@@ -137,6 +138,79 @@ def touches_border(bbox: Sequence[int], shape: Sequence[int],
     x, y, w, h = bbox
     return (x <= margin or y <= margin
             or x + w >= shape[1] - margin or y + h >= shape[0] - margin)
+
+
+class VehicleTracker:
+    """Smooth the readings a little, because a car does not turn instantly.
+
+    Measured on the real car, 30 frames: the axis is steady to 0.0 degrees, and the taper sits
+    at -0.12 with a spread of 0.05 - so it dips below the 0.04 gate in about one frame in six.
+    Those dips are not the car changing shape; they are the colour mask shifting a pixel at its
+    edges and the JPEG wobbling. Gating on a single frame therefore made the front appear and
+    disappear several times in thirty frames while the car never moved.
+
+    Averaging is safe here for the same reason it is dangerous in general: the quantity being
+    averaged cannot change quickly. A car's shape, and so its taper, changes only when the car
+    does. With alpha 0.3 the smoothed taper comes out at -0.12 +- 0.02, six times the gate away
+    from crossing, while a genuine 180 degree turn still moves it within a few frames.
+    """
+
+    def __init__(self, alpha: float = 0.3, position_alpha: float = 0.5,
+                 min_taper: float = MIN_TAPER, reset_px: float = 40.0):
+        self.alpha = alpha
+        self.position_alpha = position_alpha
+        self.min_taper = min_taper
+        self.reset_px = reset_px
+        self._taper: Optional[float] = None
+        self._ax = 0.0
+        self._ay = 0.0
+        self._x: Optional[float] = None
+        self._y: Optional[float] = None
+
+    def reset(self) -> None:
+        """Start again: used when the car is out of sight, or has been picked up."""
+        self._taper = None
+        self._x = self._y = None
+
+    def update(self, pose: Optional[VehiclePose]) -> Optional[VehiclePose]:
+        """One sighting in, a smoothed sighting out. None in, None out."""
+        if pose is None:
+            self.reset()
+            return None
+
+        # A jump too big to be driving means the car was moved by hand, so the old shape says
+        # nothing about the new one.
+        if (self._x is not None
+                and math.hypot(pose.x - self._x, pose.y - self._y) > self.reset_px):
+            self.reset()
+
+        a = self.alpha
+        self._taper = (pose.taper if self._taper is None
+                       else a * pose.taper + (1 - a) * self._taper)
+        # The axis is an angle in 0..180, where 0 and 180 are the same; doubling it makes the
+        # average well defined instead of cancelling itself out.
+        doubled = math.radians(2.0 * pose.heading)
+        if self._ax == 0.0 and self._ay == 0.0:
+            self._ax, self._ay = math.cos(doubled), math.sin(doubled)
+        else:
+            self._ax = a * math.cos(doubled) + (1 - a) * self._ax
+            self._ay = a * math.sin(doubled) + (1 - a) * self._ay
+        heading = (math.degrees(math.atan2(self._ay, self._ax)) / 2.0) % 180.0
+
+        pa = self.position_alpha
+        self._x = pose.x if self._x is None else pa * pose.x + (1 - pa) * self._x
+        self._y = pose.y if self._y is None else pa * pose.y + (1 - pa) * self._y
+
+        out = replace(pose, x=self._x, y=self._y, heading=heading, taper=self._taper)
+        if pose.elongation >= 1.6 and abs(self._taper) >= self.min_taper:
+            wider_is_plus = self._taper > 0
+            plus_is_front = wider_is_plus == FRONT_IS_THE_WIDER_END
+            out.front_heading = heading if plus_is_front else (heading + 180.0) % 360.0
+            out.front_is_known = True
+        else:
+            out.front_heading = None
+            out.front_is_known = False
+        return out
 
 
 def taper_of(points: np.ndarray, heading: float, bins: int = 12) -> float:

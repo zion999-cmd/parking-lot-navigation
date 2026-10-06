@@ -227,6 +227,76 @@ def test_the_front_direction_agrees_with_the_axis_or_is_opposite_it() -> None:
     assert abs(offset - 0) < 1 or abs(offset - 180) < 1, (pose.front_heading, pose.heading)
 
 
+# ---------------------------------------------------------------------------
+# Smoothing: the car does not turn instantly, and one frame of shape is noisy
+# ---------------------------------------------------------------------------
+
+def a_pose(taper: float, heading: float = 0.0, elongation: float = 2.5,
+           x: float = 400.0, y: float = 400.0) -> vehicle.VehiclePose:
+    return vehicle.VehiclePose(x=x, y=y, heading=heading, area=1600, elongation=elongation,
+                               fill=0.7, bbox=(370, 390, 60, 20), taper=taper)
+
+
+def test_a_noisy_taper_does_not_make_the_front_flap() -> None:
+    """Measured on the real car: the taper sits at -0.12 and dips near zero about one frame
+    in six. Gating on a single frame made the front appear and disappear several times in
+    thirty frames while the car never moved."""
+    tracker = vehicle.VehicleTracker()
+    poses = [a_pose(-0.12 if i % 3 else -0.02) for i in range(30)]
+    known = [p.front_is_known for p in (tracker.update(p) for p in poses)]
+    assert all(known[2:]), f"the front dropped out after warm-up: {known}"
+    fronts = [p.front_heading for p in (tracker.update(p) for p in poses) if p.front_is_known]
+    assert len(set(round(f, 0) for f in fronts)) == 1, fronts
+
+
+def test_a_genuine_turn_is_followed() -> None:
+    """Smoothing must not be so heavy that turning the car round is not noticed."""
+    tracker = vehicle.VehicleTracker()
+    for _ in range(8):
+        before = tracker.update(a_pose(-0.12))
+    assert before.front_is_known
+    for _ in range(8):
+        after = tracker.update(a_pose(+0.12))
+    assert after.front_is_known, after.taper
+    turn = abs((after.front_heading - before.front_heading) % 360)
+    assert abs(turn - 180) < 10, (before.front_heading, after.front_heading, turn)
+
+
+def test_the_smoothed_axis_does_not_drift_to_ninety_degrees() -> None:
+    """0 and 180 are the same axis; averaging them naively lands on 90, which is wrong."""
+    tracker = vehicle.VehicleTracker()
+    out = None
+    for i in range(20):
+        out = tracker.update(a_pose(-0.12, heading=2.0 if i % 2 else 178.0))
+    assert out is not None
+    offset = min(abs(out.heading - 0.0), abs(out.heading - 180.0))
+    assert offset < 10, out.heading
+
+
+def test_losing_sight_of_the_car_resets_the_smoothing() -> None:
+    tracker = vehicle.VehicleTracker()
+    tracker.update(a_pose(-0.12, x=100.0, y=100.0))
+    assert tracker.update(None) is None
+    again = tracker.update(a_pose(-0.12, x=500.0, y=500.0))
+    assert abs(again.x - 500.0) < 1e-6, "the old position was blended into the new sighting"
+
+
+def test_a_hand_move_resets_the_smoothing() -> None:
+    """Driving cannot move the car across the frame in one frame; being picked up can."""
+    tracker = vehicle.VehicleTracker()
+    tracker.update(a_pose(-0.12, x=100.0, y=100.0))
+    moved = tracker.update(a_pose(-0.12, x=600.0, y=400.0))
+    assert abs(moved.x - 600.0) < 1e-6 and abs(moved.y - 400.0) < 1e-6
+
+
+def test_a_sighting_with_no_front_known_keeps_the_position() -> None:
+    tracker = vehicle.VehicleTracker()
+    out = tracker.update(a_pose(0.0, x=333.0, y=222.0))
+    assert out is not None
+    assert out.front_is_known is False and out.front_heading is None
+    assert abs(out.x - 333.0) < 1e-6
+
+
 def main() -> int:
     tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith("test_") and callable(f)]

@@ -643,6 +643,9 @@ def main() -> int:
     state_written = [0.0]
     look_for_car = not args.no_vehicle
     show_car = True
+    # Smooths the readings: the car does not turn instantly, and a single frame's shape is
+    # noisy enough to make the front appear and disappear. See vehicle.VehicleTracker.
+    car_tracker = vehicle.VehicleTracker()
 
     try:
         while True:
@@ -714,7 +717,8 @@ def main() -> int:
             pose = None
             location = None
             if look_for_car:
-                pose = vehicle.locate(frame, min_area=args.vehicle_min_area)
+                pose = car_tracker.update(
+                    vehicle.locate(frame, min_area=args.vehicle_min_area))
                 if pose is not None and any((spots, road_net)):
                     location = vehicle.location_of(pose, spots, road_net)
 
