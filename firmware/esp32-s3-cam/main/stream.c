@@ -39,17 +39,16 @@ static const char *STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=" P
 /*
  * Where does the time go?
  *
- * The board was delivering ~4 fps in bursts between 0.5 and 8.5 fps, and there was no
- * way to tell from outside whether the camera or the network was stalling. These
- * accumulators split each frame into "waiting for the sensor" and "pushing it down the
- * socket", and track the JPEG size, so the log says which side is the problem instead
- * of leaving it to guesswork. Reported every STREAM_STATS_EVERY frames.
+ * The board delivers ~4 fps where ~13 was expected, and from outside there was no way
+ * to tell whether the camera or the network was stalling. Each frame is therefore
+ * split into "waiting for the sensor" (grab) and "pushing it down the socket" (send),
+ * and the JPEG size is tracked too - because a link caps the byte rate, so the frame
+ * rate is really bytes per second divided by the JPEG size. Both are reported.
+ *
+ * The counters are locals of the streaming task, not file statics: two clients on the
+ * stream at once would otherwise corrupt each other's numbers.
  */
 #define STREAM_STATS_EVERY 50
-static uint32_t s_stat_frames = 0;
-static int64_t s_grab_us = 0, s_send_us = 0;
-static int64_t s_grab_max_us = 0, s_send_max_us = 0;
-static size_t s_jpeg_sum = 0, s_jpeg_min = 0, s_jpeg_max = 0;
 
 /* Stack for the per-client streaming task. */
 #define STREAM_TASK_STACK 4096
@@ -169,10 +168,10 @@ static void stream_task(void *arg)
 
     ESP_LOGI(TAG, "client connected (%d active)", s_clients);
 
-    s_grab_us = s_send_us = 0;
-    s_grab_max_us = s_send_max_us = 0;
-    s_stat_frames = 0;
-    s_jpeg_sum = s_jpeg_min = s_jpeg_max = 0;
+    uint32_t stat_frames = 0;
+    int64_t grab_us = 0, send_us = 0, grab_max_us = 0, send_max_us = 0;
+    size_t jpeg_sum = 0, jpeg_min = 0, jpeg_max = 0;
+    int64_t window_start_us = esp_timer_get_time();
 
     while (res == ESP_OK) {
         int64_t t_grab0 = esp_timer_get_time();
@@ -191,37 +190,49 @@ static void stream_task(void *arg)
             break;
         }
 
+        /*
+         * fb->len must be read before the buffer goes back to the driver. After
+         * esp_camera_fb_return() the DMA is free to start filling that buffer with
+         * the next frame, so reading fb->len (or fb->buf) afterwards is a race.
+         */
+        size_t len = fb->len;
+
         char prefix[128];
-        int plen = snprintf(prefix, sizeof(prefix), STREAM_PREFIX_FMT, (unsigned)fb->len);
+        int plen = snprintf(prefix, sizeof(prefix), STREAM_PREFIX_FMT, (unsigned)len);
 
         res = httpd_resp_send_chunk(req, prefix, plen);
         if (res == ESP_OK) {
-            res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
+            res = httpd_resp_send_chunk(req, (const char *)fb->buf, len);
         }
 
         esp_camera_fb_return(fb);
         int64_t t_send = esp_timer_get_time();
-        s_grab_us += t_grab1 - t_grab0;
-        s_send_us += t_send - t_grab1;
-        if (t_grab1 - t_grab0 > s_grab_max_us) s_grab_max_us = t_grab1 - t_grab0;
-        if (t_send - t_grab1 > s_send_max_us) s_send_max_us = t_send - t_grab1;
-        s_jpeg_sum += fb->len;
-        if (s_jpeg_min == 0 || fb->len < s_jpeg_min) s_jpeg_min = fb->len;
-        if (fb->len > s_jpeg_max) s_jpeg_max = fb->len;
-        if (++s_stat_frames % STREAM_STATS_EVERY == 0) {
-            ESP_LOGI(TAG, "timing over %u frames: grab avg %.1f ms (max %.1f) | "
-                          "send avg %.1f ms (max %.1f) | jpeg avg %.1f KB (min %.1f max %.1f)",
-                     (unsigned)s_stat_frames,
-                     (double)s_grab_us / 1000.0 / s_stat_frames,
-                     (double)s_grab_max_us / 1000.0,
-                     (double)s_send_us / 1000.0 / s_stat_frames,
-                     (double)s_send_max_us / 1000.0,
-                     (double)s_jpeg_sum / 1024.0 / s_stat_frames,
-                     (double)s_jpeg_min / 1024.0, (double)s_jpeg_max / 1024.0);
-            s_grab_us = s_send_us = 0;
-            s_grab_max_us = s_send_max_us = 0;
-            s_stat_frames = 0;
-            s_jpeg_sum = s_jpeg_min = s_jpeg_max = 0;
+        grab_us += t_grab1 - t_grab0;
+        send_us += t_send - t_grab1;
+        if (t_grab1 - t_grab0 > grab_max_us) grab_max_us = t_grab1 - t_grab0;
+        if (t_send - t_grab1 > send_max_us) send_max_us = t_send - t_grab1;
+        jpeg_sum += len;
+        if (jpeg_min == 0 || len < jpeg_min) jpeg_min = len;
+        if (len > jpeg_max) jpeg_max = len;
+        if (++stat_frames % STREAM_STATS_EVERY == 0) {
+            int64_t now_us = esp_timer_get_time();
+            double window_s = (double)(now_us - window_start_us) / 1000000.0;
+            if (window_s <= 0.0) {
+                window_s = 0.001;
+            }
+            ESP_LOGI(TAG, "%u frames in %.1f s (%.1f fps) | grab avg %.1f ms (max %.1f) | "
+                          "send avg %.1f ms (max %.1f) | jpeg avg %.1f KB (min %.1f max %.1f) | "
+                          "%.0f KB/s",
+                     (unsigned)stat_frames, window_s, (double)stat_frames / window_s,
+                     (double)grab_us / 1000.0 / stat_frames, (double)grab_max_us / 1000.0,
+                     (double)send_us / 1000.0 / stat_frames, (double)send_max_us / 1000.0,
+                     (double)jpeg_sum / 1024.0 / stat_frames,
+                     (double)jpeg_min / 1024.0, (double)jpeg_max / 1024.0,
+                     (double)jpeg_sum / 1024.0 / window_s);
+            stat_frames = 0;
+            grab_us = send_us = grab_max_us = send_max_us = 0;
+            jpeg_sum = jpeg_min = jpeg_max = 0;
+            window_start_us = now_us;
         }
 
         if (res != ESP_OK) {

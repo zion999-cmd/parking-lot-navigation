@@ -159,25 +159,89 @@ esp_err_t wifi_init(void)
     return ESP_OK;
 }
 
-void wifi_disable_power_save(void)
+int wifi_power_save_mode(void)
+{
+    wifi_ps_type_t mode = WIFI_PS_NONE;
+    if (esp_wifi_get_ps(&mode) != ESP_OK) {
+        return -1;
+    }
+    return (int)mode;
+}
+
+const char *wifi_power_save_name(void)
+{
+    switch (wifi_power_save_mode()) {
+    case WIFI_PS_NONE:      return "none";
+    case WIFI_PS_MIN_MODEM: return "min_modem";
+    case WIFI_PS_MAX_MODEM: return "max_modem";
+    default:                return "unknown";
+    }
+}
+
+int wifi_disable_power_save(void)
 {
     /*
-     * WIFI_PS_NONE. This was in the original wifi.c and got lost when this file was
-     * rewritten as a C adapter for the provisioning component.
+     * WIFI_PS_NONE - and, the part that was missing, a readback of what the driver
+     * actually did.
      *
-     * With the default (WIFI_PS_MIN_MODEM) the access point buffers downlink frames
-     * until the next DTIM beacon and the radio sleeps in between, which is poison for
-     * a video stream: on this board the delivered rate settled at ~1.2 fps with the
-     * power save on. The measured frame intervals were 500-800 ms punctuated by
-     * multi-second stalls, and the rate decayed over the first minute after
-     * association - the signature of the power save engaging.
+     * Setting this once is not enough on this board. It runs after esp_wifi_init,
+     * again on every connect, and is re-checked every 10 s, because
+     * esp_wifi_set_ps() can return ESP_OK while the driver stays in modem sleep, and
+     * the driver re-applies its own mode on reconnect.
+     *
+     * Why it matters, measured: with the board idle and associated, ping to it
+     * averaged 555 ms with 15% loss while the router answered the same Mac in 2 ms
+     * with 0% loss. The best ping to the board was 5.4 ms, so the RF path is fine -
+     * the radio was simply asleep. That latency, not the camera and not the TCP
+     * buffers, is what caps the stream around 130 KB/s: the earlier 13.8 fps and
+     * today's 4.3 fps are the same byte rate with different JPEG sizes.
      */
     esp_err_t err = esp_wifi_set_ps(WIFI_PS_NONE);
+    int actual = wifi_power_save_mode();
+
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "esp_wifi_set_ps(WIFI_PS_NONE) failed: %s", esp_err_to_name(err));
-    } else {
-        ESP_LOGI(TAG, "WiFi power save: disabled (WIFI_PS_NONE)");
     }
+    if (actual < 0) {
+        ESP_LOGW(TAG, "could not read back the WiFi power save mode");
+    } else if (actual != WIFI_PS_NONE) {
+        ESP_LOGW(TAG, "WiFi power save is STILL %s after asking for none - the radio will sleep",
+                 wifi_power_save_name());
+    } else {
+        ESP_LOGI(TAG, "WiFi power save: off (readback verified)");
+    }
+    return actual;
+}
+
+void wifi_link_summary(char *out, size_t n)
+{
+    if (out == NULL || n == 0) {
+        return;
+    }
+
+    wifi_ap_record_t ap = {};
+    if (esp_wifi_sta_get_ap_info(&ap) != ESP_OK) {
+        snprintf(out, n, "not associated");
+        return;
+    }
+
+    const char *phy = "?";
+    wifi_phy_mode_t mode;
+    if (esp_wifi_sta_get_negotiated_phymode(&mode) == ESP_OK) {
+        switch (mode) {
+        case WIFI_PHY_MODE_LR:   phy = "11LR";     break;
+        case WIFI_PHY_MODE_11B:  phy = "802.11b";  break;
+        case WIFI_PHY_MODE_11G:  phy = "802.11g";  break;
+        case WIFI_PHY_MODE_11A:  phy = "802.11a";  break;
+        case WIFI_PHY_MODE_HT20: phy = "11n/HT20"; break;
+        case WIFI_PHY_MODE_HT40: phy = "11n/HT40"; break;
+        case WIFI_PHY_MODE_HE20: phy = "11ax/HE20"; break;
+        case WIFI_PHY_MODE_VHT20: phy = "11ac/VHT20"; break;
+        default: break;
+        }
+    }
+
+    snprintf(out, n, "ch%u+%d %s %d dBm", (unsigned)ap.primary, (int)ap.second, phy, ap.rssi);
 }
 
 void wifi_set_event_callback(wifi_event_cb_t cb)

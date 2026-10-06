@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <esp_err.h>
 
 #ifdef __cplusplus
@@ -34,12 +35,31 @@ typedef void (*wifi_event_cb_t)(wifi_mgr_event_t event, const char *data);
 esp_err_t wifi_init(void);
 
 /**
- * Force WIFI_PS_NONE.
+ * Force WIFI_PS_NONE, then read back what the driver actually did.
  *
- * Also called again once the station is up, because the driver can re-enable modem
- * sleep when the interface is reconfigured.
+ * Called after init, again on every connect, and re-checked every 10 s by the
+ * diagnostics task. The readback is the point: esp_wifi_set_ps() can return ESP_OK
+ * while the driver stays in modem sleep, and the driver re-applies its own mode on
+ * reconnect, so "I called it" is not the same as "it is off".
+ *
+ * Returns the mode read back (0 == WIFI_PS_NONE), or -1 if it could not be read.
  */
-void wifi_disable_power_save(void);
+int wifi_disable_power_save(void);
+
+/** The mode the driver reports right now, without changing anything. 0 == none, -1 on error. */
+int wifi_power_save_mode(void);
+
+/** "none" / "min_modem" / "max_modem" / "unknown" for the log line. */
+const char *wifi_power_save_name(void);
+
+/**
+ * Link summary for the diagnostics line, e.g. "ch6+0 11n/HT20 -36 dBm".
+ *
+ * The negotiated PHY mode is the reason this exists: an 802.11b association caps a
+ * link at 1-11 Mbit/s however strong the signal is, and that looks exactly like a
+ * software problem from the outside.
+ */
+void wifi_link_summary(char *out, size_t n);
 
 /** Register the single event callback used by the provisioning state machine. */
 void wifi_set_event_callback(wifi_event_cb_t cb);

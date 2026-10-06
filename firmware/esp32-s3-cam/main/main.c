@@ -123,8 +123,23 @@ static void diagnostics_task(void *arg)
          * RSSI (did Wi-Fi drop?), free/min heap (memory growth?), plus the
          * firmware version and slot so an OTA reboot is obvious in the log.
          */
+        /*
+         * Self-healing. The driver re-applies its own power save mode on reconnect,
+         * and esp_wifi_set_ps() can return ESP_OK without the mode actually changing,
+         * so the mode is checked and corrected here instead of being trusted to the
+         * connect path. This is why the log line shows it: if "ps=" ever reads
+         * anything but "none", the link is sleeping and the stream will crawl.
+         */
+        if (wifi_is_connected() && wifi_power_save_mode() != 0) {
+            ESP_LOGW(TAG, "modem sleep is on (%s) - turning it off again", wifi_power_save_name());
+            wifi_disable_power_save();
+        }
+
+        char link[48];
+        wifi_link_summary(link, sizeof(link));
+
         ESP_LOGI(TAG, "uptime=%us fw=%s fps=%.1f frames=%u clients=%d rssi=%d dBm "
-                      "net=%s ip=%s heap_internal=%u heap_psram=%u heap_min=%u",
+                      "net=%s ip=%s ps=%s link=\"%s\" heap_internal=%u heap_psram=%u heap_min=%u",
                  (unsigned)(esp_timer_get_time() / 1000000),
                  ota_running_version(),
                  (double)stream_fps(),
@@ -133,6 +148,8 @@ static void diagnostics_task(void *arg)
                  wifi_rssi(),
                  provisioning_state_name(),
                  wifi_ip_string(),
+                 wifi_power_save_name(),
+                 link,
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
                  (unsigned)esp_get_minimum_free_heap_size());
