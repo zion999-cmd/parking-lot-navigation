@@ -139,6 +139,13 @@ P=/usr/local/Caskroom/miniconda/base/envs/vision-dev/bin/python
 | `src/vehicle.py` | **主车定位**：颜色 + 形状 → `x/y/heading`，并判定「在哪个车位 / 在路上」（§7.4.1） | — |
 | `src/emit_map.py` | **发射静态契约**：配置 → `out/parking_map.json` | `$P src/emit_map.py [--strict]` |
 | `tests/car_locate.py` | **主车定位的独立检查工具**（`--watch` 每秒打印，挪车看数字跟不跟） | `$P tests/car_locate.py --watch` |
+
+> ⚠️ **注意这个仓库有两个 `tests/` 目录，很容易走错：**
+> - `vision/tests/` ← **视觉工具**（`car_locate.py`、`aruco_check.py`、`test_*.py`、`fit_threshold.py`）
+> - `tools/tests/` ← 只有 **OTA 版本比较**的宿主测试（`run.sh`）
+>
+> 所以：**视觉命令都要先 `cd vision`**；`make-aruco-marker.py` 则在 `tools/`。
+> 如果报 `can't open file '.../tools/tests/xxx.py'`，就是没进 `vision/`。
 | `tests/demo_alignment.py` | 对齐演示 / 测当前偏移 | `$P tests/demo_alignment.py --shift 0,0 --frame X.jpg` |
 | `tests/fit_threshold.py` | **从验收案例拟合阈值**（阈值要测量，不要猜） | `$P tests/fit_threshold.py --cases 'data/cases/*.csv'` |
 
@@ -231,7 +238,7 @@ $P src/main.py
 |---|---|
 | `r` | **抓参考帧**（必须是全空状态） |
 | `e` | 进编辑模式（就地改车位框 / 画道路） |
-| **`c`** | **切换主车标注**（橙色框 + 双向箭头 = 红车位置与长轴） |
+| **`c`** | **切换主车标注**（橙色框 + 两端小圆环的直线 = 红车位置与长轴，圆环不表示方向） |
 | `t` | **参考帧体检**：区分「画面整体变了」和「这几格内容真的不同」 |
 | `p` | 打印逐格数字（`*` = 超阈值） |
 | `g` / `d` | 显示内框 / 差异叠加 |

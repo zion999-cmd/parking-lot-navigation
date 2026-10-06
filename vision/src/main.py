@@ -74,21 +74,21 @@ def annotate(frame: np.ndarray, spots: List[Spot], results: Dict[str, SpotResult
     canvas = frame.copy()
 
     if pose is not None:
-        # The hero car. The axis is drawn with an arrowhead at both ends on purpose: colour
-        # and shape know the car's axis, not which end is the front, and the picture should
-        # not pretend otherwise.
+        # The hero car. The axis is drawn as a line with a small ring at each end, not as
+        # arrows: colour and shape know the car's axis and not which end is the front, and two
+        # arrowheads read as two competing directions rather than as "no direction".
         x, y, w, h = pose.bbox
         cv2.rectangle(canvas, (x, y), (x + w, y + h), COL_CAR, 2)
-        length = max(w, h) * 0.65
+        length = max(w, h) * 0.7
         rad = math.radians(pose.heading)
-        dx, dy = length * math.cos(rad), length * math.sin(rad)
-        cv2.arrowedLine(canvas, (int(pose.x), int(pose.y)),
-                        (int(pose.x + dx / 2), int(pose.y + dy / 2)), COL_CAR, 2,
-                        tipLength=0.18)
-        cv2.arrowedLine(canvas, (int(pose.x), int(pose.y)),
-                        (int(pose.x - dx / 2), int(pose.y - dy / 2)), COL_CAR, 2,
-                        tipLength=0.18)
+        dx, dy = length * math.cos(rad) / 2, length * math.sin(rad) / 2
+        p0 = (int(pose.x - dx), int(pose.y - dy))
+        p1 = (int(pose.x + dx), int(pose.y + dy))
+        cv2.line(canvas, p0, p1, COL_CAR, 2)
+        for p in (p0, p1):
+            cv2.circle(canvas, p, 5, COL_CAR, 2)
         cv2.circle(canvas, (int(pose.x), int(pose.y)), 4, COL_CAR, -1)
+
         where = ""
         if location:
             if location.get("kind") == "spot":
@@ -97,11 +97,25 @@ def annotate(frame: np.ndarray, spots: List[Spot], results: Dict[str, SpotResult
                 where = f"  on road ({location['distance_to_road']:.0f}px)"
             elif location.get("kind") == "floor":
                 where = f"  floor ({location['distance_to_road']:.0f}px from road)"
+        # The numbers that say whether the reading can be trusted at all: an axis only means
+        # something if the shape is elongated, and if the two independent estimates disagree
+        # the blob is not car shaped, whatever the angle says.
+        agree = min(abs(pose.heading - pose.heading_pca),
+                    180 - abs(pose.heading - pose.heading_pca))
         text = f"car ({pose.x:.0f},{pose.y:.0f}) axis {pose.heading:.0f}deg{where}"
+        detail = f"elon {pose.elongation:.2f}  pca {pose.heading_pca:.0f}deg  d{agree:.0f}deg"
+        if pose.elongation < 1.6:
+            detail += "  NO CLEAR AXIS"
+        if agree > 10:
+            detail += "  SHAPE SUSPECT"
         cv2.putText(canvas, text, (max(x - 20, 6), max(y - 8, 14)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 4)
         cv2.putText(canvas, text, (max(x - 20, 6), max(y - 8, 14)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, COL_CAR, 1)
+        cv2.putText(canvas, detail, (max(x - 20, 6), max(y + h + 16, 30)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 0), 3)
+        cv2.putText(canvas, detail, (max(x - 20, 6), max(y + h + 16, 30)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, COL_CAR, 1)
 
     if show_diff:
         for s in spots:
