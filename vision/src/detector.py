@@ -73,11 +73,13 @@ class DetectorParams:
     grid_tolerance: float = 0.18    # fraction of the spacing
     min_aligned: int = 3
 
-    orientation: str = "vertical"   # vertical | horizontal | auto
-    # Defaults verified against the real sandbox on 2026-10-05:
-    #   method=profile, orientation=vertical, band_threshold=0.05
-    # finds two rows at y 36..133 and y 197..390 with a consistent pitch of
-    # 46-47 px, matching the rows that were visually confirmed in the camera image.
+    orientation: str = "both"       # both | vertical | horizontal | auto
+    # Defaults verified against the real sandbox on 2026-10-05
+    # (method=profile, orientation=both, band_threshold=0.05): the upper row of 16
+    # bays, the tall lower band split into two stacked rows of 14 and 16, and the
+    # row of six sideways bays along the bottom that the vertical pass cannot see.
+    # Bay pitch measures 46-47 px in every row, and bay height 81-103 px once the
+    # stacked rows are separated (it read 93-189 while they were merged).
     # "segments" needs the same rows but reads the two edges of each white line as
     # two dividers, so it reports a bogus ~21 px pitch in the lower row, and on a
     # noisy frame it chains 1367 segments into 204 "dividers".
@@ -600,26 +602,47 @@ def detect_bays(frame: np.ndarray, params: Optional[DetectorParams] = None
     if frame is None or frame.size == 0:
         return DetectorResult(diagnostics={"error": "empty frame"})
 
+    # both: merge the two orientations. A real car park can have a row of bays
+    # whose dividers run the other way (this sandbox has six along the bottom), and
+    # "pick whichever found more" used to flip between runs on the same scene.
+    if p.orientation in ("both", "auto"):
+        vert = _run(frame, p, "vertical")
+        rot = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+        horiz = _run(rot, p, "vertical")
+        horiz.polygons = _rotate_back(horiz.polygons, frame.shape[0])
+        horiz.diagnostics["orientation"] = "horizontal"
+
+        merged = list(vert.polygons)
+        base = len(merged)
+        added = 0
+        for poly in horiz.polygons:
+            cand = np.asarray(poly, dtype=np.float32)
+            area = abs(cv2.contourArea(cand))
+            clash = False
+            for keep in merged:
+                inter, _ = cv2.intersectConvexConvex(cand, np.asarray(keep, dtype=np.float32))
+                if inter > 0 and area > 0 and inter / area > 0.3:
+                    clash = True
+                    break
+            if not clash:
+                merged.append(poly)
+                added += 1
+
+        vert.polygons = merged
+        vert.diagnostics["orientation"] = "both"
+        vert.diagnostics["merged_from"] = {
+            "vertical": base, "horizontal_found": horiz.count,
+            "horizontal_added": added, "horizontal_dropped": horiz.count - added,
+        }
+        return vert
+
     if p.orientation == "vertical":
         return _run(frame, p, "vertical")
-    if p.orientation == "horizontal":
-        rot = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-        res = _run(rot, p, "vertical")
-        res.polygons = _rotate_back(res.polygons, frame.shape[0])
-        res.diagnostics["orientation"] = "horizontal"
-        return res
-
-    # auto: run both orientations and keep whichever produced more candidates
-    vert = _run(frame, p, "vertical")
     rot = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-    horiz = _run(rot, p, "vertical")
-    horiz.polygons = _rotate_back(horiz.polygons, frame.shape[0])
-    horiz.diagnostics["orientation"] = "horizontal"
-    vert.diagnostics["auto_considered"] = {"vertical": vert.count,
-                                           "horizontal": horiz.count}
-    if horiz.count > vert.count:
-        return horiz
-    return vert
+    res = _run(rot, p, "vertical")
+    res.polygons = _rotate_back(res.polygons, frame.shape[0])
+    res.diagnostics["orientation"] = "horizontal"
+    return res
 
 
 def _run(frame: np.ndarray, p: DetectorParams, orientation: str) -> DetectorResult:
@@ -746,6 +769,53 @@ def _refine_x(energy: np.ndarray, x: float, y: int, search: int) -> float:
     return float(lo + int(np.argmax(row)))
 
 
+def _horizontal_energy(gray: np.ndarray) -> np.ndarray:
+    """|d/dy| - how much of a horizontal edge passes through each pixel."""
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    return np.abs(gy)
+
+
+def _split_bands(hy: np.ndarray, bands: List[Tuple[int, int]],
+                 min_height: int, min_gap: int = 3) -> List[Tuple[int, int]]:
+    """Split a band that holds two stacked rows of bays into two bands.
+
+    Two rows of bays share a horizontal line between them, which shows up as a
+    peak in the horizontal-edge energy inside the band. Without this, a band
+    spanning both (y 196..390 on the real sandbox) produces one box per column
+    that is twice as tall as a real bay and swallows the row boundary.
+    """
+    out: List[Tuple[int, int]] = []
+    for (a, b) in bands:
+        span = b - a + 1
+        seg = hy[a:b + 1]
+        if span < 2 * min_height or seg.size < 2:
+            out.append((a, b))
+            continue
+
+        sm = _smooth1d(seg.astype(np.float64), min_gap)
+        thr = sm.mean() + 0.5 * (sm.max() - sm.mean())
+        peaks = [i for i in range(1, len(sm) - 1)
+                 if sm[i] >= sm[i - 1] and sm[i] > sm[i + 1] and sm[i] > thr]
+
+        cuts: List[int] = []
+        for i in sorted(peaks):
+            if i < min_height or span - i < min_height:
+                continue                      # too close to an edge to be a divider
+            if cuts and i - cuts[-1] < min_height:
+                continue
+            cuts.append(i)
+        if not cuts:
+            out.append((a, b))
+            continue
+
+        prev = 0
+        for c in cuts + [span]:
+            if c - prev >= min_height:
+                out.append((a + prev, a + c - 1))
+            prev = c
+    return out
+
+
 def _detect_profile(frame: np.ndarray, p: DetectorParams) -> DetectorResult:
     h, w = frame.shape[:2]
     gray = _preprocess(frame, p)
@@ -754,6 +824,8 @@ def _detect_profile(frame: np.ndarray, p: DetectorParams) -> DetectorResult:
     # comes out as a blank camera frame and looks like a detection failure.
     edges = cv2.Canny(gray, p.canny_lo, p.canny_hi)
     bands = _find_bands(energy, p)
+    bands = _split_bands(_horizontal_energy(gray).mean(axis=1), bands,
+                         p.min_band_height)
     polys: List[List[List[float]]] = []
     rowinfo = []
     plot: List[Dict] = []

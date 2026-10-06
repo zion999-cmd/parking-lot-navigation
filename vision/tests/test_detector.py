@@ -48,6 +48,9 @@ def synth_lot(rows: int, bays: int, bay_w: int = 70, bay_h: int = 140,
 
 
 def detected_bays(img, **kw):
+    """Vertical by default: these layouts are vertically oriented, and the tests are
+    about detection accuracy, not about which orientation the tool picks."""
+    kw.setdefault("orientation", "vertical")
     return detect_bays(img, DetectorParams(**kw))
 
 
@@ -167,7 +170,7 @@ def test_horizontal_bays_are_found_too():
     img = synth_lot(rows=6, bays=2, bay_w=140, bay_h=70, x0=80, y0=60,
                     row_gap=0, width=600, height=900)
     rot = cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
-    res = detect_bays(rot, DetectorParams(orientation="auto"))
+    res = detect_bays(rot, DetectorParams(orientation="both"))
     assert res.count >= 6, f"horizontal bays not found: {res.count}"
 
 

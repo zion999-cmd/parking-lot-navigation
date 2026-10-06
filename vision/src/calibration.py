@@ -407,7 +407,7 @@ def main() -> int:
     ap.add_argument("--detect-method", default=DetectorParams.method,
                     choices=("profile", "segments"))
     ap.add_argument("--detect-orientation", default=DetectorParams.orientation,
-                    choices=("auto", "vertical", "horizontal"))
+                    choices=("both", "vertical", "horizontal", "auto"))
     ap.add_argument("--min-width", type=int, default=DetectorParams.min_width)
     ap.add_argument("--max-width", type=int, default=DetectorParams.max_width)
     ap.add_argument("--band-threshold", type=float, default=DetectorParams.band_threshold)

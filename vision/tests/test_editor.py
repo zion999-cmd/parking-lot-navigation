@@ -48,7 +48,7 @@ def editor() -> SpotEditor:
 def app_with(frame=None) -> CalibrationApp:
     ed = editor()
     app = CalibrationApp(ed, "/tmp/does-not-matter.json")
-    app.detector_params = DetectorParams()
+    app.detector_params = DetectorParams(orientation="vertical")
     app._frame = frame if frame is not None else lot_frame()
     return app
 
@@ -230,7 +230,7 @@ def test_generate_row_can_go_left():
 
 def test_auto_detect_adds_candidates():
     ed = editor()
-    report = ed.auto_detect(lot_frame(), DetectorParams())
+    report = ed.auto_detect(lot_frame(), DetectorParams(orientation="vertical"))
     assert report["found"] == 12, report
     assert report["added"] == 12, report
     assert len(ed.spots) == 12
@@ -245,7 +245,7 @@ def test_auto_detect_never_destroys_manual_work():
     ed._prepare(mine)
     ed.rename_selected("99")
     before = ed.spots[0].polygon.copy()
-    report = ed.auto_detect(lot_frame(), DetectorParams())
+    report = ed.auto_detect(lot_frame(), DetectorParams(orientation="vertical"))
     assert any(s.id == "99" for s in ed.spots), "the hand-made spot disappeared"
     kept = next(s for s in ed.spots if s.id == "99")
     assert np.allclose(kept.polygon, before), "the hand-made spot was modified"
@@ -257,7 +257,7 @@ def test_undo_reverses_a_whole_auto_detect():
     ed.add_at(400, 300)
     before = len(ed.spots)
     # the hand-made bay overlaps one synthetic bay, which auto detect must skip
-    report = ed.auto_detect(lot_frame(), DetectorParams())
+    report = ed.auto_detect(lot_frame(), DetectorParams(orientation="vertical"))
     assert len(ed.spots) == before + report["added"], (len(ed.spots), report)
     assert report["added"] >= 11, report
     assert ed.undo()
@@ -266,7 +266,7 @@ def test_undo_reverses_a_whole_auto_detect():
 
 def test_auto_detect_on_a_blank_frame_reports_and_survives():
     ed = editor()
-    report = ed.auto_detect(np.full((H, W, 3), 128, np.uint8), DetectorParams())
+    report = ed.auto_detect(np.full((H, W, 3), 128, np.uint8), DetectorParams(orientation="vertical"))
     assert report["found"] == 0
     assert ed.message.level == "warn"
     assert "hand" in ed.message.text or "generate" in ed.message.text
@@ -274,7 +274,7 @@ def test_auto_detect_on_a_blank_frame_reports_and_survives():
 
 def test_candidates_keep_the_inner_detection_polygon():
     ed = editor()
-    ed.auto_detect(lot_frame(), DetectorParams())
+    ed.auto_detect(lot_frame(), DetectorParams(orientation="vertical"))
     for s in ed.spots:
         assert s.inner_points is not None
         assert s.inner_area() > 0
@@ -403,7 +403,7 @@ def test_save_key_writes_the_file():
     with tempfile.TemporaryDirectory() as tmp:
         ed = editor()
         app = CalibrationApp(ed, os.path.join(tmp, "spots.json"))
-        app.detector_params = DetectorParams()
+        app.detector_params = DetectorParams(orientation="vertical")
         app._frame = lot_frame()
         app.act("a")
         app.act("s")
