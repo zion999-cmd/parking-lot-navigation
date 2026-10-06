@@ -42,8 +42,8 @@
   <span><i class="sw" style="background:#ff7a45;border-radius:50%"></i>红色主车（实心点=车头）</span>
   <span><i class="sw" style="background:none;border:2px solid #66d9ff"></i>目标车位</span>
   <span><i class="sw" style="background:none;border:2px solid #ff9f45"></i>你点的车位</span>
-  <span>👆 直接用鼠标点一个车位</span>
-  <button onclick="load()">重新加载</button>
+  <span>👆 点车位即规划，路线会跟着主车走</span>
+  <button onclick="reloadAll()">重新加载地图和状态</button>
 </div>
 
 <script>
@@ -69,6 +69,32 @@ const ctx = cv.getContext("2d");
 // the endpoint, which runs the same planner src/plan.py runs; this page still does not decide
 // anything - it asks and draws what comes back.
 let MAP = null, STATE = null, ROUTE = null, PICKED = null, HOVER = null;
+let LAST = null;            // where the hero was when the page last planned
+let busy = false;           // one request at a time, so a slow reply cannot pile up
+let polls = 0;
+
+// The map is 41.8 KB and never changes while you are driving, so it is not part of the fast
+// poll; the state is 3.8 KB and the route 0.5 KB. Reloading the map every 20 s keeps edit-and-
+// look working without spending the poll on it.
+const MAP_EVERY_POLLS = 40;      // 40 x 500 ms
+const POLL_MS = 500;             // main.py writes the state every 0.5 s; that is the cadence to match
+const REPLAN_MOVE_PX = 4;        // road nodes are tens of px apart, so this is smaller than a node
+const REPLAN_AFTER_MS = 1500;    // past a couple of state writes, so a bay taken meanwhile shows up
+
+// A plan is a snapshot of where the hero was; the hero keeps driving. Re-plan when the start has
+// moved enough to change the answer, or when enough time has passed for an occupancy to have
+// changed - someone may park in the bay you are driving to, and that has to turn into a refusal
+// rather than stay a stale yellow line.
+function shouldReplan(stateDoc, last, picked, now) {
+  if (picked == null) return false;
+  if (!last) return true;
+  if (now - last.at >= REPLAN_AFTER_MS) return true;
+  const v = stateDoc && stateDoc.vehicle;
+  if (!v || v.visible === false) return false;
+  if (typeof v.x !== "number" || typeof v.y !== "number") return false;
+  if (last.x == null || last.y == null) return true;       // it came back into view
+  return Math.hypot(v.x - last.x, v.y - last.y) >= REPLAN_MOVE_PX;
+}
 
 function redraw() { if (MAP) draw(MAP, STATE, ROUTE, PICKED, HOVER); }
 
@@ -219,10 +245,10 @@ function bayAt(x, y) {
   return (MAP?.spots ?? []).find(s => inside(s.polygon, x, y)) ?? null;
 }
 
-async function planSpot(id) {
+async function planSpot(id, quiet) {
   PICKED = String(id);
   const el = document.getElementById("result");
-  el.className = ""; el.textContent = `正在规划到 ${PICKED} 的路线…`;
+  if (!quiet) { el.className = ""; el.textContent = `正在规划到 ${PICKED} 的路线…`; }
   try {
     const r = await fetch(`/api/route?spot=${encodeURIComponent(PICKED)}&t=${Date.now()}`);
     ROUTE = await r.json();
@@ -230,8 +256,14 @@ async function planSpot(id) {
     ROUTE = { ok: false, code: "endpoint-unreachable", target_spot: PICKED,
               reason: `调用接口失败：${err}. 是不是没在跑 src/serve.py？`, nodes: [] };
   }
+  // Remember the start this plan was made from, so the next poll can tell whether it still fits.
+  const v = STATE && STATE.vehicle;
+  LAST = { x: (v && typeof v.x === "number") ? v.x : null,
+           y: (v && typeof v.y === "number") ? v.y : null,
+           at: Date.now() };
   redraw();
   say(ROUTE);
+  meta();
 }
 
 cv.addEventListener("click", evt => {
@@ -246,25 +278,62 @@ cv.addEventListener("mousemove", evt => {
   if (id !== HOVER) { HOVER = id; redraw(); }
 });
 
-async function load() {
-  const [mapDoc, stateDoc, routeDoc] = await Promise.all(
-    [getJSON(DOCS.map), getJSON(DOCS.state), getJSON(DOCS.route)]);
+async function loadMap() {
+  const mapDoc = await getJSON(DOCS.map);
   if (!mapDoc) {
+    document.getElementById("result").className = "";
     document.getElementById("result").textContent =
       "读不到 parking_map.json —— 先在 vision/ 目录下跑 src/emit_map.py 和 src/serve.py";
-    return;
+    return false;
   }
-  MAP = mapDoc; STATE = stateDoc; ROUTE = routeDoc ?? ROUTE;
-  redraw();
-  say(ROUTE);
-  const ts = t => t ? new Date(t * 1000).toLocaleTimeString() : "—";
-  document.getElementById("meta").textContent =
-    `state ${ts(STATE?.timestamp)}   route ${ts(ROUTE?.generated_at)}   `
-    + `点击车位即可规划（EMPTY 才有路线；OCCUPIED / UNKNOWN 会原样返回拒绝码）`;
+  MAP = mapDoc;
+  return true;
 }
 
-load();
-setInterval(load, 5000);      // the state moves; the route only changes when it is re-planned
+async function reloadAll() {
+  await loadMap();
+  STATE = await getJSON(DOCS.state) ?? STATE;
+  if (PICKED == null) ROUTE = await getJSON(DOCS.route) ?? ROUTE;
+  redraw(); say(ROUTE); meta();
+}
+
+function age(t) {                       // t is seconds; the page'\''s own clock, not the server'\''s
+  if (!t) return "—";
+  const s = Math.max(0, Date.now() / 1000 - t);
+  return s < 1.05 ? `${s.toFixed(1)} 秒前` : `${Math.round(s)} 秒前`;
+}
+
+function meta() {
+  const routeAge = LAST ? (Date.now() - LAST.at) / 1000 : null;
+  const shown = routeAge == null ? "尚未在本页规划"
+              : `重规划于 ${routeAge < 1.05 ? routeAge.toFixed(1) : Math.round(routeAge)} 秒前`;
+  document.getElementById("meta").textContent =
+    `state ${age(STATE?.timestamp)}   route ${shown}   `
+    + (PICKED == null
+        ? "点一个车位开始规划（EMPTY 才有路线；OCCUPIED / UNKNOWN 会原样返回拒绝码）"
+        : `跟随主车实时重规划中，目标 ${PICKED}（再点别的车位可换目标）`);
+}
+
+// The fast loop: the state, and a re-plan when it is warranted. Nothing else.
+async function poll() {
+  if (busy || !MAP) return;
+  busy = true;
+  try {
+    const stateDoc = await getJSON(DOCS.state);
+    if (stateDoc) STATE = stateDoc;
+    if (shouldReplan(STATE, LAST, PICKED, Date.now())) {
+      await planSpot(PICKED, true);                 // silent: the line should not flash at 2 Hz
+    } else if (PICKED == null) {
+      const routeDoc = await getJSON(DOCS.route);   // not following: show what plan.py last wrote
+      if (routeDoc) ROUTE = routeDoc;
+    }
+    if (++polls % MAP_EVERY_POLLS === 0) await loadMap();
+    redraw(); say(ROUTE); meta();
+  } finally { busy = false; }
+}
+
+reloadAll();
+setInterval(poll, POLL_MS);      // the state is 3.8 KB; the route is a 0.5 KB answer
 </script>
 </body>
 </html>

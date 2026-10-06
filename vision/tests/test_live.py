@@ -1,0 +1,231 @@
+"""The route follows the hero: a moving start, a target taken mid-drive, and the poll budget.
+
+The page re-plans by calling the same endpoint again with the same bay, so what makes "the route
+follows the car" true is not the page but this: the same call, a hero somewhere else, a different
+answer. That is what most of this file checks.
+
+The page's own decision - when a re-plan is warranted and when it is a waste - is JavaScript, so
+it is tested as JavaScript, by pulling the function out of the page that ships and running it in
+node. If node is not installed that one check steps aside rather than passing by default.
+
+Run:  python tests/test_live.py
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import statistics
+import subprocess
+import sys
+import tempfile
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(HERE, "..", "src"))
+
+import test_api as api                                          # noqa: E402  (the fixtures)
+
+PAGE = os.path.join(HERE, "..", "web", "index.html")
+MAP_BYTES, STATE_BYTES = 41785, 3774        # measured on the real documents, for the ratio below
+
+
+def get(base: str, spot: str) -> dict:
+    return api.get(f"{base}/api/route?spot={spot}")[1]
+
+
+def state_with_hero(x: float, y: float, states: dict, visible: bool = True) -> dict:
+    doc = api.a_state(states, visible=visible)
+    if visible:
+        doc["vehicle"].update({"x": x, "y": y})
+    return doc
+
+
+# ---------------------------------------------------------------------------
+# The same call, a hero somewhere else
+# ---------------------------------------------------------------------------
+
+def test_the_route_changes_when_the_hero_moves() -> None:
+    near, far = [None], [None]
+    for x, slot in ((10.0, near), (60.0, far)):  # 10 -> r1, 60 -> r2 (room, not a tie)
+        with api.a_server(api.a_map(),
+                          state_with_hero(x, 300.0, {"38": "EMPTY", "39": "EMPTY"})) as ctx:
+            base = ctx[0]
+            slot[0] = get(base, "39")
+    assert near[0]["ok"] and far[0]["ok"], (near[0], far[0])
+    assert near[0]["start_node"] != far[0]["start_node"], (near[0], far[0])
+    assert near[0]["nodes"] != far[0]["nodes"]
+    assert near[0]["distance"] != far[0]["distance"], (near[0]["distance"], far[0]["distance"])
+
+
+def test_the_start_is_always_where_the_hero_is_now() -> None:
+    """Not a cache: ask twice from two positions and each answer matches its own position."""
+    with api.a_server(api.a_map(), state_with_hero(10.0, 300.0, {"38": "EMPTY"})) as ctx:
+        base, _, _, state_path = ctx
+        first = get(base, "38")
+        with open(state_path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        doc["vehicle"]["x"] = 60.0                        # the hero drives; nobody re-runs anything
+        with open(state_path, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        second = get(base, "38")
+    assert first["start_node"] == "r1" and second["start_node"] == "r2", (first, second)
+    assert first["generated_at"] <= second["generated_at"]
+
+
+def test_the_route_to_the_same_bay_shortens_as_the_hero_approaches() -> None:
+    distances = []
+    for x in (10.0, 60.0, 210.0):   # 210 -> r3 (room on both sides)
+        with api.a_server(api.a_map(), state_with_hero(x, 300.0, {"39": "EMPTY"})) as ctx:
+            base = ctx[0]
+            distances.append(get(base, "39")["distance"])
+    assert distances == sorted(distances, reverse=True), distances
+
+
+def test_a_bay_taken_while_driving_turns_into_a_refusal() -> None:
+    """The safety net: the page re-plans on a timer, so this arrives without anyone clicking."""
+    with api.a_server(api.a_map(), state_with_hero(10.0, 300.0, {"38": "EMPTY"})) as ctx:
+        base, _, _, state_path = ctx
+        assert get(base, "38")["ok"] is True
+        with open(state_path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        doc["spots"]["38"]["state"] = "OCCUPIED"
+        with open(state_path, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        refused = get(base, "38")
+    assert refused["ok"] is False and refused["code"] == "spot-not-free", refused
+
+
+def test_a_hero_leaving_the_frame_turns_into_a_refusal() -> None:
+    with api.a_server(api.a_map(), state_with_hero(10.0, 300.0, {"38": "EMPTY"})) as ctx:
+        base, _, _, state_path = ctx
+        assert get(base, "38")["ok"] is True
+        with open(state_path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        doc["vehicle"]["visible"] = False
+        with open(state_path, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        refused = get(base, "38")
+    assert refused["code"] == "hero-not-visible", refused
+
+
+# ---------------------------------------------------------------------------
+# Can the page afford to poll this fast?
+# ---------------------------------------------------------------------------
+
+def test_a_plan_answers_fast_enough_to_be_asked_twice_a_second() -> None:
+    times = []
+    with api.a_server(api.a_map(), state_with_hero(10.0, 300.0, {"38": "EMPTY"})) as ctx:
+        base = ctx[0]
+        for _ in range(20):
+            t0 = time.perf_counter()
+            get(base, "38")
+            times.append((time.perf_counter() - t0) * 1000)
+    avg = statistics.mean(times)
+    p95 = sorted(times)[int(len(times) * 0.95) - 1]
+    print(f"        plan {avg:.1f} ms average, p95 {p95:.1f} ms, worst {max(times):.1f} ms")
+    assert avg < 60, f"a 500 ms poll with a {avg:.0f} ms answer leaves no room: {times}"
+
+
+def test_the_polled_documents_are_much_smaller_than_the_map() -> None:
+    """Why the page can poll at 2 Hz: the map is not in the poll.
+
+    The map is 41.8 KB and never changes while driving; the state is 3.8 KB. If the state ever
+    grows towards the map, the poll becomes the wrong design and this check says so.
+    """
+    ratio = MAP_BYTES / STATE_BYTES
+    assert ratio > 5, f"the state is only {ratio:.1f}x smaller than the map"
+    print(f"        map {MAP_BYTES} B / state {STATE_BYTES} B = {ratio:.1f}x less per poll")
+
+
+def test_the_page_polls_the_state_but_not_the_map() -> None:
+    """Reads the shipped page: the 500 ms loop must not fetch the map."""
+    html = open(PAGE, encoding="utf-8").read()
+    loop = html[html.index("async function poll()"):html.index("reloadAll();")]
+    assert "DOCS.state" in loop, loop
+    assert "DOCS.map" not in loop, "the map is back in the fast loop"
+    assert "POLL_MS = 500" in html, "the poll cadence moved"
+
+
+# ---------------------------------------------------------------------------
+# The page's own decision, as JavaScript
+# ---------------------------------------------------------------------------
+
+def extract_function(html: str, name: str) -> str:
+    start = html.index(f"function {name}(")
+    depth, i = 0, html.index("{", start)
+    for j in range(i, len(html)):
+        if html[j] == "{":
+            depth += 1
+        elif html[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return html[start:j + 1]
+    raise AssertionError("unbalanced braces")
+
+
+def test_the_replan_gate_follows_the_car_without_hammering_the_api() -> None:
+    if not shutil.which("node"):
+        print("        (node not installed - skipped, not passed)")
+        return
+    html = open(PAGE, encoding="utf-8").read()
+    source = extract_function(html, "shouldReplan")
+    consts = "\n".join(re.findall(
+        r"^const (?:MAP_EVERY_POLLS|POLL_MS|REPLAN_MOVE_PX|REPLAN_AFTER_MS) = .*$", html, re.M))
+    assert consts.count("const") == 4, consts
+    cases = [
+        # picked, last(x, y, at), hero(x, y, visible), now, expected, why
+        (None, None, (10, 300, True), 1000, False, "no target"),
+        ("38", None, (10, 300, True), 1000, True, "first plan"),
+        ("38", (10, 300, 0), (10, 300, True), 200, False, "nothing moved yet"),
+        ("38", (10, 300, 0), (13, 300, True), 200, False, "3 px is not worth a plan"),
+        ("38", (10, 300, 0), (14, 300, True), 200, True, "4 px is"),
+        ("38", (10, 300, 0), (50, 340, True), 200, True, "normal driving between polls"),
+        ("38", (10, 300, 0), (10, 300, True), 1600, True, "the timer, in case a bay filled"),
+        ("38", (10, 300, 0), (10, 300, False), 200, False, "hidden, not yet time"),
+        ("38", (10, 300, 0), (10, 300, False), 1600, True, "hidden and time is up"),
+        ("38", (None, None, 0), (10, 300, True), 200, True, "the hero came back into view"),
+        ("38", (10, 300, 0), (None, None, True), 200, False, "no position to compare"),
+    ]
+    js_cases = [{"picked": c[0],
+                 "last": None if c[1] is None else {"x": c[1][0], "y": c[1][1], "at": c[1][2]},
+                 "state": {"vehicle": {"x": c[2][0], "y": c[2][1], "visible": c[2][2]}},
+                 "now": c[3]} for c in cases]
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:
+        fh.write(consts + "\n" + source + "\nconst cs = JSON.parse(process.argv[2]);\n"
+                          "console.log(JSON.stringify(cs.map(c => "
+                          "shouldReplan(c.state, c.last, c.picked, c.now))));\n")
+        path = fh.name
+    try:
+        out = subprocess.run(["node", path, json.dumps(js_cases)],
+                             capture_output=True, text=True, timeout=30)
+    finally:
+        os.unlink(path)
+    assert out.returncode == 0, out.stderr
+    got = json.loads(out.stdout)
+    wrong = [(c[5], g, c[4]) for c, g in zip(cases, got) if g is not c[4]]
+    assert not wrong, "the shipped page disagrees: " + "; ".join(
+        f"{why}: got {g}, wanted {w}" for why, g, w in wrong)
+
+
+def main() -> int:
+    tests = [(n, f) for n, f in sorted(globals().items())
+             if n.startswith("test_") and callable(f)]
+    failures = 0
+    for name, fn in tests:
+        try:
+            fn()
+        except Exception as exc:                     # noqa: BLE001
+            failures += 1
+            print(f"  FAIL  {name}: {type(exc).__name__}: {exc}")
+        else:
+            print(f"  ok    {name}")
+    print(f"\n{len(tests)} checks, {failures} failures")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
