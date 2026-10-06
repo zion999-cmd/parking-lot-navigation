@@ -198,13 +198,34 @@ def reference_audit(ref: np.ndarray, live: np.ndarray, spots: List[Spot],
     print("  --------------------------------------------------------------------")
 
 
-def capture_reference(frame: np.ndarray, path: str) -> None:
+def capture_reference(frame: np.ndarray, path: str) -> bool:
+    """Write the empty-bay reference, atomically.
+
+    cv2.imwrite truncates the file it is given and then writes into it, so any process
+    reading that path at the wrong moment gets half a JPEG. That is not hypothetical: it
+    happened while diagnosing this, and a torn reference frame makes every bay report a
+    difference against garbage. Writing beside the target and moving it into place costs
+    nothing and removes the window entirely - which matters twice over here, because
+    tools that inspect the reference (this viewer in another terminal, tests, an
+    experiment script) routinely run while a capture is in progress.
+
+    imwrite also returns False on failure instead of raising, which used to be ignored
+    and printed "captured" regardless.
+    """
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    cv2.imwrite(path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+    tmp = os.path.splitext(path)[0] + ".writing.jpg"   # the extension picks the encoder
+    if not cv2.imwrite(tmp, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 92]):
+        print(f"  ERROR: could not write {tmp}", file=sys.stderr)
+        print("  the previous reference is untouched", file=sys.stderr)
+        return False
+    os.replace(tmp, path)
+
     print(f"  reference captured -> {path}")
     print("  every bay must be EMPTY in this frame: whatever is parked here now becomes")
     print("  a permanent 'occupied', because its absence is what the detector would see.")
     print(f"  frame diagnostics: {OccupancyDetector.describe(frame)}")
+    print("  press t for a reference audit if any bay still reads occupied")
+    return True
 
 
 def bay_pitch_of(spots: List[Spot]) -> Optional[float]:
