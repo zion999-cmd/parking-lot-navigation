@@ -41,6 +41,8 @@
   <span><i class="sw" style="background:#ffd166"></i>规划路线</span>
   <span><i class="sw" style="background:#ff7a45;border-radius:50%"></i>红色主车（实心点=车头）</span>
   <span><i class="sw" style="background:none;border:2px solid #66d9ff"></i>目标车位</span>
+  <span><i class="sw" style="background:none;border:2px solid #ff9f45"></i>你点的车位</span>
+  <span>👆 直接用鼠标点一个车位</span>
   <button onclick="load()">重新加载</button>
 </div>
 
@@ -63,13 +65,20 @@ async function getJSON(url) {
 const cv = document.getElementById("map");
 const ctx = cv.getContext("2d");
 
+// The three documents as last loaded, plus the bay the user last clicked. Clicking a bay calls
+// the endpoint, which runs the same planner src/plan.py runs; this page still does not decide
+// anything - it asks and draws what comes back.
+let MAP = null, STATE = null, ROUTE = null, PICKED = null, HOVER = null;
+
+function redraw() { if (MAP) draw(MAP, STATE, ROUTE, PICKED, HOVER); }
+
 function spotColours(state) {
   if (state === "OCCUPIED") return { fill: "rgba(140,47,47,.55)", line: "#ff6b6b" };
   if (state === "EMPTY")    return { fill: "rgba(31,122,68,.45)", line: "#37d67a" };
   return { fill: "rgba(74,79,87,.35)", line: "#6b7280" };   // UNKNOWN
 }
 
-function draw(mapDoc, stateDoc, routeDoc) {
+function draw(mapDoc, stateDoc, routeDoc, picked, hover) {
   ctx.clearRect(0, 0, cv.width, cv.height);
   const nodes = {};
   for (const n of (mapDoc.road_network?.nodes ?? [])) nodes[n.id] = n;
@@ -125,6 +134,18 @@ function draw(mapDoc, stateDoc, routeDoc) {
     }
   }
 
+  // the bay under the pointer, and the one that was clicked - the latter matters when the
+  // route was refused, because then there is no route to point at it
+  for (const [id, colour, width] of [[hover, "rgba(255,255,255,.75)", 2],
+                                     [picked, "#ff9f45", 3]]) {
+    if (id == null) continue;
+    const s = (mapDoc.spots ?? []).find(x => String(x.id) === String(id));
+    if (!s) continue;
+    ctx.beginPath();
+    s.polygon.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+    ctx.closePath(); ctx.strokeStyle = colour; ctx.lineWidth = width; ctx.stroke();
+  }
+
   // the target bay
   const target = (mapDoc.spots ?? []).find(s => String(s.id) === String(routeDoc?.target_spot));
   if (target) {
@@ -177,20 +198,69 @@ function say(routeDoc) {
   }
 }
 
+// --- clicking a bay ---------------------------------------------------------
+
+function canvasPoint(evt) {                     // the canvas is scaled by CSS, so convert
+  const r = cv.getBoundingClientRect();
+  return { x: (evt.clientX - r.left) * cv.width / r.width,
+           y: (evt.clientY - r.top) * cv.height / r.height };
+}
+
+function inside(polygon, x, y) {                // ray casting
+  let hit = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const [xi, yi] = polygon[i], [xj, yj] = polygon[j];
+    if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) hit = !hit;
+  }
+  return hit;
+}
+
+function bayAt(x, y) {
+  return (MAP?.spots ?? []).find(s => inside(s.polygon, x, y)) ?? null;
+}
+
+async function planSpot(id) {
+  PICKED = String(id);
+  const el = document.getElementById("result");
+  el.className = ""; el.textContent = `正在规划到 ${PICKED} 的路线…`;
+  try {
+    const r = await fetch(`/api/route?spot=${encodeURIComponent(PICKED)}&t=${Date.now()}`);
+    ROUTE = await r.json();
+  } catch (err) {                    // the endpoint being down is not a planner refusal
+    ROUTE = { ok: false, code: "endpoint-unreachable", target_spot: PICKED,
+              reason: `调用接口失败：${err}. 是不是没在跑 src/serve.py？`, nodes: [] };
+  }
+  redraw();
+  say(ROUTE);
+}
+
+cv.addEventListener("click", evt => {
+  const p = canvasPoint(evt), s = bayAt(p.x, p.y);
+  if (s) planSpot(s.id);
+});
+
+cv.addEventListener("mousemove", evt => {
+  const p = canvasPoint(evt), s = bayAt(p.x, p.y);
+  cv.style.cursor = s ? "pointer" : "default";
+  const id = s ? String(s.id) : null;
+  if (id !== HOVER) { HOVER = id; redraw(); }
+});
+
 async function load() {
   const [mapDoc, stateDoc, routeDoc] = await Promise.all(
     [getJSON(DOCS.map), getJSON(DOCS.state), getJSON(DOCS.route)]);
   if (!mapDoc) {
     document.getElementById("result").textContent =
-      "读不到 parking_map.json —— 先在 vision/ 目录下跑 src/emit_map.py 和 python3 -m http.server 8010";
+      "读不到 parking_map.json —— 先在 vision/ 目录下跑 src/emit_map.py 和 src/serve.py";
     return;
   }
-  draw(mapDoc, stateDoc, routeDoc);
-  say(routeDoc);
+  MAP = mapDoc; STATE = stateDoc; ROUTE = routeDoc ?? ROUTE;
+  redraw();
+  say(ROUTE);
   const ts = t => t ? new Date(t * 1000).toLocaleTimeString() : "—";
   document.getElementById("meta").textContent =
-    `state ${ts(stateDoc?.timestamp)}   route ${ts(routeDoc?.generated_at)}   `
-    + `（刷新的只是页面，重新规划要再跑一次 src/plan.py）`;
+    `state ${ts(STATE?.timestamp)}   route ${ts(ROUTE?.generated_at)}   `
+    + `点击车位即可规划（EMPTY 才有路线；OCCUPIED / UNKNOWN 会原样返回拒绝码）`;
 }
 
 load();
