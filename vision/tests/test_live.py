@@ -269,6 +269,58 @@ def test_a_refused_or_unknown_node_route_draws_nothing_broken() -> None:
         assert res["points"] == want and res["carLeg"] is False, (route, res)
 
 
+def test_the_page_follows_the_route_document_however_it_was_written() -> None:
+    """The optimization reported: re-planning (from src/plan.py, or anywhere else) left the page
+    showing the route it had planned itself, because the file was only read while no bay had been
+    clicked. A route is a document like the state; whoever writes it, the page shows it.
+
+    adoptsRoute(shown, fromFile) is the shipped decision, run here in node.
+    """
+    a = {"target_spot": "10", "ok": True, "code": "ok", "start_node": "r29", "target_node": "r8",
+         "nodes": ["r29", "r8"], "distance": 896.1}
+    cases = [
+        (a, dict(a), False, "the same route, written again"),
+        (a, None, False, "nothing in the file"),
+        (None, a, True, "the page has nothing and the file has a route"),
+        (a, {**a, "target_spot": "11"}, True, "a different bay was planned"),
+        (a, {**a, "nodes": ["r29", "r30", "r8"]}, True, "the same bay, a different path"),
+        (a, {**a, "distance": 900.0}, True, "the same path, a new length"),
+        (a, {**a, "ok": False, "code": "spot-not-free", "nodes": [], "distance": None},
+         True, "the bay was taken while driving"),
+        (a, {**a, "start_node": "r28", "nodes": ["r28", "r8"]}, True, "the car moved"),
+    ]
+    payload = [{"shown": shown, "file": from_file} for shown, from_file, _, _ in cases]
+    got = node_eval(["adoptsRoute", "routeSignature"],
+                    "adoptsRoute(c.shown, c.file)", payload, constants=False)
+    wrong = [(why, g, want) for (_, _, want, why), g in zip(cases, got) if g is not want]
+    assert not wrong, "; ".join(f"{why}: got {g}, wanted {w}" for why, g, w in wrong)
+
+
+def test_the_map_is_not_reloaded_in_a_loop_when_the_route_is_the_stale_half() -> None:
+    """A different kind of bug from a wrong answer: if the route file is the stale thing, a page
+    that reloads the 42 KB map whenever a node is missing would do it twice a second forever."""
+    html = open(PAGE, encoding="utf-8").read()
+    loop = html[html.index("async function poll()"):html.index("reloadAll();")]
+    assert "mapTriedFor" in loop and "sig !== mapTriedFor" in loop, loop
+
+
+def test_the_page_notices_when_a_route_names_a_node_the_map_no_longer_has() -> None:
+    """Re-drawing the roads and re-emitting the map can leave the drawn route pointing at node ids
+    that are gone. Dropping them silently made the line quietly shorter; the page needs to know so
+    it can reload the map."""
+    cases = [
+        (["r1", "r2"], {"r1": {"x": 0, "y": 0}, "r2": {"x": 10, "y": 0}}, 0),
+        (["r1", "gone", "r2"], {"r1": {"x": 0, "y": 0}, "r2": {"x": 10, "y": 0}}, 1),
+        (["gone", "also-gone"], {"r1": {"x": 0, "y": 0}}, 2),
+    ]
+    got = node_eval(["routePolyline"],
+                    "routePolyline({}, {ok: true, nodes: c.ids}, c.nodes)",
+                    [{"ids": ids, "nodes": nodes} for ids, nodes, _ in cases], constants=False)
+    for (ids, _, want), res in zip(cases, got):
+        assert res["unknown"] == want, (ids, res)
+        assert len(res["points"]) == len(ids) - want, (ids, res)
+
+
 def main() -> int:
     tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith("test_") and callable(f)]

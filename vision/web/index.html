@@ -69,6 +69,9 @@ const ctx = cv.getContext("2d");
 // the endpoint, which runs the same planner src/plan.py runs; this page still does not decide
 // anything - it asks and draws what comes back.
 let MAP = null, STATE = null, ROUTE = null, PICKED = null, HOVER = null;
+let NODES = {};             // the map's nodes by id, rebuilt whenever the map is reloaded
+let planSeq = 0;            // so a slow answer for an old target cannot overwrite a newer one
+let mapTriedFor = "";      // the broken route we already reloaded the map for, so it happens once
 let LAST = null;            // where the hero was when the page last planned
 let busy = false;           // one request at a time, so a slow reply cannot pile up
 let polls = 0;
@@ -91,12 +94,14 @@ const REPLAN_AFTER_MS = 1500;    // past a couple of state writes, so a bay take
 // first says what is true: the car drives there, and the planned route begins after that.
 function routePolyline(stateDoc, routeDoc, nodes) {
   const ids = (routeDoc && routeDoc.ok && routeDoc.nodes) || [];
-  const points = ids.map(id => nodes[id]).filter(Boolean).map(n => [n.x, n.y]);
-  if (!points.length) return { points: [], carLeg: false };
+  const known = ids.filter(id => nodes[id]);
+  const unknown = ids.length - known.length;      // the map moved under us if this is not zero
+  const points = known.map(id => [nodes[id].x, nodes[id].y]);
+  if (!points.length) return { points: [], carLeg: false, unknown: unknown };
   const v = stateDoc && stateDoc.vehicle;
   if (v && v.visible !== false && typeof v.x === "number" && typeof v.y === "number")
-    return { points: [[v.x, v.y], ...points], carLeg: true };
-  return { points: points, carLeg: false };
+    return { points: [[v.x, v.y], ...points], carLeg: true, unknown: unknown };
+  return { points: points, carLeg: false, unknown: unknown };
 }
 
 function shouldReplan(stateDoc, last, picked, now) {
@@ -112,6 +117,20 @@ function shouldReplan(stateDoc, last, picked, now) {
 
 function redraw() { if (MAP) draw(MAP, STATE, ROUTE, PICKED, HOVER); }
 
+// The route is a document like the state: src/plan.py writes it, the endpoint writes the same
+// file, and the page follows it. Without this the page only ever showed a route it had planned
+// itself, so re-running the planner, or planning from anywhere else, changed nothing on screen.
+function routeSignature(doc) {
+  if (!doc) return "";
+  return JSON.stringify([doc.target_spot ?? null, doc.ok ?? null, doc.code ?? null,
+                         doc.start_node ?? null, doc.target_node ?? null,
+                         doc.nodes ?? [], doc.distance ?? null]);
+}
+
+function adoptsRoute(shown, fromFile) {
+  return !!fromFile && routeSignature(shown) !== routeSignature(fromFile);
+}
+
 function spotColours(state) {
   if (state === "OCCUPIED") return { fill: "rgba(140,47,47,.55)", line: "#ff6b6b" };
   if (state === "EMPTY")    return { fill: "rgba(31,122,68,.45)", line: "#37d67a" };
@@ -119,9 +138,8 @@ function spotColours(state) {
 }
 
 function draw(mapDoc, stateDoc, routeDoc, picked, hover) {
+  const nodes = NODES;                      // built once per map load, in loadMap()
   ctx.clearRect(0, 0, cv.width, cv.height);
-  const nodes = {};
-  for (const n of (mapDoc.road_network?.nodes ?? [])) nodes[n.id] = n;
   const edges = mapDoc.road_network?.edges ?? [];
   const states = stateDoc?.spots ?? {};
 
@@ -271,21 +289,21 @@ function bayAt(x, y) {
 }
 
 async function planSpot(id, quiet) {
+  const mine = ++planSeq;
   PICKED = String(id);
   const el = document.getElementById("result");
   if (!quiet) { el.className = ""; el.textContent = `正在规划到 ${PICKED} 的路线…`; }
+  let doc = null;
   try {
     const r = await fetch(`/api/route?spot=${encodeURIComponent(PICKED)}&t=${Date.now()}`);
-    ROUTE = await r.json();
+    doc = await r.json();
   } catch (err) {                    // the endpoint being down is not a planner refusal
-    ROUTE = { ok: false, code: "endpoint-unreachable", target_spot: PICKED,
-              reason: `调用接口失败：${err}. 是不是没在跑 src/serve.py？`, nodes: [] };
+    doc = { ok: false, code: "endpoint-unreachable", target_spot: PICKED,
+            reason: `调用接口失败：${err}. 是不是没在跑 src/serve.py？`, nodes: [] };
   }
-  // Remember the start this plan was made from, so the next poll can tell whether it still fits.
-  const v = STATE && STATE.vehicle;
-  LAST = { x: (v && typeof v.x === "number") ? v.x : null,
-           y: (v && typeof v.y === "number") ? v.y : null,
-           at: Date.now() };
+  if (mine !== planSeq) return;          // a newer plan was asked for; this answer is history
+  ROUTE = doc;
+  LAST = heroAsLast();   // so the next poll can tell whether this plan still fits
   redraw();
   say(ROUTE);
   meta();
@@ -312,6 +330,8 @@ async function loadMap() {
     return false;
   }
   MAP = mapDoc;
+  NODES = {};
+  for (const n of mapDoc.road_network?.nodes ?? []) NODES[n.id] = n;
   return true;
 }
 
@@ -320,6 +340,13 @@ async function reloadAll() {
   STATE = await getJSON(DOCS.state) ?? STATE;
   if (PICKED == null) ROUTE = await getJSON(DOCS.route) ?? ROUTE;
   redraw(); say(ROUTE); meta();
+}
+
+function heroAsLast() {                 // the start a plan was made from, for the next poll
+  const v = STATE && STATE.vehicle;
+  return { x: (v && typeof v.x === "number") ? v.x : null,
+           y: (v && typeof v.y === "number") ? v.y : null,
+           at: Date.now() };
 }
 
 function age(t) {                       // t is seconds; the page'\''s own clock, not the server'\''s
@@ -346,13 +373,25 @@ async function poll() {
   try {
     const stateDoc = await getJSON(DOCS.state);
     if (stateDoc) STATE = stateDoc;
+    const planned = await getJSON(DOCS.route);      // whoever wrote it, this is the route now
+    if (adoptsRoute(ROUTE, planned)) {
+      ROUTE = planned;
+      if (planned.target_spot != null && String(planned.target_spot) !== PICKED) {
+        PICKED = String(planned.target_spot);       // follow the target someone else set
+      }
+      LAST = heroAsLast();                          // it was planned from an older state
+    }
     if (shouldReplan(STATE, LAST, PICKED, Date.now())) {
       await planSpot(PICKED, true);                 // silent: the line should not flash at 2 Hz
-    } else if (PICKED == null) {
-      const routeDoc = await getJSON(DOCS.route);   // not following: show what plan.py last wrote
-      if (routeDoc) ROUTE = routeDoc;
     }
-    if (++polls % MAP_EVERY_POLLS === 0) await loadMap();
+    if (ROUTE && (ROUTE.nodes ?? []).some(id => !NODES[id])) {
+      // The map moved under us. Reload it once per distinct route: if the route file is the stale
+      // thing rather than the map, retrying every poll would fetch 42 KB twice a second forever.
+      const sig = routeSignature(ROUTE);
+      if (sig !== mapTriedFor) { mapTriedFor = sig; await loadMap(); }
+    } else if (++polls % MAP_EVERY_POLLS === 0) {
+      await loadMap();
+    }
     redraw(); say(ROUTE); meta();
   } finally { busy = false; }
 }
