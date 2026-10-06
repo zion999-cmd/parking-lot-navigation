@@ -13,6 +13,8 @@ Window keys
     [ / ]  raise / lower the per-pixel threshold by 5
     p      print the current numbers
     s      save an annotated snapshot to data/debug/
+    e      edit mode: correct the calibration on the live view
+           (same keys as src/calibration.py; s saves, q/ESC returns here)
     q/ESC  quit
 
 Headless mode prints one line per second and, with --csv, records every frame as
@@ -27,6 +29,7 @@ import argparse
 import csv
 import json
 import os
+import shutil
 import sys
 import time
 from typing import Dict, List, Optional
@@ -37,10 +40,13 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from alignment import Aligner                                    # noqa: E402
+from calibration import CalibrationApp                           # noqa: E402
 from camera import CameraError, open_camera                      # noqa: E402
+from detector import DetectorParams                              # noqa: E402
 from occupancy import (EMPTY, OCCUPIED, OccupancyDetector,        # noqa: E402
                        OccupancyParams, SpotResult)
 from spot_config import Spot, SpotConfigError, load_spots         # noqa: E402
+from spot_editor import SpotEditor                                # noqa: E402
 
 WINDOW = "ESP32 Camera - parking occupancy"
 
@@ -121,12 +127,112 @@ def capture_reference(frame: np.ndarray, path: str) -> None:
     print(f"  frame diagnostics: {OccupancyDetector.describe(frame)}")
 
 
+def bay_pitch_of(spots: List[Spot]) -> Optional[float]:
+    """A bay's shorter side: the natural scale for "is this shift close to one bay?"""
+    widths = []
+    for sp in spots:
+        pts = np.asarray(sp.polygon, dtype=np.float64)
+        widths.append(min(np.linalg.norm(pts[1] - pts[0]),
+                          np.linalg.norm(pts[3] - pts[0])))
+    return float(np.median(widths)) if widths else None
+
+
+def run_edit_mode(get_frame, config_path: str, template_path: Optional[str],
+                  frame_shape, align_motion: str) -> Optional[int]:
+    """Hand the window to the calibration editor until the user leaves it.
+
+    spot_editor.SpotEditor holds the state and calibration.CalibrationApp adds the
+    window, mouse and key handling, so every key behaves exactly as in
+    src/calibration.py: drag a corner or a bay body, 2/4/6/8 nudge, Tab cycle, n add,
+    d delete, g/G generate a row, a auto detect, z undo, A align, s save.
+
+    Running it from here is the point: the misalignment is visible on screen, and the
+    standalone tool has to be told which frame and which config you mean.
+
+    Returns the number of spots after editing, or None if the editor never started.
+    """
+    # The editor writes the config with 's', so keep the version before this session.
+    if os.path.exists(config_path):
+        backup = config_path + ".bak"
+        shutil.copyfile(config_path, backup)
+        print(f"  backup: {backup}")
+
+    if template_path is None:
+        guess = os.path.join(ROOT, "data", "debug", "frame.jpg")
+        template_path = guess if os.path.exists(guess) else None
+    template = cv2.imread(template_path, cv2.IMREAD_COLOR) if template_path else None
+
+    editor = SpotEditor(frame_shape)
+    if not editor.load(config_path):
+        print(f"  error: could not load {config_path}", file=sys.stderr)
+        return None
+
+    app = CalibrationApp(editor, config_path, template=template,
+                         align_motion=align_motion)
+    # act() reaches for this the moment 'a' (auto detect) is pressed; calibration.py
+    # sets it in its own run().
+    app.detector_params = DetectorParams()
+
+    print("  ---------- edit mode ----------------------------------------------")
+    print("  left drag a corner or a body to move a bay, right click snaps to an edge")
+    print("  2/4/6/8 nudge 5 px    Tab cycle    n add    d delete    z undo    c clear")
+    print("  g / G generate a row right / left from the selected bay")
+    print("  a auto detect (an assistant - the human's confirmation is the truth)")
+    print("  i inner scale    v inner    l line overlay    A align to the template")
+    print("  s save to the config file        q / ESC back to detection")
+    print("  ------------------------------------------------------------------")
+
+    cv2.namedWindow(WINDOW, cv2.WINDOW_AUTOSIZE)
+    cv2.setMouseCallback(WINDOW, app.on_mouse)
+
+    frame = None
+    while True:
+        fresh = get_frame()
+        if fresh is not None:
+            frame = fresh
+        if frame is None:
+            if (cv2.waitKey(30) & 0xFF) == 27:
+                break
+            continue
+        app._frame = frame
+
+        # Terminal prompts must run with the window gone; same pattern as calibration.py.
+        while app._pending_prompt is not None:
+            cv2.destroyAllWindows()
+            app.prompt()
+            cv2.namedWindow(WINDOW, cv2.WINDOW_AUTOSIZE)
+            cv2.setMouseCallback(WINDOW, app.on_mouse)
+
+        cv2.imshow(WINDOW, app.render(frame))
+        key = cv2.waitKey(20) & 0xFF
+        if key == 255:
+            continue
+        if not app.act(chr(key)):
+            break
+
+    cv2.destroyAllWindows()
+    # Same behaviour as the standalone tool: leaving with unsaved edits writes them.
+    # The previous version is already sitting next to it as <config>.bak.
+    if editor.dirty:
+        if editor.save(config_path):
+            print(f"  saved {config_path}")
+            print(f"  previous version kept at {config_path}.bak")
+        else:
+            print(f"  error: could not write {config_path}", file=sys.stderr)
+    else:
+        print("  config unchanged")
+    return len(editor.spots)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Fixed-ROI parking occupancy (PoC).")
     ap.add_argument("--source", default="http://192.168.3.118/stream")
     ap.add_argument("--backend", default="auto", choices=("auto", "opencv", "mjpeg"))
     ap.add_argument("--config", default=os.path.join(ROOT, "config", "parking_spots.json"))
     ap.add_argument("--reference", default=os.path.join(ROOT, "data", "reference", "reference.jpg"))
+    ap.add_argument("--template", metavar="IMAGE",
+                    help="the frame the bays were drawn on, used by 'A' in edit mode; "
+                         "defaults to data/debug/frame.jpg when that file exists")
     ap.add_argument("--no-reference", action="store_true",
                     help="start without a reference (capture one with 'r')")
     ap.add_argument("--changed-ratio", type=float, default=0.15,
@@ -199,12 +305,7 @@ def main() -> int:
     if have_reference and args.align != "off":
         # A bay's width is the natural scale for the "is this shift suspiciously
         # close to one bay" check, so it comes from the calibration itself.
-        widths = []
-        for sp in spots:
-            pts = np.asarray(sp.polygon, dtype=np.float64)
-            widths.append(min(np.linalg.norm(pts[1] - pts[0]),
-                              np.linalg.norm(pts[3] - pts[0])))
-        pitch = float(np.median(widths)) if widths else None
+        pitch = bay_pitch_of(spots)
         aligner = Aligner(detector_ref_frame, motion=args.align,
                           min_correlation=args.align_min_corr, bay_pitch=pitch)
         print(f"alignment: on, model {args.align}, working at "
@@ -399,6 +500,29 @@ def main() -> int:
                     capture_reference(frame, args.reference)
                     detector.set_reference(frame, spots)
                     have_reference = True
+                elif key == ord('e'):
+                    # Correct the calibration without leaving the viewer: the offset is
+                    # plainly visible here, which is the whole point.
+                    get_frame = (lambda: still_frame) if use_still else cam.read
+                    shape = run_edit_mode(get_frame, args.config, args.template,
+                                          frame.shape[:2], args.align)
+                    if shape is None:
+                        continue
+                    try:
+                        spots = load_spots(args.config, frame.shape[:2])
+                    except SpotConfigError as exc:
+                        print(f"  error reloading {args.config}: {exc}", file=sys.stderr)
+                        continue
+                    if have_reference:
+                        detector.set_reference(cv2.imread(args.reference), spots)
+                        if args.align != "off":
+                            aligner = Aligner(detector_ref_frame, motion=args.align,
+                                              min_correlation=args.align_min_corr,
+                                              bay_pitch=bay_pitch_of(spots))
+                    print(f"  edit mode finished: {len(spots)} spot(s) now in use")
+                    if have_reference:
+                        print("  if the camera itself moved, press r to capture a new "
+                              "empty reference - the current one is from the old view")
                 elif key == ord('g'):
                     show_inner = not show_inner
                 elif key == ord('d'):
