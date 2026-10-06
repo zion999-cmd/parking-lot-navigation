@@ -86,7 +86,12 @@ class Spot:
         x0, y0 = max(x0, 0), max(y0, 0)
         x1, y1 = min(x1, shape[1]), min(y1, shape[0])
         if x1 - x0 < 4 or y1 - y0 < 4:
-            raise SpotConfigError(f"spot {self.id}: detection area is empty after clipping")
+            pts = self.polygon
+            raise SpotConfigError(
+                f"spot {self.id}: detection area is empty after clipping to "
+                f"{shape[1]}x{shape[0]} (bay spans x {pts[:, 0].min():.0f}..{pts[:, 0].max():.0f}, "
+                f"y {pts[:, 1].min():.0f}..{pts[:, 1].max():.0f}) - the calibration does "
+                f"not belong to a frame of this size")
 
         self.roi = (x0, y0, x1, y1)
         mask = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
@@ -141,6 +146,9 @@ def validate(spots: List[Spot], shape: Tuple[int, int], allow_overlap: bool = Tr
             if not (0 <= x <= w and 0 <= y <= h):
                 problems.append(f"spot {s.id}: point ({x:.0f}, {y:.0f}) is outside the {w}x{h} frame")
                 break
+        pts = s.polygon
+        if pts[:, 0].max() < 0 or pts[:, 0].min() > w or pts[:, 1].max() < 0 or pts[:, 1].min() > h:
+            problems.append(f"spot {s.id}: entirely outside the {w}x{h} frame")
     if not allow_overlap:
         for i, a in enumerate(spots):
             for b in spots[i + 1:]:

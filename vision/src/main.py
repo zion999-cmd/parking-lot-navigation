@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import sys
 import time
@@ -93,6 +94,18 @@ def annotate(frame: np.ndarray, spots: List[Spot], results: Dict[str, SpotResult
     return canvas
 
 
+def _declared_image_size(path: str):
+    """The ``image_size`` recorded in the config, as (height, width), or None."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            size = json.load(fh).get("image_size")
+    except Exception:
+        return None
+    if not size or len(size) != 2:
+        return None
+    return (int(size[0]), int(size[1]))
+
+
 def status_line(spots: List[Spot], results: Dict[str, SpotResult]) -> str:
     parts = []
     for s in spots:
@@ -146,17 +159,26 @@ def main() -> int:
     detector = OccupancyDetector(params)
 
     # -- spots ---------------------------------------------------------------
+    declared_size = None
     try:
-        still = cv2.imread(args.reference, cv2.IMREAD_COLOR) if os.path.exists(args.reference) else None
+        still = (cv2.imread(args.reference, cv2.IMREAD_COLOR)
+                 if os.path.exists(args.reference) else None)
+        declared_size = _declared_image_size(args.config)
         if still is not None:
             spots = load_spots(args.config, still.shape[:2])
         else:
+            # No reference yet, so the frame geometry is unknown. Do NOT invent one:
+            # preparing a polygon against a guessed shape is what produced
+            # "spot 16: detection area is empty after clipping" (the guess was also
+            # passed height-first). set_reference() prepares the spots with the real
+            # frame once the reference has been captured.
             spots = load_spots(args.config)
-            for s in spots:                       # prepare from the polygon alone
-                s.prepare(tuple(int(v) for v in np.ceil(s.polygon.max(axis=0)).astype(int) * 2 + 8))
     except SpotConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        print("  hint: the calibration and the frame it was drawn on must be the same "
+              "size. See config/parking_spots.json -> image_size.", file=sys.stderr)
         return 2
+
     print(f"loaded {len(spots)} spot(s) from {args.config}: "
           f"{', '.join(s.id for s in spots)}")
 
@@ -235,6 +257,7 @@ def main() -> int:
     frames = 0
     sums = {s.id: [0.0, 0, 0] for s in spots}      # sum, occupied frames, total
     snapshot_done = False
+    size_warned = False
 
     try:
         while True:
@@ -249,6 +272,14 @@ def main() -> int:
                     continue
             frames += 1
             elapsed = time.time() - started
+
+            if declared_size is not None and frame.shape[:2] != declared_size \
+                    and not size_warned:
+                print(f"WARNING: the frame is {frame.shape[1]}x{frame.shape[0]} but the "
+                      f"calibration was drawn on {declared_size[1]}x{declared_size[0]}. "
+                      f"The bays will not line up - re-calibrate, or point --reference at "
+                      f"the frame they were drawn on.")
+                size_warned = True
 
             # Align the frame to the reference frame the bays were drawn on, so a
             # camera nudge does not move every ROI off its bay. The ROIs and the

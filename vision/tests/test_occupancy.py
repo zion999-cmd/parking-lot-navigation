@@ -227,6 +227,70 @@ def test_multiple_spots_are_independent():
     assert results["39"].state == OCCUPIED, results["39"]
 
 
+# --------------------------------------------------------------------------- #
+# loading a calibration the way main.py does
+# --------------------------------------------------------------------------- #
+
+def _temp_config(shape, polygon):
+    import tempfile
+    from spot_config import Spot, save_spots
+    tmp = tempfile.mkdtemp()
+    path = os.path.join(tmp, "parking_spots.json")
+    spot = Spot(id="16", polygon=np.asarray(polygon, dtype=np.float64))
+    save_spots(path, [spot], shape)
+    return path
+
+
+def test_loading_without_a_frame_does_not_invent_a_shape():
+    """Regression: main.py has no reference frame on a first run.
+
+    It used to guess a frame size from the polygon itself - and pass it height-first,
+    so a bay at x 294..342 was prepared against a "width" of 270 and came back as
+    "spot 16: detection area is empty after clipping". Without a real frame the spots
+    must simply stay unprepared; set_reference() prepares them later.
+    """
+    from spot_config import load_spots
+    path = _temp_config((600, 800), [[294, 38], [341, 38], [342, 131], [295, 131]])
+    spots = load_spots(path)                      # no shape given, like main.py
+    assert len(spots) == 1
+    assert spots[0].mask_roi is None, "a shape was invented out of thin air"
+
+
+def test_preparing_later_against_the_real_frame_works():
+    from spot_config import load_spots
+    path = _temp_config((600, 800), [[294, 38], [341, 38], [342, 131], [295, 131]])
+    spots = load_spots(path)
+    frame = np.full((600, 800, 3), 120, np.uint8)
+    d = OccupancyDetector(OccupancyParams())
+    d.set_reference(frame, spots)                 # this is where prepare happens
+    assert spots[0].mask_roi is not None
+    assert spots[0].inner_area() > 0
+    assert d.evaluate(frame, spots)["16"].state == EMPTY
+
+
+def test_a_calibration_for_a_different_frame_size_fails_with_a_useful_message():
+    from spot_config import SpotConfigError, load_spots
+    # a bay that lies entirely outside a 320x240 frame, so clipping cannot save it
+    path = _temp_config((600, 800),
+                        [[500, 300], [560, 300], [560, 400], [500, 400]])
+    try:
+        load_spots(path, (240, 320))              # the wrong frame size
+    except SpotConfigError as exc:
+        assert "does not belong to a frame of this size" in str(exc), str(exc)
+        assert "320x240" in str(exc), str(exc)
+    else:
+        raise AssertionError("loading against the wrong frame size should fail")
+
+
+def test_a_bay_partly_outside_the_frame_is_clipped_not_rejected():
+    """A calibration that only overshoots an edge should still be usable."""
+    from spot_config import load_spots
+    # partly outside a 320x240 frame: 17 px of it survive the clip
+    path = _temp_config((600, 800), [[294, 38], [341, 38], [342, 131], [295, 131]])
+    spots = load_spots(path, (240, 320))
+    assert spots[0].inner_area() > 0
+
+
 def main() -> int:
     tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith("test_") and callable(f)]
