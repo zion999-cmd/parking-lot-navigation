@@ -307,7 +307,7 @@ class RoadEditor:
             return "ROADS   nothing drawn yet - click along where cars drive"
         graph_net = self.derived(spots)
         bays = len(graph_net.spot_nodes())
-        manual = sum(1 for s in spots if getattr(s, "entrance_edge", None) is not None)
+        manual = sum(1 for s in spots if getattr(s, "access_side", None) is not None)
         extra = f", {manual} put there by hand" if manual else ""
         segments = len(self.net.edges)
         return (f"ROADS   {len(self.net.nodes)} points, {segments} segments   |   "

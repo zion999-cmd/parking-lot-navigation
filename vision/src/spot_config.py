@@ -49,12 +49,14 @@ class Spot:
     inner_scale: float = DEFAULT_INNER_SCALE
     detect_polygon: Optional[np.ndarray] = None
     note: str = ""
-    # Which side of the polygon the car drives in from, as an index into its points.
+    # Which side of the polygon a car drives in from, as an index into its points.
     #
     # None means "work it out": the side facing the nearest road. That is right almost
     # everywhere, but at the end of a row or in a corner two roads are equally close and the
     # choice is a decision, not a measurement. This is saved because it is a decision.
-    entrance_edge: Optional[int] = None
+    #
+    # Called access, not entrance: in this project "entrance" is the way into the car park.
+    access_side: Optional[int] = None
 
     # derived, filled by prepare()
     roi: Tuple[int, int, int, int] = field(default=(0, 0, 0, 0), repr=False)
@@ -123,8 +125,8 @@ class Spot:
         }
         if abs(self.inner_scale - DEFAULT_INNER_SCALE) > 1e-6:
             d["inner_scale"] = round(float(self.inner_scale), 4)
-        if self.entrance_edge is not None:
-            d["entrance"] = int(self.entrance_edge)
+        if self.access_side is not None:
+            d["access_side"] = int(self.access_side)
         if self.detect_polygon is not None:
             d["detect_polygon"] = [[round(float(x), 1), round(float(y), 1)]
                                    for x, y in self.detect_polygon]
@@ -143,9 +145,9 @@ class Spot:
             polygon=_as_polygon(d["polygon"], f"spot {sid} polygon"),
             inner_scale=float(d.get("inner_scale", DEFAULT_INNER_SCALE)),
             detect_polygon=_as_polygon(detect, f"spot {sid} detect_polygon") if detect else None,
-            entrance_edge=(int(d["entrance"]) % len(_as_polygon(
+            access_side=(int(d.get("access_side", d.get("entrance"))) % len(_as_polygon(
                 d.get("polygon"), f"spot {sid} polygon"))
-                if d.get("entrance") is not None else None),
+                if d.get("access_side", d.get("entrance")) is not None else None),
             note=str(d.get("note", "")),
         )
 
@@ -252,8 +254,8 @@ def save_spots(path: str, spots: List[Spot], shape: Optional[Tuple[int, int]] = 
                                    "polygon": [[_num(x), _num(y)] for x, y in spot.polygon]}
         if abs(spot.inner_scale - DEFAULT_INNER_SCALE) > 1e-6:
             item["inner_scale"] = round(float(spot.inner_scale), 4)
-        if spot.entrance_edge is not None:
-            item["entrance"] = int(spot.entrance_edge)
+        if spot.access_side is not None:
+            item["access_side"] = int(spot.access_side)
         if spot.detect_polygon is not None:
             item["detect_polygon"] = [[_num(x), _num(y)] for x, y in spot.detect_polygon]
         if spot.note:

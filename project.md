@@ -36,7 +36,7 @@ ESP32 导航小车（车位级导航）◄── 下一步
 | **P0001** | ESP32-S3-CAM 作为局域网 MJPEG 相机 | ✅ **已验收** | 800x600 SVGA / JPEG、`/stream` 稳定 20+ fps、`/` 状态页、启动日志四条约定齐全 |
 | **P0001.1** | Wi-Fi 配网（SoftAP+强制门户+NVS）＋ 薄 OTA（A/B 分区、SHA256、原生回滚） | ✅ **已验收** | **0.2.10 → 0.2.11 真机 OTA 升级成功，20 秒，`slot ota_0` → `slot ota_1`，全程不按 BOOT 键** |
 | **P0001.2** | 板载 TFT 状态屏（ST7789 240x240） | ⚠️ **代码就绪，画面未目视确认** | 分带刷新修复后不再 OOM；`disp=` 计数正常递增；**但从没人看过屏幕到底显示了什么** |
-| **P0002** | PC 端车位占用检测（OpenCV）＋ **停车场地图**（车位 + 道路，车位入口自动派生） | ✅ **已可用** | 48 个车位空/占用识别正确（静止场景下 48/48 稳定为 0 差异）；地图：**48/48 车位入口自动派生、全部从入口可达**，尾排两端车位可在图上手工纠正入口朝向 |
+| **P0002** | PC 端车位占用检测（OpenCV）＋ **停车场地图** ＋ **输出契约** | ✅ **已可用** | 48 个车位空/占用识别正确（静止场景下 48/48 稳定为 0 差异）；地图：**48/48 车位入口自动派生、全部从入口可达**，两端车位可手工纠正；契约：`parking_map.json` + `parking_state.json`（含 `UNKNOWN`）—— 见 §7 |
 
 ### 2.2 实测数字（固件 0.2.9~0.2.11）
 
@@ -134,6 +134,8 @@ P=/usr/local/Caskroom/miniconda/base/envs/vision-dev/bin/python
 | `src/map_document.py` | **地图文档读写**（一个文件两个段落，互不覆盖、原子写） | — |
 | `src/road_network.py` | **道路数据模型** + `derive()`（车位+道路 → 导航图，纯函数） | — |
 | `src/road_editor.py` | **画道路**的编辑模型（沿路点击、拖点、交汇） | — |
+| `src/contract.py` | **P0002 输出契约**：生成 `parking_map` / `parking_state` 两个文档（§7） | — |
+| `src/emit_map.py` | **发射静态契约**：配置 → `out/parking_map.json` | `$P src/emit_map.py [--strict]` |
 | `tests/demo_alignment.py` | 对齐演示 / 测当前偏移 | `$P tests/demo_alignment.py --shift 0,0 --frame X.jpg` |
 | `tests/fit_threshold.py` | **从验收案例拟合阈值**（阈值要测量，不要猜） | `$P tests/fit_threshold.py --cases 'data/cases/*.csv'` |
 
@@ -425,7 +427,112 @@ graph.spot_nodes()     # {"38": "n9"}   车位号 → 图上的节点
 > 你现在的 7 点外环路 + 48 个车位，检查结果已经是 `地图完整`（48/48 派生、48/48 可达）。
 > 补通道只是让路径更贴近车实际走的路线。
 
-## 7. 已知限制与坑
+## 7. P0002 输出契约
+
+**这是最重要的一刀。** 契约一旦固定，P0002 就封版：后面只认这两个文档，
+**完全不再关心摄像头、OpenCV、ROI、changed_ratio 是怎么来的。**
+
+P0002 只回答两类问题：
+
+> **① 停车场长什么样？** —— 静态，`parking_map.json`
+> **② 现在停车场发生了什么？** —— 实时，`parking_state.json`
+
+### 7.1 静态世界：`parking_map.json`
+
+```zsh
+$P src/emit_map.py                 # config/parking_spots.json → out/parking_map.json
+$P src/emit_map.py --strict        # 有任何车位没接入道路就返回非零（可用作检查）
+```
+
+```json
+{
+  "schema": "parking_map/1",
+  "coordinate_system": { "type": "image_2d", "width": 800, "height": 600, "origin": "top_left" },
+  "spots": [
+    { "id": "38",
+      "polygon": [[64, 296], [112, 296], [112, 400], [64, 400]],
+      "access": { "point": [88, 400], "road_node": "r12" } }
+  ],
+  "road_network": {
+    "nodes": [ { "id": "r1", "x": 77, "y": 496, "type": "entrance" } ],
+    "edges": [ { "from": "r1", "to": "r2", "distance": 58, "bidirectional": true } ]
+  },
+  "entrances": [ { "id": "main_gate", "node": "r1", "type": "entry_exit" } ]
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `coordinate_system` | **全项目唯一坐标系**：像素、原点左上、y 向下。车位／道路／主车／路径全在这里 |
+| `spots[].access` | **车位接入点**（车从道路进入这个车位的位置）＋ 它连的道路节点 |
+| `spots[].access` **≠** `entrances` | `access` = 车位入口；`entrances` = **停车场大门**。两者绝不能混 |
+| `road_network` | **已经推导好的导航图** —— P0003 **不要**自己从道路中心线重新推导 |
+| 节点 id | `r1, r2, ...` |
+| `edges[].distance` / `bidirectional` | 权重（像素距离）与方向；单向路为 `bidirectional: false` |
+
+**节点/边是内部表达**：用户在地图工具里只做一件事 —— **画车能走的路**，其余 P0002 自动生成。
+
+### 7.2 实时世界：`parking_state.json`
+
+`main.py` 运行时写出（默认 `out/parking_state.json`，0.5 秒一次；`--state-out` / `--state-every` 可调）：
+
+```json
+{
+  "schema": "parking_state/1",
+  "timestamp": 1791283027,
+  "spots": {
+    "38": { "state": "OCCUPIED", "changed_ratio": 0.42 },
+    "39": { "state": "EMPTY" },
+    "40": { "state": "UNKNOWN", "reason": "no frames for 4.0s" }
+  },
+  "vehicle": { "id": "hero", "x": 423, "y": 286, "heading": 91.4, "visible": true }
+}
+```
+
+**状态只有三种，`UNKNOWN` 是必须的：**
+
+| 状态 | 何时 |
+|---|---|
+| `EMPTY` | 与空置参考帧一致 |
+| `OCCUPIED` | 差异超过阈值 |
+| **`UNKNOWN`** | **没有参考帧 ／ 相机或网络停了 ／ 车位被遮挡 ／ 图像异常 ／ 置信度不足** |
+
+**为什么 `UNKNOWN` 不能省**：导航可以被告知「回来再看一次」，**但无法从「明明不知道却说是空的」里恢复**。
+所以「没有参考帧」「超过 2 秒没有新帧」会让**全部车位**变成 `UNKNOWN` 并带上 `reason`，
+**而不是假装 EMPTY**。程序因此即使在启动失败时也会先写出一份合法的状态文档。
+
+`changed_ratio` **只是诊断信息**：消费方可以显示它，**不能用它做决策**（阈值是 P0002 的内部事务）。
+
+### 7.3 P0002 说事实，不说决策
+
+| P0002 **可以**说 | P0002 **不该**说 |
+|---|---|
+| 38 是空的 | 38 是**最适合**的车位 |
+| 38 的接入点在 (88,400)，连道路节点 r12 | 应该走 r12 → r17 → 38 |
+| 主车现在 (423,286)，朝向 91° | 主车应该向右转 |
+
+前三个是**事实**，后三个是**决策与规划** —— 属于 P0003。
+
+### 7.4 当前完成度
+
+**已完成**：48 个车位 polygon　车位 `access`　道路 ＋ 节点/边　停车场大门　车位→道路连接
+　EMPTY / OCCUPIED　**`UNKNOWN` 接口**　两个契约文档
+
+**还差两项**：
+1. **最终阈值实测确定**（现在 0.15 仍是经验值，见 §2.3）
+2. **主车 `x/y/heading`** —— P0002.5，见 §10
+
+### 7.5 三个文件的分工（别混）
+
+| 文件 | 角色 | 谁写 |
+|---|---|---|
+| `vision/config/parking_spots.json` | **人画的**：车位 ＋ 道路（只含决定，可手工编辑） | 地图工具 |
+| `vision/out/parking_map.json` | **生成的契约**：含派生出的接入点与导航图 | `src/emit_map.py` |
+| `vision/out/parking_state.json` | **实时契约**：状态 ＋ 主车 | `src/main.py` |
+
+---
+
+## 8. 已知限制与坑
 
 ### `align` 默认关闭：它的语义在这里不成立
 
@@ -486,7 +593,7 @@ vision/data/{debug,reference}/, vision/data/cases/*.csv
 
 ---
 
-## 8. 目录结构
+## 9. 目录结构
 
 ```
 parking-lot-navigation/
@@ -507,11 +614,16 @@ parking-lot-navigation/
 
 ---
 
-## 9. 下一步
+## 10. 下一步
 
 | | 内容 | 备注 |
 |---|---|---|
 | 1 | **看一眼 LCD 显示了什么** | P0001.2 唯一没验证的 |
 | 2 | **录 5 个验收案例并拟合阈值** | `--headless --csv` → `tests/fit_threshold.py`，把 0.15 从「经验值」变成「测量值」 |
 | 3 | **（可选）看情况补通道** | 现在 0 个车位离路超过 220px（引线 27~38px），**不补也行**；只有以后多了新区域、`p` 报「离路很远」时才需要 |
-| 4 | **P0003**：车位状态对外服务（signal/HTTP）→ 导航小车消费 | 导航侧：`graph = RoadNetwork.load(...).derive(spots)` 然后 `adjacency()` + `spot_nodes()` |
+| 4 | **P0002.5 — 主车定位** | ESP32-S3-CAM → ArUco 标记 → `x / y / heading / visible`，填进 `parking_state.json` 的 `vehicle` 字段。**这是 P0002 封版前最后一块**：现在「停车场在哪、车位在哪、路在哪、哪个车位有车」都齐了，只差「我这辆车在哪、朝哪」 |
+| 5 | **P0003 — 导航** | 拿到 `parking_map + parking_state`（含主车）后做：找可用车位 → A*/Dijkstra → Route。**不再碰视觉** |
+
+> **P0002.5 的依赖已经就绪**：`cv2.aruco` 在当前的 `opencv-python 4.13.0` 里自带（**不需要**装 `opencv-contrib-python`，已实测）。
+> 做法：打印并裁出 ArUco 标记贴在主车上 → `cv2.aruco.detectMarkers` 得到四个角点 →
+> 取角点中心得 `x/y`、取一条边的角度得 `heading`、没检测到就 `visible: false` → 写进契约的 `vehicle`。

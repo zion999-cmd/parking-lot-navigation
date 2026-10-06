@@ -79,7 +79,7 @@ def _project_on_segment(px: float, py: float, ax: float, ay: float,
 
 def bay_mouth(polygon: Sequence[Sequence[float]],
               target: Tuple[float, float],
-              entrance_edge: Optional[int] = None) -> Tuple[float, float]:
+              access_side: Optional[int] = None) -> Tuple[float, float]:
     """The midpoint of the side of the bay that faces `target`.
 
     A bay's polygon is the visual truth for where a car parks; which of its sides is the
@@ -87,15 +87,15 @@ def bay_mouth(polygon: Sequence[Sequence[float]],
     from two decisions a person already made, not a detection - nothing here looks at the
     image.
 
-    `entrance_edge` overrides that with a decided side. It is needed because the rule is
+    `access_side` overrides that with a decided side. It is needed because the rule is
     genuinely ambiguous at the end of a row or on a corner, where two roads are about
     equally close: there, which side a car drives in from is a judgement, not a
     measurement, and the person drawing can see it.
     """
     pts = np.asarray(polygon, dtype=np.float64)
     n = len(pts)
-    if entrance_edge is not None:
-        i = int(entrance_edge) % n
+    if access_side is not None:
+        i = int(access_side) % n
         mid = (pts[i] + pts[(i + 1) % n]) / 2.0
         return (float(mid[0]), float(mid[1]))
 
@@ -298,17 +298,19 @@ class RoadNetwork:
         return node
 
     def next_id(self) -> str:
-        """n1, n2, ... never reusing a freed number.
+        """r1, r2, ... never reusing a freed number.
 
-        SpotEditor had a bug where next_id() handed out a number that was still in use;
-        the same class of mistake here would silently merge two nodes' edges, so the id is
-        always max(existing) + 1.
+        The contract names road nodes r*, because "n" was ambiguous with nodes of any kind
+        and the navigation layer only ever sees the road graph. SpotEditor had a bug where
+        next_id() handed out a number that was still in use; the same mistake here would
+        silently merge two nodes' edges, so the id is always max(existing) + 1.
         """
         highest = 0
         for n in self.nodes:
-            if n.id.startswith("n") and n.id[1:].isdigit():
-                highest = max(highest, int(n.id[1:]))
-        return f"n{highest + 1}"
+            for prefix in ("r", "n"):
+                if n.id.startswith(prefix) and n.id[1:].isdigit():
+                    highest = max(highest, int(n.id[1:]))
+        return f"r{highest + 1}"
 
     # -- editing ------------------------------------------------------------
 
@@ -425,7 +427,7 @@ class RoadNetwork:
         near = self.closest_point(float(centre[0]), float(centre[1]), skip_stubs=True)
         if near is None:
             return None
-        mx, my = bay_mouth(pts, (near.x, near.y), getattr(spot, "entrance_edge", None))
+        mx, my = bay_mouth(pts, (near.x, near.y), getattr(spot, "access_side", None))
         return self.attach(mx, my, kind=KIND_SPOT, spot=spot.id, skip_stubs=True)
 
     def derive(self, spots: Sequence) -> "RoadNetwork":
@@ -534,17 +536,29 @@ class RoadNetwork:
         """
         nodes: List[RoadNode] = []
         stale = 0
+        renames: Dict[str, str] = {}
         for raw in doc.get("nodes", []) or []:
             if not isinstance(raw, dict):
                 continue
             node = RoadNode.from_dict(raw)
+            # Older maps named road nodes n1, n2, ...; the contract uses r*. Renaming here
+            # keeps a drawn map usable instead of demanding it be redrawn.
+            if node.id.startswith("n") and node.id[1:].isdigit():
+                renames[node.id] = "r" + node.id[1:]
+                node.id = renames[node.id]
             if node.kind == KIND_SPOT:
                 node.kind = KIND_WAYPOINT
                 node.spot = ""
                 stale += 1
             nodes.append(node)
-        edges = [RoadEdge.from_dict(r) for r in doc.get("edges", []) or []
-                 if isinstance(r, dict)]
+        edges = []
+        for r in doc.get("edges", []) or []:
+            if not isinstance(r, dict):
+                continue
+            edge = RoadEdge.from_dict(r)
+            edge.a = renames.get(edge.a, edge.a)
+            edge.b = renames.get(edge.b, edge.b)
+            edges.append(edge)
         size = doc.get("image_size")
         if isinstance(size, (list, tuple)) and len(size) == 2:
             try:

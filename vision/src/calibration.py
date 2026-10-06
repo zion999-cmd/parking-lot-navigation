@@ -159,7 +159,7 @@ class CalibrationApp:
         self.layer = "spots"
         # Set while a bay's derived entrance is being dragged, so that drag is not taken for
         # moving a road point or for drawing a new one.
-        self._entrance_drag: Optional[str] = None
+        self._access_drag: Optional[str] = None
         self.road = RoadEditor(editor.shape)
         # The roads live in the same document as the bays, so they have to be opened with
         # it. Without this the road layer started empty every time and saving would have
@@ -311,7 +311,7 @@ class CalibrationApp:
                     continue
                 cv2.circle(canvas, centre, 4, COL_DERIVED, -1)
                 cv2.circle(canvas, centre, 4, (0, 0, 0), 1)
-                if any(s.id == node.spot and s.entrance_edge is not None
+                if any(s.id == node.spot and s.access_side is not None
                        for s in self.ed.spots):
                     # A ring marks an entrance whose side was chosen by hand, so it is clear
                     # which of these were worked out and which were decided.
@@ -380,22 +380,22 @@ class CalibrationApp:
             if key is not None:
                 self.act(key)
                 return
-            grabbed = self._entrance_under(x, y)
+            grabbed = self._access_under(x, y)
             if grabbed is not None:
                 # Grabbing a bay's entrance means "that is the wrong side": whichever side it
                 # is dropped on becomes the side cars drive in from.
-                self._entrance_drag = grabbed
+                self._access_drag = grabbed
                 road._say(f"drop it on the side cars drive in from (bay {grabbed})")
                 return
             if not road.begin_drag(x, y):
                 road.add_at(x, y)          # empty space: draw the road along here
         elif event == cv2.EVENT_MOUSEMOVE and flags & cv2.EVENT_FLAG_LBUTTON:
-            if self._entrance_drag is None:
+            if self._access_drag is None:
                 road.update_drag(x, y)
         elif event == cv2.EVENT_LBUTTONUP:
-            if self._entrance_drag is not None:
-                self._drop_entrance(self._entrance_drag, x, y)
-                self._entrance_drag = None
+            if self._access_drag is not None:
+                self._drop_access_side(self._access_drag, x, y)
+                self._access_drag = None
             else:
                 road.end_drag()
         elif event == cv2.EVENT_RBUTTONDOWN:
@@ -405,7 +405,7 @@ class CalibrationApp:
             else:
                 road.break_chain()         # right click on nothing: start another road
 
-    def _entrance_under(self, x: float, y: float, tol: float = 14.0) -> Optional[str]:
+    def _access_under(self, x: float, y: float, tol: float = 14.0) -> Optional[str]:
         """The bay whose derived entrance sits under the pointer, if any."""
         derived = self.road.derived(self.ed.spots)
         best: Optional[str] = None
@@ -418,11 +418,11 @@ class CalibrationApp:
                 best, best_d = node.spot, d
         return best
 
-    def _drop_entrance(self, bay_id: str, x: float, y: float) -> None:
+    def _drop_access_side(self, bay_id: str, x: float, y: float) -> None:
         """Record which side of that bay the entrance was dropped nearest to."""
         for i, spot in enumerate(self.ed.spots):
             if spot.id == bay_id:
-                self.ed.set_entrance(i, nearest_edge(spot.polygon, x, y))
+                self.ed.set_access_side(i, nearest_edge(spot.polygon, x, y))
                 return
 
     def bay_pitch(self) -> Optional[float]:
@@ -557,7 +557,7 @@ class CalibrationApp:
             self._pending_prompt = "inner"
         elif key == "j":
             # Back to working the entrance out, for a bay whose side was set by hand.
-            ed.set_entrance(ed.selected, None)
+            ed.set_access_side(ed.selected, None)
         elif key == "s":
             ed.save(self.out_path)
         elif key == "o":

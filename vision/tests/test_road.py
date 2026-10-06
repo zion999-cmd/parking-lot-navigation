@@ -337,7 +337,7 @@ def test_clicking_along_a_road_chaindraws_it() -> None:
     ed.add_at(100, 300)
     ed.add_at(200, 300)
     ed.add_at(300, 300)
-    assert [(e.a, e.b) for e in ed.net.edges] == [("n1", "n2"), ("n2", "n3")]
+    assert [(e.a, e.b) for e in ed.net.edges] == [("r1", "r2"), ("r2", "r3")]
 
 
 def test_starting_another_road_does_not_join_the_previous_one() -> None:
@@ -355,7 +355,7 @@ def test_selecting_a_point_makes_it_where_the_next_click_continues() -> None:
     ed.add_at(200, 300)
     ed.select(0)
     ed.add_at(100, 400)
-    assert ("n1", "n3") in {(e.a, e.b) for e in ed.net.edges}
+    assert ("r1", "r3") in {(e.a, e.b) for e in ed.net.edges}
 
 
 def test_joining_two_roads() -> None:
@@ -531,14 +531,14 @@ def test_stored_bay_connection_points_are_restored_to_plain_road_points() -> Non
     Turning them back keeps the geometry; deleting them would cut the ring in half."""
     doc = {
         "image_size": [H, W],
-        "nodes": [{"id": "n1", "kind": "entrance", "x": 0, "y": 400},
-                  {"id": "n2", "kind": "spot", "x": 880, "y": 400, "spot": "10"}],
-        "edges": [{"a": "n1", "b": "n2"}],
+        "nodes": [{"id": "r1", "kind": "entrance", "x": 0, "y": 400},
+                  {"id": "r2", "kind": "spot", "x": 880, "y": 400, "spot": "10"}],
+        "edges": [{"a": "r1", "b": "r2"}],
     }
     net = RoadNetwork.from_document(doc, (H, W))
     assert net.stale_connections == 1
-    assert net.node("n2").kind == KIND_WAYPOINT
-    assert net.node("n2").spot == ""
+    assert net.node("r2").kind == KIND_WAYPOINT
+    assert net.node("r2").spot == ""
     assert len(net.edges) == 1, "the road itself must survive"
     assert net.spot_nodes() == {}
 
@@ -628,7 +628,7 @@ def test_a_bays_entrance_can_be_pinned_to_a_side() -> None:
         "with the road below, the automatic entrance is the bottom side"
 
     # side 1 of this polygon is its right-hand edge (midpoint 150,180)
-    bays[0].entrance_edge = 1
+    bays[0].access_side = 1
     pinned = roads.derive(bays)
     pinned_mouth = pinned.node(pinned.spot_nodes()["38"])
     assert (round(pinned_mouth.x), round(pinned_mouth.y)) == (150, 180), \
@@ -638,7 +638,7 @@ def test_a_bays_entrance_can_be_pinned_to_a_side() -> None:
 def test_pinning_one_bay_leaves_the_others_alone() -> None:
     bays = two_bays()
     roads = roads_with_aisle()
-    bays[0].entrance_edge = 1
+    bays[0].access_side = 1
     graph = roads.derive(bays)
     other = graph.node(graph.spot_nodes()["39"])
     assert (round(other.x), round(other.y)) == (185, 260), (other.x, other.y)
@@ -659,38 +659,38 @@ def test_dropping_a_bays_entrance_records_the_side_it_was_dropped_on() -> None:
         app.layer = "roads"
         app.render(frame())
 
-        assert app._entrance_under(125, 260) == "38", "the derived entrance should be grabbable"
-        app._entrance_drag = "38"
-        app._drop_entrance("38", 170, 180)          # dropped beside the right-hand edge
+        assert app._access_under(125, 260) == "38", "the derived entrance should be grabbable"
+        app._access_drag = "38"
+        app._drop_access_side("38", 170, 180)          # dropped beside the right-hand edge
         pinned = [s for s in ed.spots if s.id == "38"][0]
-        assert pinned.entrance_edge == 1, pinned.entrance_edge
-        app._entrance_drag = None
+        assert pinned.access_side == 1, pinned.access_side
+        app._access_drag = None
 
         app.act("s")
-        saved = {s["id"]: s.get("entrance") for s in read(path)["spots"]}
+        saved = {s["id"]: s.get("access_side") for s in read(path)["spots"]}
         assert saved["38"] == 1, saved
 
         again = load_spots(path, (H, W))
-        assert [s.entrance_edge for s in again if s.id == "38"] == [1]
+        assert [s.access_side for s in again if s.id == "38"] == [1]
 
 
 def test_an_entrance_can_be_sent_back_to_automatic() -> None:
     bays = two_bays()
     roads = roads_with_aisle()
-    bays[0].entrance_edge = 1
+    bays[0].access_side = 1
     assert roads.derive(bays).node(
         roads.derive(bays).spot_nodes()["38"]).x == 150
 
     ed = SpotEditor((H, W))
     ed.spots = bays
     ed.select(0)
-    assert ed.set_entrance(0, None) is True
-    assert bays[0].entrance_edge is None
+    assert ed.set_access_side(0, None) is True
+    assert bays[0].access_side is None
     back = roads.derive(bays).node(roads.derive(bays).spot_nodes()["38"])
     assert (round(back.x), round(back.y)) == (125, 260), (back.x, back.y)
     assert ed.undo() is True
     # undo() swaps in deep copies, so the live list is ed.spots, not the one passed in.
-    assert ed.spots[0].entrance_edge == 1, "undo should bring the pinned side back"
+    assert ed.spots[0].access_side == 1, "undo should bring the pinned side back"
 
 
 def main() -> int:

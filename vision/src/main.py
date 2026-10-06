@@ -40,6 +40,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import contract                                                # noqa: E402
 from alignment import Aligner                                    # noqa: E402
 from calibration import CalibrationApp                           # noqa: E402
 from camera import CameraError, open_camera                      # noqa: E402
@@ -228,6 +229,58 @@ def capture_reference(frame: np.ndarray, path: str) -> bool:
     return True
 
 
+def vehicle_state() -> Optional[dict]:
+    """Where the hero car is, or None when it cannot be seen.
+
+    P0002.5 fills this in from a marker on the car (ArUco -> x/y/heading). Until then the
+    contract says visible: false rather than guessing, on the same rule that makes an
+    unseen bay UNKNOWN rather than EMPTY.
+    """
+    return None
+
+
+# How long without a frame before the contract admits it does not know anything.
+STALE_AFTER_S = 2.0
+
+
+def write_state(args, results, spots, have_reference: bool, stall: float,
+                last_written: float) -> Optional[float]:
+    """Write the live half of the P0002 contract. Returns when it wrote, or None.
+
+    Throttled: it is a file write, and the state only changes as fast as a car moves.
+
+    Two situations produce UNKNOWN for every bay rather than EMPTY, and both matter: no
+    reference frame means nothing can be compared at all, and no recent frames means the
+    camera or the network has stopped. A navigator can be told to come back and look again.
+    It cannot recover from being told a bay is free when nobody knows.
+    """
+    path = args.state_out
+    if not path:
+        return None
+    now = time.time()
+    if now - last_written < max(args.state_every, 0.0):
+        return None
+
+    reason = None
+    if stall > STALE_AFTER_S:
+        reason = f"no frames for {stall:.1f}s"
+    elif not have_reference:
+        reason = "no empty-bay reference captured"
+    elif not results:
+        reason = "nothing evaluated yet"
+
+    if reason is not None:
+        document = contract.unknown_state([s.id for s in spots], reason,
+                                          vehicle=vehicle_state())
+    else:
+        document = contract.build_state(results, vehicle=vehicle_state())
+    try:
+        contract.write_json(path, document)
+    except OSError as exc:
+        print(f"  could not write {path}: {exc}", file=sys.stderr)
+    return now
+
+
 def bay_pitch_of(spots: List[Spot]) -> Optional[float]:
     """A bay's shorter side: the natural scale for "is this shift close to one bay?"""
     widths = []
@@ -375,6 +428,13 @@ def main() -> int:
                     help="accept an alignment only at or above this structure "
                          "correlation (default 0.8; measured 0.95-0.97 for a real "
                          "nudge, 0.54-0.64 for a failed one)")
+    ap.add_argument("--state-out", metavar="JSON",
+                    default=os.path.join(ROOT, "out", "parking_state.json"),
+                    help="write the live half of the P0002 contract here: every bay's "
+                         "state, plus the vehicle when it can be localised (default "
+                         "out/parking_state.json)")
+    ap.add_argument("--state-every", type=float, default=0.5,
+                    help="seconds between contract writes (default 0.5)")
     ap.add_argument("--save-debug", metavar="PNG",
                     help="save one annotated frame with this path and exit")
     args = ap.parse_args()
@@ -437,6 +497,11 @@ def main() -> int:
                f"  With all bays empty, run the windowed mode and press 'r'.")
         if args.headless:
             print(f"error: {msg}", file=sys.stderr)
+            # Still emit a well formed state before giving up. The contract says the state
+            # document always exists and always says one of EMPTY/OCCUPIED/UNKNOWN, so a
+            # consumer never has to cope with a missing file - and "no reference" is
+            # exactly the case that must not be reported as EMPTY.
+            write_state(args, {}, spots, False, 0.0, 0.0)
             return 2
         print(f"WARNING: {msg}")
 
@@ -483,6 +548,7 @@ def main() -> int:
     frame = still_frame
     last_frame_at = started
     stall_warned = False
+    state_written = [0.0]
 
     try:
         while True:
@@ -549,6 +615,11 @@ def main() -> int:
                 results = detector.evaluate(eval_frame, spots, want_debug=True)
             else:
                 results = {}
+
+            wrote = write_state(args, results, spots, have_reference, stall,
+                                state_written[0])
+            if wrote is not None:
+                state_written[0] = wrote
 
             for sid, r in results.items():
                 sums[sid][0] += r.changed_ratio

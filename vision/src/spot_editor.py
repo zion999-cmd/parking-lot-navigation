@@ -304,7 +304,7 @@ class SpotEditor:
         self._say(f"renamed {old} -> {new_id}")
         return True
 
-    def set_entrance(self, index: Optional[int], edge: Optional[int]) -> bool:
+    def set_access_side(self, index: Optional[int], edge: Optional[int]) -> bool:
         """Say which side of a bay a car drives in from, or go back to working it out.
 
         At the end of a row, or in a corner, two roads are about equally close, so which
@@ -318,13 +318,13 @@ class SpotEditor:
             return False
         spot = self.spots[index]
         self._push_undo()
-        spot.entrance_edge = None if edge is None else int(edge) % len(spot.polygon)
+        spot.access_side = None if edge is None else int(edge) % len(spot.polygon)
         self.dirty = True
-        if spot.entrance_edge is None:
+        if spot.access_side is None:
             self._say(f"bay {spot.id}: the entrance is worked out again (whichever side "
                       f"faces the road)")
         else:
-            self._say(f"bay {spot.id}: cars come in from side {spot.entrance_edge + 1} of "
+            self._say(f"bay {spot.id}: cars come in from side {spot.access_side + 1} of "
                       f"its outline")
         return True
 
