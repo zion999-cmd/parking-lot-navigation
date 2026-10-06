@@ -18,6 +18,11 @@ Window
 
 Keys
 ----
+Two layers over one map document, switched with 't' or by clicking the tabs along the
+top: **[ Parking Spots ] [ Road Network ]**. Both are always drawn - the inactive one
+faintly - because the bay outlines are what a bay connection point has to land on.
+
+Parking Spots layer (what the camera answers: is this bay free?)
     A  align all bays to the current frame (camera drift; adds/deletes nothing)
     a  Auto Detect (only ADDS candidates; existing work is never touched)
     g  generate the next bay in the row from the selected one (right)
@@ -26,10 +31,28 @@ Keys
     d  delete the selected bay
     r  rename the selected bay (type the id in the terminal)
     i  set the inner detection scale of the selected bay (terminal)
-    s  save to config/parking_spots.json      o  load it
-    z  undo                                   c  reset (clear all)
+    s  save the map      o  load it
+    z  undo              c  reset (clear all bays)
     l  toggle the detected lines overlay      v  toggle inner detection polygons
+    m  cycle what 2/4/6/8 move: this bay -> its row -> every bay
     Tab cycle selection      2/4/6/8 nudge by 5 px
+
+Road Network layer (what the navigator needs: how does a car get there?)
+    click            place a node; it connects to the one before it, so a road is
+                     drawn by clicking along the path
+    drag a node      move it
+    right click      on a node: join the chain head to it (that is how a branch starts)
+                     on empty space: start a new road
+    k                cycle the node kind: entrance -> junction -> waypoint -> spot
+    b                bind the selected node to the next bay without a connection point
+    n                break the chain, so the next click starts a new road
+    d                delete the selected node and its edges
+    p                report what is wrong (half-drawn is normal, unreachable bays are not)
+    z undo   c clear   s save the map   Tab next node   2/4/6/8 move the node
+
+Nothing about the road is auto-detected: its visual edges do not matter to navigation.
+The centre line a car should follow is a human decision, and that is the ground truth.
+
     q / ESC  save and quit
 
 The status line reports what Auto Detect did: how many candidates were added,
@@ -55,6 +78,9 @@ from alignment import Aligner, transform_points                 # noqa: E402
 from detector import (DetectorParams, detect_bays, draw_debug,  # noqa: E402
                       render_profile_ascii, roi_offset_from_bay_lines,
                       sort_reading_order)
+from road_editor import RoadEditor                             # noqa: E402
+from road_network import (KIND_ENTRANCE, KIND_JUNCTION,        # noqa: E402
+                          KIND_NAMES, KIND_SPOT, KIND_WAYPOINT)
 from spot_config import DEFAULT_INNER_SCALE                    # noqa: E402
 from spot_editor import SpotEditor                             # noqa: E402
 
@@ -69,6 +95,17 @@ COL_ERR = (80, 80, 255)
 COL_TEXT = (255, 255, 255)
 COL_BTN = (70, 70, 70)
 COL_BTN_HOT = (120, 120, 120)
+
+# Road layer. The two layers are drawn in different colours on purpose: a bay outline and
+# a road are different kinds of thing and should never be mistaken for each other.
+COL_ROAD = (60, 200, 255)
+COL_ROAD_FAINT = (95, 95, 95)
+COL_NODE = (205, 205, 205)
+COL_NODE_ENTRANCE = (0, 255, 0)
+COL_NODE_JUNCTION = (255, 255, 0)
+COL_NODE_SPOT = (0, 140, 255)
+COL_BAY_FAINT = (105, 105, 105)
+COL_CHAIN = (255, 0, 255)
 
 BAR_H = 34
 NUDGE = 5
@@ -90,6 +127,9 @@ class CalibrationApp:
         self.cursor: Tuple[int, int] = (0, 0)
         # What 2/4/6/8 move: the selected bay, its whole row, or everything.
         self.nudge_scope = "bay"
+        # Two layers over one document: the camera's questions and the navigator's.
+        self.layer = "spots"
+        self.road = RoadEditor(editor.shape)
         self._buttons: List[Tuple[int, int, int, int, str, str]] = []
         self._pending_prompt: Optional[str] = None
 
@@ -102,10 +142,77 @@ class CalibrationApp:
         if self.show_overlay and self.ed.detection is not None:
             canvas = draw_debug(canvas, self.ed.detection)
 
+        # Both layers are always drawn: the inactive one faintly, as context. In road mode
+        # the bays are what the connection points have to land on, so they stay visible.
+        if self.layer == "roads":
+            self._draw_spots(canvas, faint=True)
+            self._draw_roads(canvas, faint=False)
+        else:
+            self._draw_roads(canvas, faint=True)
+            self._draw_spots(canvas, faint=False)
+
+        # Layer tabs along the top: choosing the layer is the first decision.
+        self._buttons = []
+        x = 8
+        for label, key, active in (("Parking Spots", "@spots", self.layer == "spots"),
+                                   ("Road Network", "@roads", self.layer == "roads")):
+            bw = 14 + len(label) * 9
+            self._buttons.append((x, 6, bw, 24, label, key, active))
+            x += bw + 6
+
+        header = self._header()
+        cv2.putText(canvas, header, (8, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 4)
+        cv2.putText(canvas, header, (8, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.55, COL_TEXT, 1)
+
+        actions = (("Auto Detect", "a"), ("Gen Row", "g"), ("Save", "s"), ("Undo", "z"),
+                   ("Reset", "c")) if self.layer == "spots" else \
+                  (("Break Chain", "n"), ("Kind", "k"), ("Bind Bay", "b"),
+                   ("Save", "s"), ("Undo", "z"), ("Clear", "c"))
+        x = 8
+        for label, key in actions:
+            bw = 12 + len(label) * 9
+            self._buttons.append((x, h - BAR_H - 8, bw, BAR_H - 8, label, key, False))
+            x += bw + 8
+
+        msg = self.ed.message if self.layer == "spots" else self.road.message
+        colour = {"info": COL_OK, "warn": COL_WARN, "error": COL_ERR}.get(msg.level, COL_TEXT)
+        if msg.text:
+            cv2.putText(canvas, msg.text[:118], (8, h - BAR_H - 50),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 0, 0), 4)
+            cv2.putText(canvas, msg.text[:118], (8, h - BAR_H - 50),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.52, colour, 1)
+
+        if self.layer == "spots":
+            hint = ("drag | A align | a auto | g row | n add | d del | r rename | i inner | "
+                    "s save | z undo | c reset | 2468 nudge (m=scope) | Tab | t roads | q")
+        else:
+            hint = ("click = place node+chain | drag node | right-click = join | 2/4/6/8 move | "
+                    "k kind | b bind bay | n break | d del | z undo | s save | Tab | t spots | q")
+        cv2.putText(canvas, hint[:135], (8, h - BAR_H - 28),
+                    cv2.FONT_HERSHEY_PLAIN, 1.0, (0, 0, 0), 3)
+        cv2.putText(canvas, hint[:135], (8, h - BAR_H - 28),
+                    cv2.FONT_HERSHEY_PLAIN, 1.0, (200, 200, 200), 1)
+
+        for (bx, by, bw, bh, label, _key, active) in self._buttons:
+            hover = bx <= self.cursor[0] <= bx + bw and by <= self.cursor[1] <= by + bh
+            cv2.rectangle(canvas, (bx, by), (bx + bw, by + bh),
+                          COL_BTN_HOT if (hover or active) else COL_BTN, -1)
+            cv2.rectangle(canvas, (bx, by), (bx + bw, by + bh), (200, 200, 200), 1)
+            cv2.putText(canvas, label, (bx + 6, by + bh - 9),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, COL_TEXT, 1)
+        return canvas
+
+    # -- layer drawing ------------------------------------------------------
+
+    def _draw_spots(self, canvas: np.ndarray, faint: bool) -> None:
         for i, spot in enumerate(self.ed.spots):
-            sel = (i == self.ed.selected)
+            sel = (i == self.ed.selected) and not faint
             poly = np.round(spot.polygon).astype(np.int32)
-            cv2.polylines(canvas, [poly], True, COL_SEL if sel else COL_BAY, 3 if sel else 2)
+            cv2.polylines(canvas, [poly], True,
+                          COL_BAY_FAINT if faint else (COL_SEL if sel else COL_BAY),
+                          1 if faint else (3 if sel else 2))
+            if faint:
+                continue
             if self.show_inner and spot.inner_points is not None:
                 cv2.polylines(canvas, [np.round(spot.inner_points).astype(np.int32)],
                               True, COL_INNER, 1)
@@ -120,55 +227,75 @@ class CalibrationApp:
                     cv2.circle(canvas, (int(px), int(py)), 6, COL_SEL, -1)
                     cv2.circle(canvas, (int(px), int(py)), 6, (0, 0, 0), 1)
 
-        header = (f"spots {len(self.ed.spots)}   "
-                  f"selected {self.ed.spots[self.ed.selected].id if self.ed.selected is not None else '-'}   "
-                  f"inner {self.ed.inner_scale:.2f}   "
-                  f"{'*unsaved*' if self.ed.dirty else 'saved'}")
-        cv2.putText(canvas, header, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 4)
-        cv2.putText(canvas, header, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, COL_TEXT, 1)
+    def _node_colour(self, kind: str) -> Tuple[int, int, int]:
+        return {KIND_ENTRANCE: COL_NODE_ENTRANCE, KIND_JUNCTION: COL_NODE_JUNCTION,
+                KIND_SPOT: COL_NODE_SPOT}.get(kind, COL_NODE)
 
-        self._buttons = []
-        x = 8
-        for label, key in (("Auto Detect", "a"), ("Gen Row", "g"), ("Save", "s"),
-                           ("Undo", "z"), ("Reset", "c")):
-            bw = 12 + len(label) * 9
-            self._buttons.append((x, h - BAR_H - 8, bw, BAR_H - 8, label, key))
-            x += bw + 8
+    def _draw_roads(self, canvas: np.ndarray, faint: bool) -> None:
+        net = self.road.net
+        edge_colour = COL_ROAD_FAINT if faint else COL_ROAD
+        for edge in net.edges:
+            a, b = net.node(edge.a), net.node(edge.b)
+            if a is None or b is None:
+                continue
+            pa, pb = (int(a.x), int(a.y)), (int(b.x), int(b.y))
+            if edge.oneway and not faint:
+                # Direction matters to the navigator, so say it on the picture.
+                mid = ((a.x + b.x) / 2.0, (a.y + b.y) / 2.0)
+                cv2.arrowedLine(canvas, pa, (int(mid[0]), int(mid[1])), edge_colour, 2,
+                                tipLength=0.2)
+                cv2.line(canvas, (int(mid[0]), int(mid[1])), pb, edge_colour, 1)
+            else:
+                cv2.line(canvas, pa, pb, edge_colour, 1 if faint else 2)
 
-        msg = self.ed.message
-        colour = {"info": COL_OK, "warn": COL_WARN, "error": COL_ERR}.get(msg.level, COL_TEXT)
-        if msg.text:
-            cv2.putText(canvas, msg.text[:118], (8, h - BAR_H - 50),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 0, 0), 4)
-            cv2.putText(canvas, msg.text[:118], (8, h - BAR_H - 50),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.52, colour, 1)
+        for i, node in enumerate(net.nodes):
+            sel = (i == self.road.selected) and not faint
+            colour = COL_ROAD_FAINT if faint else self._node_colour(node.kind)
+            # A bay connection is drawn bigger: it is the one that has to land on a bay.
+            base = 9 if node.kind == KIND_SPOT else 6
+            r = base + (3 if sel else 0)
+            if faint:
+                r = 3
+            centre = (int(node.x), int(node.y))
+            cv2.circle(canvas, centre, r, colour, -1)
+            cv2.circle(canvas, centre, r, (0, 0, 0), 1)
+            if faint:
+                continue
+            if self.road.chain is not None and node.id == self.road.chain:
+                cv2.circle(canvas, centre, r + 4, COL_CHAIN, 1)     # where the next click joins
+            text = self.road.node_tag(node)
+            cv2.putText(canvas, text, (centre[0] + r + 3, centre[1] + 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3)
+            cv2.putText(canvas, text, (centre[0] + r + 3, centre[1] + 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                        COL_SEL if sel else self._node_colour(node.kind), 1)
 
-        hint = ("drag | A align | a auto | g row | n add | d del | r rename | i inner | "
-                "s save | z undo | c reset | 2468 nudge (m=scope) | Tab | q quit")
-        cv2.putText(canvas, hint[:135], (8, h - BAR_H - 28),
-                    cv2.FONT_HERSHEY_PLAIN, 1.0, (0, 0, 0), 3)
-        cv2.putText(canvas, hint[:135], (8, h - BAR_H - 28),
-                    cv2.FONT_HERSHEY_PLAIN, 1.0, (200, 200, 200), 1)
-
-        for (bx, by, bw, bh, label, _key) in self._buttons:
-            hover = bx <= self.cursor[0] <= bx + bw and by <= self.cursor[1] <= by + bh
-            cv2.rectangle(canvas, (bx, by), (bx + bw, by + bh),
-                          COL_BTN_HOT if hover else COL_BTN, -1)
-            cv2.rectangle(canvas, (bx, by), (bx + bw, by + bh), (200, 200, 200), 1)
-            cv2.putText(canvas, label, (bx + 6, by + bh - 9),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, COL_TEXT, 1)
-        return canvas
+    def _header(self) -> str:
+        if self.layer == "roads":
+            node = self.road.selected_node()
+            return (f"ROAD NETWORK   {self.road.summary()}   "
+                    f"selected {node.id + ' (' + KIND_NAMES[node.kind] + ')' if node else '-'}   "
+                    f"{'*unsaved*' if self.road.dirty else 'saved'}")
+        selected = (self.ed.spots[self.ed.selected].id
+                    if self.ed.selected is not None else '-')
+        return (f"PARKING SPOTS   spots {len(self.ed.spots)}   selected {selected}   "
+                f"inner {self.ed.inner_scale:.2f}   "
+                f"{'*unsaved*' if self.ed.dirty else 'saved'}")
 
     # -- input --------------------------------------------------------------
 
     def _button_at(self, x: int, y: int) -> Optional[str]:
-        for (bx, by, bw, bh, _label, key) in self._buttons:
+        for (bx, by, bw, bh, _label, key, _active) in self._buttons:
             if bx <= x <= bx + bw and by <= y <= by + bh:
                 return key
         return None
 
     def on_mouse(self, event, x, y, flags, param) -> None:
         self.cursor = (x, y)
+
+        if self.layer == "roads":
+            self._mouse_roads(event, x, y, flags)
+            return
 
         if event == cv2.EVENT_LBUTTONDOWN:
             key = self._button_at(x, y)
@@ -183,6 +310,27 @@ class CalibrationApp:
         elif event == cv2.EVENT_RBUTTONDOWN:
             if self.snap_corner(x, y):
                 pass
+
+    def _mouse_roads(self, event, x, y, flags) -> None:
+        """Click to place and chain; click an existing node to grab or join it."""
+        road = self.road
+        if event == cv2.EVENT_LBUTTONDOWN:
+            key = self._button_at(x, y)
+            if key is not None:
+                self.act(key)
+                return
+            if not road.begin_drag(x, y):
+                road.add_at(x, y)          # empty space: place a node, chained
+        elif event == cv2.EVENT_MOUSEMOVE and flags & cv2.EVENT_FLAG_LBUTTON:
+            road.update_drag(x, y)
+        elif event == cv2.EVENT_LBUTTONUP:
+            road.end_drag()
+        elif event == cv2.EVENT_RBUTTONDOWN:
+            idx = road.hit_test(x, y)
+            if idx is not None:
+                road.connect_to(idx)       # join the chain head to this node
+            else:
+                road.break_chain()         # right click on nothing: start a new road
 
     def bay_pitch(self) -> Optional[float]:
         """Median bay width - the scale for the "is this shift a whole bay" check."""
@@ -283,10 +431,19 @@ class CalibrationApp:
     def act(self, key: str) -> bool:
         """Run one action. Returns False when the app should quit."""
         ed = self.ed
+        # The layer tabs arrive as @spots / @roads: they are buttons, not keys. Whichever
+        # layer is active decides where every other key and click goes.
+        if key in ("@spots", "@roads"):
+            self.switch_layer("roads" if key == "@roads" else "spots")
+            return True
+        if key == "t":
+            self.switch_layer("roads" if self.layer == "spots" else "spots")
+            return True
         if key in ("q", "\x1b"):
-            if ed.dirty and ed.spots:
-                ed.save(self.out_path)
+            self._save_all()
             return False
+        if self.layer == "roads":
+            return self._act_roads(key)
         if key == "a":
             frame = getattr(self, "_frame", None)
             if frame is None:
@@ -334,6 +491,83 @@ class CalibrationApp:
             self._nudges(0, -NUDGE)
         elif key == "2":
             self._nudges(0, NUDGE)
+        return True
+
+    def switch_layer(self, layer: str) -> None:
+        self.layer = "roads" if layer == "roads" else "spots"
+        if self.layer == "roads":
+            if not self.road.net.nodes:
+                self.road._say("click on the image to place the first node - start at the "
+                               "entrance, then keep clicking along the road")
+            else:
+                problems = self.road.problems([s.id for s in self.ed.spots])
+                self.road._say(problems[0] if problems else "road network looks valid")
+        else:
+            self.ed._say("Parking Spots layer")
+
+    def _save_all(self) -> None:
+        """Write the map document once, whichever layers changed.
+
+        Neither write can destroy the other layer: save_spots() re-emits the road sections
+        it finds in the file and RoadNetwork.save() re-emits the bay section, so the order
+        does not matter and one file stays the single source of truth for both layers.
+        """
+        wrote = False
+        if self.ed.dirty and self.ed.spots:
+            self.ed.save(self.out_path)
+            wrote = True
+        if self.road.dirty:
+            self.road.save(self.out_path)
+            wrote = True
+        if not wrote:
+            print("  nothing changed, nothing written")
+
+    def _act_roads(self, key: str) -> bool:
+        """Road layer keys.
+
+        The layer works on a different kind of object, so several keys mean something else
+        here than one tab over: 'n' starts a new road instead of adding a bay, 'l' and 'i'
+        do not exist because there are no inner polygons, and 'a' explicitly refuses to
+        auto-detect.
+        """
+        road = self.road
+        if key == "n":
+            road.break_chain()
+        elif key == "k":
+            road.cycle_kind()
+        elif key == "b":
+            road.bind_next_bay([s.id for s in self.ed.spots])
+        elif key in ("d", "x"):
+            road.delete_selected()
+        elif key == "s":
+            self._save_all()
+        elif key == "o":
+            road.load(self.out_path)
+        elif key == "z":
+            road.undo()
+        elif key == "c":
+            road.clear()
+        elif key == "\t":
+            road.select_next()
+        elif key == "4":
+            road.nudge(-NUDGE, 0)
+        elif key == "6":
+            road.nudge(NUDGE, 0)
+        elif key == "8":
+            road.nudge(0, -NUDGE)
+        elif key == "2":
+            road.nudge(0, NUDGE)
+        elif key == "a":
+            road._say("the road network is drawn by hand on purpose: the centre line a "
+                      "car should follow is a decision, not something to detect", "warn")
+        elif key == "p":
+            problems = road.problems([s.id for s in self.ed.spots])
+            if problems:
+                for msg in problems[:5]:
+                    print(f"  road: {msg}")
+                road._say(problems[0], "warn")
+            else:
+                road._say("road network is valid and every bay has a connection")
         return True
 
     def _nudges(self, dx: float, dy: float) -> None:

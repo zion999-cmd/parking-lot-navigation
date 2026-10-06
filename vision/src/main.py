@@ -359,10 +359,16 @@ def main() -> int:
     ap.add_argument("--csv", help="write per-frame records to this CSV")
     ap.add_argument("--print-every", type=float, default=0.0,
                     help="seconds between status lines (default 1 headless / 5 window)")
-    ap.add_argument("--align", default="translation",
+    ap.add_argument("--align", default="off",
                     choices=("off", "translation", "euclidean", "affine"),
-                    help="compensate camera drift by aligning each frame to the "
-                         "reference frame (default translation)")
+                    help="compensate camera drift by warping each frame onto the reference "
+                         "frame. Off by default and that is deliberate: measured on this "
+                         "board, the reference frame and a live frame correlate at 0.61 "
+                         "once cars are parked, below the 0.8 gate, because cars change "
+                         "the scene's structure. The camera is bolted to the sandbox "
+                         "(two live frames correlate at 0.996), so there is nothing to "
+                         "compensate; if it is ever knocked, re-align the bays with 'e' "
+                         "in the viewer instead of trusting this")
     ap.add_argument("--align-every", type=int, default=3,
                     help="re-estimate the alignment every N frames (default 3)")
     ap.add_argument("--align-min-corr", type=float, default=0.8,
@@ -595,7 +601,8 @@ def main() -> int:
                     align_text = (f"align dx={align_result.dx:+.0f} "
                                   f"dy={align_result.dy:+.0f} corr={align_result.correlation:.2f}")
                 else:
-                    align_text = f"align FAILED: view no longer matches the reference"
+                    align_text = ("align ignored: the scene itself differs from the "
+                                  "reference (cars in the bays change the structure)")
                 src_fps = cam.stats.fps() if cam is not None else 0.0
                 stall_note = f"  NO FRAMES {time.time() - last_frame_at:.0f}s" \
                     if time.time() - last_frame_at > 3 else ""

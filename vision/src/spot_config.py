@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import cv2
+import map_document
 import numpy as np
 
 DEFAULT_INNER_SCALE = 0.62
@@ -210,42 +211,47 @@ def load_spots(path: str, shape: Optional[Tuple[int, int]] = None,
     return spots
 
 
-def _fmt_polygon(points) -> str:
-    """One line per polygon, so the file stays editable by hand."""
-    return "[" + ", ".join(f"[{float(x):g}, {float(y):g}]" for x, y in points) + "]"
+def _num(value) -> float:
+    """A coordinate as an int when it is whole.
+
+    Bay coordinates are whole pixels in practice, and writing 64.0 where the file used to
+    say 64 turns a one-line change into a fifty-line diff - and this file is meant to stay
+    readable and hand-editable.
+    """
+    rounded = round(float(value), 1)
+    return int(rounded) if float(rounded).is_integer() else rounded
 
 
 def save_spots(path: str, spots: List[Spot], shape: Optional[Tuple[int, int]] = None) -> None:
-    """Write the config in a hand-editable form.
+    """Write the bay layer of the map, leaving the road layer in the same file alone.
 
-    json.dump(indent=2) puts every number on its own line, which makes a file full
-    of polygons almost impossible to read or fix in an editor. Each spot is written
-    as one line instead, and the result is still plain JSON.
+    The file is the parking lot map document and holds two layers:
+
+        spots          this layer    - the camera's question
+        nodes / edges  road network - the navigator's question
+
+    map_document.build() re-emits every section it finds, which is what makes "saving the
+    bays never destroys the roads" a property of the code instead of a promise. Both layers
+    use the same one-object-per-line formatting, because json.dump(indent=2) puts every
+    number of its own line and turns a file of polygons into something nobody can repair.
     """
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-
-    lines = [
-        "{",
-        '  "comment": "Fixed parking bay polygons on the camera image. '
-        'Seeded by Auto Detect and confirmed by hand with src/calibration.py; '
-        'edit with the same tool.",',
-        f'  "image_size": {f"[{shape[0]}, {shape[1]}]" if shape else "null"},',
-        '  "spots": [',
-    ]
-    for i, spot in enumerate(spots):
-        parts = [f'"id": {json.dumps(spot.id)}',
-                 f'"polygon": {_fmt_polygon(spot.polygon)}']
+    section = []
+    for spot in spots:
+        item: Dict[str, object] = {"id": spot.id,
+                                   "polygon": [[_num(x), _num(y)] for x, y in spot.polygon]}
         if abs(spot.inner_scale - DEFAULT_INNER_SCALE) > 1e-6:
-            parts.append(f'"inner_scale": {spot.inner_scale:g}')
+            item["inner_scale"] = round(float(spot.inner_scale), 4)
         if spot.detect_polygon is not None:
-            parts.append(f'"detect_polygon": {_fmt_polygon(spot.detect_polygon)}')
+            item["detect_polygon"] = [[_num(x), _num(y)] for x, y in spot.detect_polygon]
         if spot.note:
-            parts.append(f'"note": {json.dumps(spot.note)}')
-        comma = "," if i < len(spots) - 1 else ""
-        lines.append("    { " + ", ".join(parts) + " }" + comma)
-    lines += ["  ]", "}"]
+            item["note"] = spot.note
+        section.append(item)
 
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(lines) + "\n")
-    os.replace(tmp, path)
+    sections = map_document.build(
+        path,
+        comment="Parking lot map: bays (camera layer) and road network (navigation "
+                "layer). Edit with src/calibration.py.",
+        image_size=[shape[0], shape[1]] if shape else None,
+        spots=section,
+    )
+    map_document.write(path, sections)
