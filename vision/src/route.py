@@ -26,7 +26,7 @@ import json
 import math
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 ROUTE_SCHEMA = "route/1"
 
@@ -126,20 +126,47 @@ def spot_of(map_doc: Dict[str, Any], spot_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def nearest_node(map_doc: Dict[str, Any], x: float, y: float
-                 ) -> Optional[Tuple[str, float]]:
+def nearest_node(map_doc: Dict[str, Any], x: float, y: float,
+                 skip: FrozenSet[str] = frozenset()) -> Optional[Tuple[str, float]]:
     """The graph node closest to a point, and how far away it is.
 
     The hero car is a position, not a node. The map's nodes are dense - the aisles and every bay
-    access point are all nodes - so the nearest one is a few tens of pixels away at most, and the
+    access point are all nodes - so the nearest one is normally a few tens of pixels away, and the
     gap is reported so a caller can see when that assumption is strained.
+
+    `skip` exists because "dense" is not "well placed". Measured on the real map: a car standing
+    mid-lane on the 272 px edge r4(741,164)-r3(741,436) has its nearest node 127 px away, and that
+    node is a bay's access point - 8 px nearer than the lane node at either end of the edge it is
+    actually on. See branch_access_nodes().
     """
     best: Optional[Tuple[str, float]] = None
     for node in nodes_of(map_doc).values():
+        if node["id"] in skip:
+            continue
         d = math.hypot(float(node.get("x", 0)) - x, float(node.get("y", 0)) - y)
         if best is None or d < best[1]:
             best = (node["id"], d)
     return best
+
+
+def branch_access_nodes(map_doc: Dict[str, Any]) -> FrozenSet[str]:
+    """Bay access points that are branches rather than places on the lane.
+
+    A bay's access point is a node on the graph like any other, but geometrically it sits in the
+    bay's opening, a few tens of px off the lane. When a car is on the road, one of those is not a
+    place its route can start: it would put the start inside a bay the car has nothing to do with.
+
+    Only dead ends are excluded - degree 1. A node the lane passes through is left alone even if a
+    bay also claims it as its access point, because there the mouth and the lane coincide and it is
+    a perfectly good place to start. This is the same distinction P0002 already draws when it
+    measures how far the car is from the road: RoadNetwork.closest_point(skip_stubs=True).
+    """
+    adjacency = adjacency_from_map(map_doc)
+    claimed = {str((spot.get("access") or {}).get("road_node"))
+               for spot in (map_doc.get("spots") or [])}
+    claimed.discard("None")
+    return frozenset(node_id for node_id in claimed
+                     if len(adjacency.get(node_id, ())) <= 1)
 
 
 def spot_state(state_doc: Dict[str, Any], spot_id: str) -> str:
@@ -193,7 +220,11 @@ def shortest_path(graph: Dict[str, List[Tuple[str, float]]], start: str, goal: s
 
 def plan(map_doc: Dict[str, Any], state_doc: Dict[str, Any],
          target_spot: str) -> Route:
-    """Route from the hero car's current road position to a named bay's access point."""
+    """Route from the hero car's current road position to a named bay's access point.
+
+    Changing only where the car is taken to be standing, this never refuses a route it would
+    otherwise have found: if skipping leaves nothing to start from, the nearest node is used.
+    """
     spot_id = str(target_spot)
 
     spot = spot_of(map_doc, spot_id)
@@ -220,7 +251,15 @@ def plan(map_doc: Dict[str, Any], state_doc: Dict[str, Any],
         return Route(spot_id, False, NO_HERO,
                      "the hero car is not visible, so there is nothing to route from")
 
-    found = nearest_node(map_doc, float(vehicle.get("x", 0.0)), float(vehicle.get("y", 0.0)))
+    # Where the route starts. If the state says the car is standing in a bay, its own access point
+    # is the honest start. Otherwise the car is on a road, and a bay's access point is a branch into
+    # an opening rather than a point on the lane, so those are skipped - which is what P0002 does
+    # when it decides the car is on a road in the first place.
+    location = vehicle.get("location") or {}
+    in_a_bay = location.get("kind") == "spot" and bool(location.get("id"))
+    x, y = float(vehicle.get("x", 0.0)), float(vehicle.get("y", 0.0))
+    skip = frozenset() if in_a_bay else branch_access_nodes(map_doc)
+    found = nearest_node(map_doc, x, y, skip) or nearest_node(map_doc, x, y)
     if found is None:
         return Route(spot_id, False, NO_ROUTE, "the map has no road network")
     start_node, gap = found

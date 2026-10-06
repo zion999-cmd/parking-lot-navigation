@@ -62,17 +62,120 @@ def a_map() -> dict:
     }
 
 
-def a_state(spot_states: dict, hero=(10.0, 300.0), visible=True) -> dict:
+def a_state(spot_states: dict, hero=(10.0, 300.0), visible=True, location=None) -> dict:
     spots = {sid: {"state": st} for sid, st in spot_states.items()}
+    vehicle = ({"id": "hero", "x": hero[0], "y": hero[1], "heading": 0.0,
+                "visible": visible, "heading_is_axis_only": True,
+                "front_is_known": True, "front_heading": 0.0}
+               if visible else {"id": "hero", "visible": False})
+    if location is not None:
+        vehicle["location"] = location
     return {
         "schema": "parking_state/1",
         "timestamp": 1791283027,
         "spots": spots,
-        "vehicle": ({"id": "hero", "x": hero[0], "y": hero[1], "heading": 0.0,
-                     "visible": visible, "heading_is_axis_only": True,
-                     "front_is_known": True, "front_heading": 0.0}
-                    if visible else {"id": "hero", "visible": False}),
+        "vehicle": vehicle,
     }
+
+
+def a_map_like_the_real_one() -> dict:
+    """The shape that produced the bug: a sparse vertical lane, a denser aisle, and a bay whose
+    access point is a short branch off the aisle.
+
+        v1 (400,100)
+         |                       car at (400,240): v1 is 140px, v2 is 160px,
+         |                       and b1 - bay 38's mouth - is 125px, so the nearest
+         |                       *node* is a bay the car is nowhere near.
+         |                       (On the real map this was 127px against 135px.)
+        v2 (400,400) ===== a2 (384,400) ===== a1 (200,400)
+                            |
+                            b1 (384,364)   bay 38's access point, 36px off the aisle
+    """
+    return {
+        "schema": "parking_map/1",
+        "coordinate_system": {"type": "image_2d", "width": W, "height": H,
+                             "origin": "top_left"},
+        "spots": [
+            {"id": "38", "polygon": [[360, 300], [408, 300], [408, 364], [360, 364]],
+             "access": {"point": [384, 364], "road_node": "b1"}},
+        ],
+        "road_network": {
+            "nodes": [
+                {"id": "v1", "x": 400, "y": 100, "type": "entrance"},
+                {"id": "v2", "x": 400, "y": 400, "type": "junction"},
+                {"id": "a2", "x": 384, "y": 400, "type": "junction"},
+                {"id": "a1", "x": 200, "y": 400, "type": "junction"},
+                {"id": "b1", "x": 384, "y": 364, "type": "spot_access"},
+            ],
+            "edges": [
+                {"from": "v1", "to": "v2", "distance": 300.0, "bidirectional": True},
+                {"from": "v2", "to": "a2", "distance": 16.0, "bidirectional": True},
+                {"from": "a2", "to": "a1", "distance": 184.0, "bidirectional": True},
+                {"from": "a2", "to": "b1", "distance": 36.0, "bidirectional": True},
+            ],
+        },
+        "entrances": [{"id": "main_gate", "node": "v1", "type": "entry_exit"}],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Where the car is taken to be standing
+# ---------------------------------------------------------------------------
+
+def test_a_car_on_the_lane_does_not_start_at_a_bays_branch() -> None:
+    """The reported bug: the line looked as though it left a bay the car was never in."""
+    state = a_state({"38": "EMPTY"}, hero=(400.0, 240.0),
+                    location={"kind": "road", "id": None, "distance_to_road": 2.4})
+    planned = route.plan(a_map_like_the_real_one(), state, "38")
+    assert planned.ok, planned.reason
+    nearest = route.nearest_node(a_map_like_the_real_one(), 400.0, 240.0)
+    assert nearest[0] == "b1", "the fixture no longer reproduces the bug"
+    assert planned.start_node == "v1", planned.start_node      # 140px, on the lane the car is on
+    assert planned.nodes[0] == "v1" and planned.nodes[-1] == "b1"
+
+
+def test_a_car_reported_in_a_bay_starts_at_that_bays_own_mouth() -> None:
+    """The exception: standing in a bay, its access point is exactly where the route starts."""
+    state = a_state({"38": "EMPTY"}, hero=(384.0, 340.0),
+                    location={"kind": "spot", "id": "38", "distance_to_road": None})
+    planned = route.plan(a_map_like_the_real_one(), state, "38")
+    assert planned.ok, planned.reason
+    assert planned.start_node == "b1", planned.start_node
+
+
+def test_a_lane_node_that_a_bay_also_uses_is_still_a_place_to_start() -> None:
+    """Only dead ends are skipped. Where the lane passes through, the mouth and the lane are the
+    same place and there is nothing wrong with starting there."""
+    planned = route.plan(a_map(), a_state({"38": "EMPTY"}, hero=(100.0, 300.0),
+                                          location={"kind": "road", "id": None,
+                                                    "distance_to_road": 0.5}), "38")
+    assert planned.ok, planned.reason
+    assert planned.start_node == "r2", planned.start_node      # bay 38's access, and the lane
+
+
+def test_skipping_never_turns_a_route_into_a_refusal() -> None:
+    """If every node were a branch there would be nothing left to skip to; the nearest node is
+    then used rather than refusing a route that plainly exists."""
+    only_branches = a_map_like_the_real_one()
+    for edge in only_branches["road_network"]["edges"]:          # make b1 the whole network
+        edge["from"] = edge["to"] = "b1"
+    only_branches["road_network"]["nodes"] = [
+        {"id": "b1", "x": 384, "y": 364, "type": "spot_access"}]
+    planned = route.plan(only_branches, a_state({"38": "EMPTY"}, hero=(384.0, 300.0)), "38")
+    assert planned.ok, planned.reason
+    assert planned.start_node == "b1"
+
+
+def test_the_branch_rule_reads_the_map_not_a_hard_coded_name() -> None:
+    """b1 is only a branch because the map says a bay uses it and nothing passes through it."""
+    doc = a_map_like_the_real_one()
+    assert route.branch_access_nodes(doc) == frozenset({"b1"})
+    assert route.branch_access_nodes(a_map()) == frozenset()     # r2 and r3 carry the lane through
+
+
+# ---------------------------------------------------------------------------
+# The happy path
+# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
