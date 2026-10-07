@@ -59,9 +59,27 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:                                   # noqa: N802  (stdlib naming)
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/":
+            return self._index()
         if parsed.path != API_PATH:
             return super().do_GET()
         self._api_route(urllib.parse.parse_qs(parsed.query))
+
+    def _index(self) -> None:
+        """Two pages, one of which is for people. Say which is which rather than listing a dir."""
+        body = (b"<!doctype html><meta charset=utf-8><title>parking lot</title>"
+                b"<body style=\"font:16px system-ui;margin:2em;background:#0f1115;color:#e6e9ef\">"
+                b"<h1>\xe5\x81\x9c\xe8\xbd\xa6\xe5\x9c\xba\xe8\xbd\xa6\xe4\xbd\x8d\xe5\xaf\xbc\xe8\x88\xaa</h1>"
+                b"<p><a style=color:#66d9ff href=\"/web/board.html\">board.html</a>"
+                b" &nbsp;\xe2\x80\x94\xe5\xb1\x95\xe7\xa4\xba\xe7\x94\xa8\xef\xbc\x9a\xe5\x88\x86\xe6\x9e\x90\xe7\x94\xbb\xe9\x9d\xa2 + \xe7\x82\xb9\xe8\xbd\xa6\xe4\xbd\x8d\xe8\xa7\x84\xe5\x88\x92</p>"
+                b"<p><a style=color:#66d9ff href=\"/web/index.html\">index.html</a>"
+                b" &nbsp;\xe2\x80\x94\xe5\xb7\xa5\xe7\xa8\x8b\xe7\x94\xa8\xef\xbc\x9a\xe5\x9c\xb0\xe5\x9b\xbe\xe8\xb7\xaf\xe7\xba\xbf\xe8\xb0\x83\xe8\xaf\x95</p>"
+                b"<p style=color:#93a0b4>GET /api/route?spot=&lt;bay id&gt;</p></body>")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _api_route(self, query: dict) -> None:
         spot = (query.get("spot") or [""])[0].strip()

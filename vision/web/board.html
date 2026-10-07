@@ -1,0 +1,359 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>停车场车位导航</title>
+<!--
+  The board. The engineering page (index.html) draws an abstract map of the map documents; this is
+  the one to show people, and it differs in one deliberate way: the picture underneath is the
+  *analysed* camera view, streamed by main.py, so a visitor can see this is really a camera looking
+  at a car park. Everything interactive is drawn on a canvas sitting exactly on top of it - the two
+  coordinate systems are the same one, which is why the bays line up.
+
+  Showing the analysed stream rather than the camera's own /stream also means one client instead of
+  two, and the camera gives each client a share of its frames.
+-->
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0f1115; color: #e6e9ef;
+         font: 16px/1.5 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  header { display: flex; align-items: baseline; gap: 16px; padding: 14px 22px;
+           border-bottom: 1px solid #232833; }
+  h1 { font-size: 21px; margin: 0; letter-spacing: .5px; }
+  header .sub { color: #93a0b4; font-size: 14px; }
+  .wrap { display: flex; gap: 18px; padding: 18px 22px; align-items: flex-start;
+          flex-wrap: wrap; }
+  .stage { position: relative; flex: 1 1 640px; min-width: 320px; max-width: 1100px;
+           background: #000; border-radius: 10px; overflow: hidden;
+           box-shadow: 0 6px 26px rgba(0,0,0,.5); line-height: 0; }
+  .stage img { display: block; width: 100%; height: auto; }
+  .stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; }
+  aside { flex: 0 1 300px; min-width: 260px; display: flex; flex-direction: column; gap: 14px; }
+  .card { background: #171b23; border: 1px solid #232833; border-radius: 10px; padding: 14px 16px; }
+  .card h2 { font-size: 13px; margin: 0 0 8px; color: #93a0b4; font-weight: 600;
+             letter-spacing: 1px; }
+  .numbers { display: flex; gap: 8px; }
+  .numbers div { flex: 1; text-align: center; }
+  .numbers b { display: block; font-size: 30px; line-height: 1.15; }
+  .free b { color: #37d67a; } .taken b { color: #ff6b6b; } .unsure b { color: #8b93a1; }
+  .numbers span { font-size: 12px; color: #93a0b4; }
+  #message { font-size: 17px; min-height: 3.2em; }
+  #message.ok { color: #ffd166; } #message.bad { color: #ff8f6b; }
+  .legend { display: flex; flex-direction: column; gap: 6px; font-size: 14px; color: #c3cbd8; }
+  .legend i { display: inline-block; width: 13px; height: 13px; border-radius: 3px;
+              margin-right: 8px; vertical-align: -2px; }
+  footer { padding: 6px 22px 20px; color: #6f7a8c; font-size: 13px; }
+  .hint { color: #93a0b4; font-size: 14px; }
+</style>
+
+<header>
+  <h1>停车场车位导航</h1>
+  <span class="sub">摄像头看车位 · 小车在哪儿 · 点一个空位就能算出怎么开过去</span>
+</header>
+
+<div class="wrap">
+  <div class="stage">
+    <img id="live" alt="分析后的实时画面">
+    <canvas id="overlay" width="800" height="600"></canvas>
+  </div>
+
+  <aside>
+    <div class="card">
+      <h2>车位</h2>
+      <div class="numbers">
+        <div class="free"><b id="n-free">–</b><span>空着</span></div>
+        <div class="taken"><b id="n-taken">–</b><span>有车</span></div>
+        <div class="unsure"><b id="n-unknown">–</b><span>看不清</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>当前提示</h2>
+      <div id="message">正在连接……</div>
+      <div class="hint" id="age"></div>
+    </div>
+
+    <div class="card">
+      <h2>怎么用</h2>
+      <div class="hint" id="how">
+        <b>用鼠标点一个绿色的空车位</b>，系统会算出从红色小车到那个车位的路线。<br>
+        路线会跟着小车走，车一动它就重新算。
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>图例</h2>
+      <div class="legend">
+        <div><i style="background:#37d67a"></i>空车位（可以停）</div>
+        <div><i style="background:#ff6b6b"></i>已经有车</div>
+        <div><i style="background:#8b93a1"></i>看不清 / 没有参考</div>
+        <div><i style="background:#ff5a3c"></i>红色小车（实心端是车头）</div>
+        <div><i style="background:#ffd166"></i>规划出来的路线</div>
+      </div>
+    </div>
+  </aside>
+</div>
+
+<footer id="foot"></footer>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------- the stream
+// main.py serves the analysed picture on its own port; the port can be overridden with ?stream=.
+const params = new URLSearchParams(location.search);
+const STREAM = params.get("stream") || `http://${location.hostname}:8020/stream`;
+const liveImg = document.getElementById("live");
+
+function attachStream() {
+  liveImg.src = STREAM + "?t=" + Date.now();
+}
+// A kiosk runs for hours: if the stream drops, or main.py is started later, keep trying.
+liveImg.addEventListener("error", () => setTimeout(attachStream, 1500));
+liveImg.addEventListener("load", () => clearTimeout(liveImg._retry));
+attachStream();
+
+// ---------------------------------------------------------------- documents
+const DOCS = { map: "../out/parking_map.json", state: "../out/parking_state.json",
+               route: "../out/route.json" };
+
+let MAP = null, NODES = {}, STATE = null, ROUTE = null, PICKED = null, HOVER = null;
+let LAST = null, planSeq = 0, busy = false, polls = 0, mapTriedFor = "";
+
+const POLL_MS = 250;
+const MAP_EVERY_POLLS = 80;        // 20 s: the shape of the lot changes rarely
+const REPLAN_MOVE_PX = 4;
+const REPLAN_AFTER_MS = 1500;
+
+async function getJSON(url) {
+  try {
+    const r = await fetch(url + "?t=" + Date.now());
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (e) { return null; }
+}
+
+// ---------------------------------------------------------------- the route
+// Same decisions as the engineering page, kept here so the board also follows the car. The pieces
+// that are pure are the ones the tests run, in node, straight out of this file.
+function routeSignature(doc) {
+  if (!doc) return "";
+  return JSON.stringify([doc.target_spot ?? null, doc.ok ?? null, doc.code ?? null,
+                         doc.start_node ?? null, doc.target_node ?? null,
+                         doc.nodes ?? [], doc.distance ?? null]);
+}
+function adoptsRoute(shown, fromFile) {
+  return !!fromFile && routeSignature(shown) !== routeSignature(fromFile);
+}
+function routePolyline(stateDoc, routeDoc, nodes) {
+  const ids = (routeDoc && routeDoc.ok && routeDoc.nodes) || [];
+  const known = ids.filter(id => nodes[id]);
+  const unknown = ids.length - known.length;
+  const points = known.map(id => [nodes[id].x, nodes[id].y]);
+  if (!points.length) return { points: [], carLeg: false, unknown };
+  const v = stateDoc && stateDoc.vehicle;
+  if (v && v.visible !== false && typeof v.x === "number" && typeof v.y === "number")
+    return { points: [[v.x, v.y], ...points], carLeg: true, unknown };
+  return { points, carLeg: false, unknown };
+}
+function shouldReplan(stateDoc, last, picked, now) {
+  if (picked == null) return false;
+  if (!last) return true;
+  if (now - last.at >= REPLAN_AFTER_MS) return true;
+  const v = stateDoc && stateDoc.vehicle;
+  if (!v || v.visible === false) return false;
+  if (typeof v.x !== "number" || typeof v.y !== "number") return false;
+  if (last.x == null || last.y == null) return true;
+  return Math.hypot(v.x - last.x, v.y - last.y) >= REPLAN_MOVE_PX;
+}
+
+// The planner says what is wrong in its own words; these are the same facts said to a visitor.
+// test_live_view.py checks that every code route.py can produce has a phrase here.
+const WHY = {
+  "spot-not-free": "这个车位现在不是空的，换一个吧",
+  "no-such-spot": "没有这个车位",
+  "spot-has-no-access": "这个车位还没有连到路上（要去编辑器里画一条路）",
+  "hero-not-visible": "现在看不到红色小车，把它开到画面里",
+  "no-route": "从车现在的位置开不过去",
+  "endpoint-unreachable": "后台没在运行，先启动 src/serve.py",
+};
+
+// ---------------------------------------------------------------- the picture
+const cv = document.getElementById("overlay");
+const ctx = cv.getContext("2d");
+
+function canvasPoint(evt) {                       // the canvas is scaled by CSS
+  const r = cv.getBoundingClientRect();
+  return { x: (evt.clientX - r.left) * cv.width / r.width,
+           y: (evt.clientY - r.top) * cv.height / r.height };
+}
+function inside(polygon, x, y) {                  // ray casting
+  let hit = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const [xi, yi] = polygon[i], [xj, yj] = polygon[j];
+    if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) hit = !hit;
+  }
+  return hit;
+}
+function bayAt(x, y) {
+  return (MAP?.spots ?? []).find(s => inside(s.polygon, x, y)) ?? null;
+}
+
+function outline(polygon, colour, width, label) {
+  ctx.beginPath();
+  polygon.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+  ctx.closePath();
+  ctx.strokeStyle = colour; ctx.lineWidth = width; ctx.stroke();
+  if (label) {
+    const [cx, cy] = polygon.reduce((a, p) => [a[0] + p[0], a[1] + p[1]], [0, 0])
+                             .map(v => v / polygon.length);
+    ctx.font = "bold 16px system-ui, sans-serif";
+    ctx.lineWidth = 4; ctx.strokeStyle = "rgba(0,0,0,.75)";
+    ctx.strokeText(label, cx - 34, cy + 6);
+    ctx.fillStyle = colour; ctx.fillText(label, cx - 34, cy + 6);
+  }
+}
+
+function redraw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  if (!MAP) return;
+  const spot = id => (MAP.spots ?? []).find(s => String(s.id) === String(id));
+
+  const leg = routePolyline(STATE, ROUTE, NODES);
+  if (leg.points.length > 1) {
+    if (leg.carLeg) {
+      ctx.save(); ctx.setLineDash([8, 6]);
+      ctx.beginPath();
+      ctx.moveTo(leg.points[0][0], leg.points[0][1]);
+      ctx.lineTo(leg.points[1][0], leg.points[1][1]);
+      ctx.strokeStyle = "rgba(255,90,60,.9)"; ctx.lineWidth = 3; ctx.stroke();
+      ctx.restore();
+    }
+    const road = leg.points.slice(leg.carLeg ? 1 : 0);
+    ctx.beginPath();
+    road.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
+    ctx.strokeStyle = "#ffd166"; ctx.lineWidth = 6; ctx.lineJoin = "round";
+    ctx.stroke();
+  }
+  const hoverBay = HOVER != null ? spot(HOVER) : null;
+  if (hoverBay) outline(hoverBay.polygon, "rgba(255,255,255,.85)", 3, null);
+  const pickedBay = PICKED != null ? spot(PICKED) : null;
+  if (pickedBay && ROUTE?.ok) outline(pickedBay.polygon, "#66d9ff", 4, "目标 " + pickedBay.id);
+  else if (pickedBay) outline(pickedBay.polygon, "#ff9f45", 4, null);
+}
+
+function heroAsLast() {
+  const v = STATE && STATE.vehicle;
+  return { x: (v && typeof v.x === "number") ? v.x : null,
+           y: (v && typeof v.y === "number") ? v.y : null, at: Date.now() };
+}
+
+// ---------------------------------------------------------------- planning
+async function planSpot(id, quiet) {
+  const mine = ++planSeq;
+  PICKED = String(id);
+  const el = document.getElementById("message");
+  if (!quiet) { el.className = ""; el.textContent = `正在算到 ${PICKED} 号车位怎么开……`; }
+  let doc = null;
+  try {
+    const r = await fetch(`/api/route?spot=${encodeURIComponent(PICKED)}&t=${Date.now()}`);
+    doc = await r.json();
+  } catch (err) {
+    doc = { ok: false, code: "endpoint-unreachable", target_spot: PICKED, nodes: [] };
+  }
+  if (mine !== planSeq) return;
+  ROUTE = doc;
+  LAST = heroAsLast();
+  redraw();
+  say();
+}
+
+const ts = t => t ? new Date(t * 1000).toLocaleTimeString() : "—";
+
+function say() {
+  const el = document.getElementById("message");
+  if (PICKED == null) {
+    el.className = "";
+    el.textContent = "点一个绿色的空车位，就能看到怎么开过去。";
+    return;
+  }
+  if (ROUTE && ROUTE.ok) {
+    el.className = "ok";
+    el.textContent = `去 ${ROUTE.target_spot} 号车位：约 ${Math.round(ROUTE.distance)} 像素，`
+                   + `走 ${ROUTE.nodes.length} 段路。`;
+  } else if (ROUTE) {
+    el.className = "bad";
+    const why = WHY[ROUTE.code] || ROUTE.reason || ROUTE.code;
+    el.textContent = `${ROUTE.target_spot} 号车位：${why}`;
+  }
+}
+
+function stats() {
+  const spots = Object.values(STATE?.spots ?? {});
+  const n = s => spots.filter(v => v.state === s).length;
+  document.getElementById("n-free").textContent = spots.length ? n("EMPTY") : "–";
+  document.getElementById("n-taken").textContent = spots.length ? n("OCCUPIED") : "–";
+  document.getElementById("n-unknown").textContent = spots.length ? n("UNKNOWN") : "–";
+  const age = STATE?.timestamp ? (Date.now() / 1000 - STATE.timestamp) : null;
+  document.getElementById("age").textContent = age == null ? "读不到状态"
+    : `画面状况更新于 ${age < 1.05 ? age.toFixed(1) : Math.round(age)} 秒前`;
+}
+
+// ---------------------------------------------------------------- interaction
+cv.addEventListener("click", evt => {
+  const p = canvasPoint(evt), s = bayAt(p.x, p.y);
+  if (s) planSpot(s.id);
+});
+cv.addEventListener("mousemove", evt => {
+  const p = canvasPoint(evt), s = bayAt(p.x, p.y);
+  cv.style.cursor = s ? "pointer" : "default";
+  const id = s ? String(s.id) : null;
+  if (id !== HOVER) { HOVER = id; redraw(); }
+});
+
+// ---------------------------------------------------------------- the loop
+async function loadMap() {
+  const mapDoc = await getJSON(DOCS.map);
+  if (!mapDoc) return false;
+  MAP = mapDoc;
+  NODES = {};
+  for (const n of mapDoc.road_network?.nodes ?? []) NODES[n.id] = n;
+  return true;
+}
+
+async function poll() {
+  if (busy) return;
+  busy = true;
+  try {
+    if (!MAP && !(await loadMap())) {
+      document.getElementById("message").textContent =
+        "读不到 out/parking_map.json —— 先运行 src/emit_map.py 和 src/serve.py";
+      return;
+    }
+    const stateDoc = await getJSON(DOCS.state);
+    if (stateDoc) STATE = stateDoc;
+    const planned = await getJSON(DOCS.route);
+    if (adoptsRoute(ROUTE, planned)) {
+      ROUTE = planned;
+      if (planned.target_spot != null && String(planned.target_spot) !== PICKED)
+        PICKED = String(planned.target_spot);
+      LAST = heroAsLast();
+    }
+    if (shouldReplan(STATE, LAST, PICKED, Date.now())) await planSpot(PICKED, true);
+    if (ROUTE && (ROUTE.nodes ?? []).some(id => !NODES[id])) {
+      const sig = routeSignature(ROUTE);
+      if (sig !== mapTriedFor) { mapTriedFor = sig; await loadMap(); }
+    } else if (++polls % MAP_EVERY_POLLS === 0) {
+      await loadMap();
+    }
+    redraw(); say(); stats();
+    document.getElementById("foot").textContent =
+      `车位文件 ${ts(MAP && STATE ? STATE.timestamp : 0)} · 路线 ${ts(ROUTE?.generated_at)}`
+      + ` · 画面来自 main.py --annotated-port`;
+  } finally { busy = false; }
+}
+
+poll();
+setInterval(poll, POLL_MS);
+</script>
+</body>
+</html>

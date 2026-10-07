@@ -42,6 +42,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import contract                                                # noqa: E402
+import live_view                                               # noqa: E402
 import vehicle                                                 # noqa: E402
 from road_network import RoadNetwork                            # noqa: E402
 from alignment import Aligner                                    # noqa: E402
@@ -569,6 +570,12 @@ def main() -> int:
                     help="write the live half of the P0002 contract here: every bay's "
                          "state, plus the vehicle when it can be localised (default "
                          "out/parking_state.json)")
+    ap.add_argument("--annotated-port", type=int, default=0,
+                    help="serve the analysed picture as an MJPEG stream on this port (0 = off). "
+                         "The board page shows this instead of the camera's own /stream, so the "
+                         "camera does not split its frames between the analysis and a tab.")
+    ap.add_argument("--annotated-quality", type=int, default=80,
+                    help="JPEG quality for that stream")
     ap.add_argument("--state-every", type=float, default=0.5,
                     help="seconds between contract writes (default 0.5)")
     ap.add_argument("--save-debug", metavar="PNG",
@@ -691,6 +698,12 @@ def main() -> int:
     state_written = [0.0, None]      # when it was written, and what was written
     look_for_car = not args.no_vehicle
     show_car = True
+    live = None
+    if args.annotated_port:
+        live = live_view.LiveView(args.annotated_port, quality=args.annotated_quality)
+        print(f"analysed stream: {live.url}")
+        print("  board page: http://localhost:8010/web/board.html")
+        live.start()
     # Smooths the readings: the car does not turn instantly, and a single frame's shape is
     # noisy enough to make the front appear and disappear. See vehicle.VehicleTracker.
     car_tracker = vehicle.VehicleTracker()
@@ -819,9 +832,12 @@ def main() -> int:
                 else:
                     print(f"t={elapsed:5.1f}s  waiting for a reference (press 'r')")
 
-            if not args.headless:
+            if not args.headless or live is not None:
                 canvas = annotate(frame, spots, results, show_inner, show_diff,
                                   pose if show_car else None, location)
+                if live is not None:
+                    live.publish(canvas)      # before the HUD: the board writes its own labels
+            if not args.headless:
                 if aligner is None:
                     align_text = "align off"
                 elif align_result is None:
@@ -942,6 +958,8 @@ def main() -> int:
     except KeyboardInterrupt:
         print("\ninterrupted")
     finally:
+        if live is not None:
+            live.stop()
         if csv_fh:
             csv_fh.close()
         if cam is not None:
