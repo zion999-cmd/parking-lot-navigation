@@ -583,6 +583,10 @@ def main() -> int:
                     help="write the live half of the P0002 contract here: every bay's "
                          "state, plus the vehicle when it can be localised (default "
                          "out/parking_state.json)")
+    ap.add_argument("--no-emit-map", dest="emit_map", action="store_false",
+                    help="do not re-emit out/parking_map.json at startup. It is emitted by default "
+                         "so that the pages, which click the emitted map, cannot end up describing "
+                         "a different car park from the picture drawn here")
     ap.add_argument("--annotated-port", type=int, default=0,
                     help="serve the analysed picture as an MJPEG stream on this port (0 = off). "
                          "The board page shows this instead of the camera's own /stream, so the "
@@ -627,6 +631,20 @@ def main() -> int:
     # The road network, for answering "which bay, or on which road" about the car. Only the
     # geometry is needed here, so it does not matter that the frame size is not known yet.
     road_net = RoadNetwork.load(args.config) if os.path.exists(args.config) else None
+
+    # The picture on screen is drawn from the config; the board page clicks the *emitted* map.
+    # Those are two files, and when they disagree the page highlights a bay that is not where the
+    # picture shows one - which is exactly what a stale map with two bays in it did. Emitting here
+    # means whatever this process draws, the page can click.
+    if args.emit_map:
+        import emit_map
+        em = emit_map.emit(args.config, quiet=True)
+        if em in (0, 1):
+            print(f"emitted   {os.path.join(os.path.dirname(args.config), '..', 'out', 'parking_map.json')}"
+                  .replace('/config/..', ''))
+        else:
+            print(f"warning: could not emit the map from {args.config}; the page may be out of "
+                  f"step with this picture", file=sys.stderr)
 
     # -- reference -----------------------------------------------------------
     have_reference = False

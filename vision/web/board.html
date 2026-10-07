@@ -158,6 +158,15 @@ function routePolyline(stateDoc, routeDoc, nodes) {
 // A rename in the editor changes a bay's id in the state before the map has been re-emitted, so
 // a bay can exist in one document and not the other. When it is the map that is behind, the page
 // is describing bays that no longer exist - reload it rather than wait for the slow refresh.
+// After a reload, if they still disagree then the emitted map on disk is the wrong one. Say so:
+// otherwise the page shows a picture drawn from one document and selects bays from another, which
+// is a baffling way to fail.
+function mapMismatchNote(stateDoc, mapDoc) {
+  return mapLooksStale(stateDoc, mapDoc)
+    ? "   ⚠ 地图与状态不是同一套车位：请在 vision/ 下重跑 src/emit_map.py（重启 src/main.py 也会自动重发）"
+    : "";
+}
+
 function mapLooksStale(stateDoc, mapDoc) {
   if (!stateDoc || !mapDoc) return false;
   const known = new Set((mapDoc.spots ?? []).map(s => String(s.id)));
@@ -307,8 +316,9 @@ function stats() {
   document.getElementById("n-taken").textContent = spots.length ? n("OCCUPIED") : "–";
   document.getElementById("n-unknown").textContent = spots.length ? n("UNKNOWN") : "–";
   const age = STATE?.timestamp ? (Date.now() / 1000 - STATE.timestamp) : null;
-  document.getElementById("age").textContent = age == null ? "读不到状态"
-    : `画面状况更新于 ${age < 1.05 ? age.toFixed(1) : Math.round(age)} 秒前`;
+  document.getElementById("age").textContent = (age == null ? "读不到状态"
+    : `画面状况更新于 ${age < 1.05 ? age.toFixed(1) : Math.round(age)} 秒前`)
+    + mapMismatchNote(STATE, MAP);
 }
 
 // ---------------------------------------------------------------- interaction
