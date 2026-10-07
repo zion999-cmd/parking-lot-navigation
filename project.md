@@ -53,11 +53,19 @@ ESP32 导航小车（车位级导航）              ⏳ 还没做
 cd /Users/bx/Esp32/parking-lot-navigation/vision
 P=/usr/local/Caskroom/miniconda/base/envs/vision-dev/bin/python
 
-$P src/emit_map.py                     # 地图（改了车位/道路后才需要重跑）
-$P src/main.py --annotated-port 8020   # 分析 + 把分析画面发出去
+$P src/main.py --annotated-port 8020   # 分析 + 把分析画面发出去（不开窗口 ✓）
 $P src/serve.py                        # 页面 + 规划接口
 # 浏览器打开：http://localhost:8010/web/board.html
+
+# 要改车位 / 道路时才开窗口（另开一个终端 ✓）：
+$P src/calibration.py --frame data/reference/reference.jpg
 ```
+
+> **模式说明** ✓：`--annotated-port` **默认不开窗口** ✓（看板就是窗口 ✓）；加 `--window` 才开 ✓。
+> 编辑**不需要停掉分析** ✓：单独跑的编辑器一保存 ✓，正在跑的分析会**自己重载车位、重发地图** ✓✓，
+> 页面跟着更新 ✓（`config_parking_spots.json` 变了就重载 ✓，实测改名后状态行直接变成新编号 ✓）
+> 没有窗口时抓空场参考帧用一次性开关 ✓：`$P src/main.py --headless --capture-reference`
+> （**所有车位必须都空着** ✓ —— 抓歪了会把车拍进参考帧 ✓）
 
 **还没做的**：让小车**真的跑起来**（把 Route 下发循迹）／自动挑车位（最近/最优）／把占用阈值 0.15 从「经验值」变成「测量值」／演一遍 OTA 回滚。
 

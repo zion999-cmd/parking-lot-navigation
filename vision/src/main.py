@@ -42,6 +42,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import contract                                                # noqa: E402
+import emit_map                                                # noqa: E402
 import live_view                                               # noqa: E402
 import vehicle                                                 # noqa: E402
 from road_network import RoadNetwork                            # noqa: E402
@@ -487,6 +488,7 @@ def run_edit_mode(get_frame, config_path: str, template_path: Optional[str],
         fresh = get_frame()
         if fresh is not None:
             frame = fresh
+
         if frame is None:
             if (cv2.waitKey(30) & 0xFF) == 27:
                 break
@@ -583,6 +585,16 @@ def main() -> int:
                     help="write the live half of the P0002 contract here: every bay's "
                          "state, plus the vehicle when it can be localised (default "
                          "out/parking_state.json)")
+    ap.add_argument("--window", action="store_true",
+                    help="show the cv2 window even when serving the board. Serving implies no "
+                         "window: the board is the window, and the one here is only wanted to "
+                         "edit bays and roads, which is a job for src/calibration.py")
+    ap.add_argument("--capture-reference", action="store_true",
+                    help="capture the empty-bay reference from the next frame, then exit. Takes "
+                         "the place of pressing r in the window, for runs that have none")
+    ap.add_argument("--map-out", default=None,
+                    help="where to emit the map. Default: out/parking_map.json for the real "
+                         "config, and beside any other config, so a copy cannot overwrite it")
     ap.add_argument("--no-emit-map", dest="emit_map", action="store_false",
                     help="do not re-emit out/parking_map.json at startup. It is emitted by default "
                          "so that the pages, which click the emitted map, cannot end up describing "
@@ -637,11 +649,9 @@ def main() -> int:
     # picture shows one - which is exactly what a stale map with two bays in it did. Emitting here
     # means whatever this process draws, the page can click.
     if args.emit_map:
-        import emit_map
-        em = emit_map.emit(args.config, quiet=True)
+        em = emit_map.emit(args.config, args.map_out, quiet=True)
         if em in (0, 1):
-            print(f"emitted   {os.path.join(os.path.dirname(args.config), '..', 'out', 'parking_map.json')}"
-                  .replace('/config/..', ''))
+            print(f"emitted   {args.map_out}")
         else:
             print(f"warning: could not emit the map from {args.config}; the page may be out of "
                   f"step with this picture", file=sys.stderr)
@@ -670,7 +680,7 @@ def main() -> int:
               f"{aligner._work_size[0]}px, bay pitch ~{pitch:.0f}px, "
               f"min correlation {args.align_min_corr}")
 
-    if not have_reference:
+    if not have_reference and not args.capture_reference:
         msg = (f"no empty-bay reference yet ({args.reference}).\n"
                f"  With all bays empty, run the windowed mode and press 'r'.")
         if args.headless:
@@ -727,6 +737,7 @@ def main() -> int:
     last_frame_at = started
     stall_warned = False
     state_written = [0.0, None]      # when it was written, and what was written
+    config_mtime = None              # so an edit made in another window is noticed
     look_for_car = not args.no_vehicle
     show_car = True
     live = None
@@ -734,6 +745,12 @@ def main() -> int:
         live = live_view.LiveView(args.annotated_port, quality=args.annotated_quality)
         print(f"analysed stream: {live.url}")
         print("  board page: http://localhost:8010/web/board.html")
+        # Serving the board means the picture is already on screen somewhere else.
+        if not args.window:
+            args.headless = True
+            print("  window: off.  编辑车位/道路请另开一个终端跑：")
+            print(f"      {sys.executable} src/calibration.py --frame data/reference/reference.jpg")
+            print("  （要这个进程自己开窗，加 --window）")
         live.start()
     # Smooths the readings: the car does not turn instantly, and a single frame's shape is
     # noisy enough to make the front appear and disappear. See vehicle.VehicleTracker.
@@ -741,6 +758,43 @@ def main() -> int:
 
     try:
         while True:
+            if frame is not None and args.capture_reference:
+                ok = capture_reference(frame, args.reference)
+                if ok:
+                    print(f"captured the empty reference -> {args.reference}")
+                    print("  (all bays must have been empty, or the reference contains a car)")
+                else:
+                    print("could not capture the reference", file=sys.stderr)
+                return 0 if ok else 2
+
+            if frame is not None:
+                # The map may be edited in another window: the editor runs off a still frame and does not
+                # need this process to stop. When the config changes, pick it up - the picture, the ROIs
+                # and the page's map must all describe the same car park.
+                try:
+                    mtime = os.path.getmtime(args.config)
+                except OSError:
+                    mtime = None
+                if config_mtime is None:
+                    config_mtime = mtime
+                elif mtime is not None and mtime != config_mtime:
+                    config_mtime = mtime
+                    try:
+                        spots = load_spots(args.config, frame.shape[:2], skip_bad=True)
+                        # Anything keyed by bay id has to be rebuilt with the new ones, or the
+                        # next frame's totals raise KeyError on a bay that was just renamed.
+                        sums = {s.id: [0.0, 0, 0] for s in spots}
+                        road_net = (RoadNetwork.load(args.config)
+                                    if os.path.exists(args.config) else None)
+                        if detector_ref_frame is not None:
+                            detector.set_reference(detector_ref_frame, spots)
+                        if args.emit_map:
+                            emit_map.emit(args.config, args.map_out, quiet=True)
+                        print(f"  reloaded {args.config}: {len(spots)} bay(s), and re-emitted "
+                              f"{args.map_out}")
+                    except Exception as exc:                             # noqa: BLE001
+                        print(f"  could not reload {args.config}: {exc}", file=sys.stderr)
+
             fresh = still_frame if use_still else cam.read()
             if fresh is not None:
                 frame = fresh

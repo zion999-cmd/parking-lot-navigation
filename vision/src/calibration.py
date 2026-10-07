@@ -627,7 +627,7 @@ class CalibrationApp:
         # bay's id here and would leave the page describing a bay that does not exist, so the two
         # documents are kept in step at the one moment they can drift.
         import emit_map
-        if emit_map.emit(self.out_path, quiet=True) not in (0, 1):
+        if emit_map.emit(self.out_path, emit_map.out_for(self.out_path), quiet=True) not in (0, 1):
             print("  warning: could not re-emit out/parking_map.json", file=sys.stderr)
         else:
             print("  also re-emitted out/parking_map.json (the page reads that one)")

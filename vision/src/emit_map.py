@@ -29,6 +29,21 @@ from road_network import RoadNetwork                            # noqa: E402
 from spot_config import SpotConfigError, load_spots              # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+DEFAULT_CONFIG = os.path.join(ROOT, "config", "parking_spots.json")
+DEFAULT_OUT = os.path.join(ROOT, "out", "parking_map.json")
+
+
+def out_for(config: str) -> str:
+    """Where the emitted map for this config belongs.
+
+    The real config emits to the repository's out/, and anything else - a copy a test made, an
+    experiment in /tmp - emits beside itself. That rule exists because the opposite happened: the
+    editor re-emits on save, and a test that pointed it at a copy of the map overwrote the real
+    out/parking_map.json with a two-bay fixture, leaving the page clicking bays that were not there.
+    """
+    if os.path.abspath(config) == DEFAULT_CONFIG:
+        return DEFAULT_OUT
+    return os.path.join(os.path.dirname(os.path.abspath(config)), "parking_map.json")
 
 
 def emit(config: str, out: Optional[str] = None, strict: bool = False,
@@ -39,7 +54,7 @@ def emit(config: str, out: Optional[str] = None, strict: bool = False,
     bay's id in the config, and the page reads the ids in the emitted map, so a config saved
     without an emit leaves the page describing a bay that no longer exists.
     """
-    out = out or os.path.join(ROOT, "out", "parking_map.json")
+    out = out or out_for(config)
     shape = _shape_of(config)
     if shape is None:
         print(f"error: {config} does not say what size frame it was drawn on", file=sys.stderr)
