@@ -337,8 +337,61 @@ def test_the_audit_does_blame_a_stale_reference() -> None:
     detector = OccupancyDetector()
     detector.set_reference(ref, spots)
 
-    live = np.clip(ref.astype(int) + 45, 0, 255).astype(np.uint8)        # the light changed
-    assert reference_audit(ref, live, spots, detector) == "stale"
+    # A uniform change of light is NOT a stale reference: the detector matches the light, so the
+    # bays still read 0.000 and re-capturing here would be wrong advice. (This assertion used to
+    # say "stale"; the audit was using a raw diff while the detector matched the light, so the two
+    # disagreed about the same frame.)
+    live = np.clip(ref.astype(int) + 45, 0, 255).astype(np.uint8)
+    assert reference_audit(ref, live, spots, detector) != "stale"
+
+    # What does make it stale is the camera actually moving: the structure no longer lines up and
+    # no amount of brightness matching can hide that.
+    shifted = np.roll(ref, 7, axis=1)
+    assert reference_audit(ref, shifted, spots, detector) == "stale"
+
+
+def test_a_change_of_light_does_not_fill_the_car_park() -> None:
+    """The reported bug: the light shifts a little and every bay reads occupied.
+
+    Measured on the real camera: a global offset of +-26 grey levels, or a 20% gain change - which
+    is what the camera's own auto-exposure produces - put EVERY bay past the 25-level per-pixel
+    threshold at once (48/48 occupied, ratio 1.000). The detector now matches the frame's
+    brightness and contrast to the reference before differencing.
+    """
+    ref = base_frame()
+    spot = make_spot()
+    detector = OccupancyDetector()
+    detector.set_reference(ref, [spot])
+
+    for offset in (-60, -40, -26, 26, 40, 60):
+        lit = np.clip(ref.astype(int) + offset, 0, 255).astype(np.uint8)
+        r = detector.evaluate_spot(lit, spot)
+        assert r.state == EMPTY, f"offset {offset:+d} read {r.state} ({r.changed_ratio:.3f})"
+
+    for gain in (0.8, 0.9, 1.1, 1.2, 1.4):
+        lit = np.clip(ref.astype(float) * gain, 0, 255).astype(np.uint8)
+        r = detector.evaluate_spot(lit, spot)
+        assert r.state == EMPTY, f"gain {gain} read {r.state} ({r.changed_ratio:.3f})"
+
+
+def test_matching_the_light_still_finds_a_real_car() -> None:
+    """The other direction, which matters more: a car must not be matched away."""
+    ref = base_frame()
+    spot = make_spot()
+    detector = OccupancyDetector()
+    detector.set_reference(ref, [spot])
+
+    for fill in ((40, 40, 40), (90, 90, 90), (200, 200, 200)):
+        with_car = draw_car(ref.copy(), 120, 130, 180, 180, fill)
+        r = detector.evaluate_spot(with_car, spot)
+        assert r.state == OCCUPIED, f"a car filled {fill} read {r.state}"
+
+    # And a car while the light is also off: matching must not explain the car away.
+    for offset in (-40, 40):
+        with_car = draw_car(ref.copy(), 120, 130, 180, 180, (60, 60, 60))
+        lit = np.clip(with_car.astype(int) + offset, 0, 255).astype(np.uint8)
+        r = detector.evaluate_spot(lit, spot)
+        assert r.state == OCCUPIED, f"car + light {offset:+d} read {r.state}"
 
 
 def main() -> int:
