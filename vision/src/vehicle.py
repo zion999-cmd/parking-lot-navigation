@@ -232,15 +232,17 @@ def merge_near_components(mask: np.ndarray, gap_fraction: float = 0.9,
             gap_x = max(0, max(xa, xb) - min(xa + wa, xb + wb))
             gap_y = max(0, max(ya, yb) - min(ya + ha, yb + hb))
             edge_gap = math.hypot(gap_x, gap_y)
-            # The pieces are one car split by a thin dark seam, so they need not overlap:
-            # measure how much the facing edges overlap (along the cut), not the boxes across.
-            if gap_x >= gap_y:               # cut is vertical: edges meet along y
-                oy = max(0, min(ya + ha, yb + hb) - max(ya, yb))
-                edge_overlap = oy / min(ha, hb)
-            else:                            # cut is horizontal: edges meet along x
-                ox = max(0, min(xa + wa, xb + wb) - max(xa, xb))
-                edge_overlap = ox / min(wa, wb)
-            if edge_gap <= 2.0 * median_size and edge_overlap >= 0.5:
+            if edge_gap > 2.0 * median_size:
+                continue
+            # Two pieces of one car are close and their union stays compact. An earlier version
+            # also demanded that the facing edges overlap by half - which the real pieces broke:
+            # measured live, the car's three fragments sat diagonally offset (x overlap 6 px of 23)
+            # and were refused, so the car was reported as its largest fragment (box 23x26, long
+            # side 26 against 63 for the whole car). The compactness guard is what keeps a distant
+            # red object out, not the overlap.
+            ux = max(xa + wa, xb + wb) - min(xa, xb)
+            uy = max(ya + ha, yb + hb) - min(ya, yb)
+            if math.hypot(ux, uy) <= 4.0 * max(max(wa, ha), max(wb, hb)):
                 union(a, b)
 
     out = np.zeros(mask.shape, np.uint8)

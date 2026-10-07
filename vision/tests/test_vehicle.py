@@ -461,6 +461,35 @@ def test_p_and_its_flip_swap_the_scores():
     assert abs(a[2]+b[2])<1e-9
 
 
+def test_the_cars_fragments_are_joined_however_they_sit() -> None:
+    """The measured failure: three fragments, diagonally offset, refused by an overlap test.
+
+    Live, the car came apart into three red pieces and the detector reported only the largest, so
+    the box collapsed from a long side of 63 to 26. The pieces are the exact rectangles measured
+    in that frame. The old rule also demanded that the facing edges overlap by half, which these
+    do not (x overlap 6 px of 23) - the compactness of the union is what keeps a distant red
+    object out, not the overlap.
+    """
+    fragments = [(409, 87, 479, 23, 26),      # (area, x, y, w, h) as measured
+                 (343, 104, 443, 23, 21),
+                 (79, 92, 472, 16, 7)]
+    mask = np.zeros((600, 800), np.uint8)
+    for _area, x, y, w, h in fragments:
+        mask[y:y + h, x:x + w] = 255
+    merged = vehicle.merge_near_components(mask)
+    n, _lab, stats, _c = cv2.connectedComponentsWithStats(merged, 8)
+    assert n - 1 == 1, f"the car stayed in {n - 1} pieces"
+    assert int(stats[1, cv2.CC_STAT_AREA]) >= 800, int(stats[1, cv2.CC_STAT_AREA])
+
+    # And it must still refuse something genuinely elsewhere in the picture.
+    far = np.zeros((600, 800), np.uint8)
+    far[100:126, 87:110] = 255                 # the car
+    far[400:421, 600:623] = 255                # a red thing 300 px away
+    n2, _l2, st2, _c2 = cv2.connectedComponentsWithStats(vehicle.merge_near_components(far), 8)
+    assert n2 - 1 == 2, "a distant red object was swallowed by the car"
+    assert sorted(int(st2[i, cv2.CC_STAT_AREA]) for i in range(1, n2)) == [483, 598]
+
+
 def main() -> int:
     tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith("test_") and callable(f)]
