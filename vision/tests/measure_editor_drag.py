@@ -171,6 +171,11 @@ def main() -> int:
                 "imshow": (tw0 - tr1) * 1000, "wait": (tw1 - tw0) * 1000,
                 "total": (tw1 - tf0) * 1000, "events": tally.events,
                 "derives": tally.derives - derives_before, "layer": app.layer,
+                # Growth is the difference between "slow" and "explosive": if any of these
+                # climbs during one drag, something is accumulating rather than just costing.
+                "nodes": len(app.road.net.nodes), "edges": len(app.road.net.edges),
+                "bays": len(app.ed.spots), "undo": len(app.ed._undo),
+                "derived_nodes": len(app.road._derived.nodes) if app.road._derived else 0,
             })
             tally.events = 0
 
@@ -210,7 +215,44 @@ def main() -> int:
         print(f"    total {r['total']:7.1f}  frame {r['frame']:7.1f}  render {r['render']:6.1f} "
               f"(bays {r['spots']:5.1f} + roads {r['roads']:6.1f})  imshow {r['imshow']:6.1f}  "
               f"wait {r['wait']:6.1f}  derives {r['derives']:.0f}  events {r['events']:.0f}")
+
+    # Does it get worse as the drag goes on? "Explosive" and "constant" are different bugs.
+    half = max(len(tally.rows) // 2, 1)
+    first = statistics.median(r["total"] for r in tally.rows[:half])
+    second = statistics.median(r["total"] for r in tally.rows[half:])
+    grows = [f"{k} {tally.rows[0][k]} -> {tally.rows[-1][k]}" for k in
+             ("nodes", "edges", "bays", "undo", "derived_nodes")
+             if tally.rows[-1][k] != tally.rows[0][k]]
+    print(f"\n  first half {first:.1f} ms  vs  second half {second:.1f} ms  "
+          f"=> {'WORSE OVER TIME' if second > first * 1.3 else 'steady'}")
+    print(f"  state during the drag: " + (", ".join(grows) if grows else "nothing grew"))
     print("\n  the largest of these columns is the mechanism.")
+
+    # Written down as well, because the terminal and I are not the same window.
+    out_dir = os.path.join(ROOT, "out")
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, "editor_drag_probe.txt")
+        lines = [f"source: {args.frame or args.source}", f"frames with a drag held: {len(tally.rows)}",
+                 f"layer: {tally.rows[-1]['layer']}"]
+        for field in ("frame", "render", "spots", "roads", "imshow", "wait", "total",
+                      "events", "derives"):
+            lines.append(f"{field:>10} median {med(field):9.2f}  worst "
+                         f"{max(r[field] for r in tally.rows):9.2f}")
+        lines.append(f"derives total {tally.derives}, "
+                     f"{tally.derive_ms / max(tally.derives, 1):.2f} ms each")
+        lines.append(f"first half {first:.2f} ms, second half {second:.2f} ms")
+        lines.append("state: " + (", ".join(grows) if grows else "nothing grew"))
+        lines.append("")
+        lines.append("per-frame: " + " ".join(
+            f"{r['total']:.0f}" for r in tally.rows[:200]))
+        lines.append("render per-frame: " + " ".join(
+            f"{r['render']:.0f}" for r in tally.rows[:200]))
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        print(f"  written to {path}")
+    except OSError as exc:
+        print(f"  could not write the report: {exc}")
     return 0
 
 
