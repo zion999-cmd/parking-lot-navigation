@@ -708,6 +708,19 @@ function updateHud() {
 
 // ============================================================ render
 function lerp(a, b, t) { return a + (b - a) * t; }
+
+// Deadband 3 px covers the measured +-2.3 px wander of a parked car; the proportional term keeps a
+// moving car in step without ever looking like it is sliding; a jump beyond 60 px is a hand move.
+const CAR_DEADBAND_PX = 3.0;
+const CAR_FOLLOW_K = 0.45;
+const CAR_SNAP_PX = 60.0;
+
+function followAxis(cur, target, deadband, k, snap) {
+  const d = target - cur;
+  if (Math.abs(d) >= snap) return target;
+  if (Math.abs(d) <= deadband) return cur;
+  return cur + d * k;
+}
 function lerpAngle(a, b, t) {
   let d = Nav.normDeg(b - a);
   if (d > 180) d -= 360;
@@ -758,10 +771,11 @@ function updateCamera() {
 
   const t = 0.14;
   cam.scale = lerp(cam.scale, targetCam.scale, t);
-  cam.cx = lerp(cam.cx, targetCam.cx, t);
-  cam.cy = lerp(cam.cy, targetCam.cy, t);
-  // The inset has to travel with the camera the renderer actually uses - it was set on the target
-  // only, so the lift never happened and the route sat half under the sheet.
+  // The focal point is taken directly, not eased. Easing it *and* the car marker meant the two
+  // drifted apart and then re-converged, which is what "floating" looked like; with the camera
+  // pinned to the marker the car sits still and the map moves, as a navigator should.
+  cam.cx = targetCam.cx;
+  cam.cy = targetCam.cy;
   cam.inset = lerp(cam.inset ?? 0, targetCam.inset ?? 0, t);
   // Clamping keeps the view inside the lot, which is right for the follow view; while framing a
   // route it is what pushed the car off screen, so it is skipped there.
@@ -1044,9 +1058,13 @@ function tick() {
     const th = Nav.carHeading(v);
     if (car.x == null) { car.x = v.x; car.y = v.y; car.h = th ?? 0; }
     else {
-      car.x = lerp(car.x, v.x, 0.22);
-      car.y = lerp(car.y, v.y, 0.22);
-      car.h = lerpAngle(car.h, th ?? car.h, 0.22);
+      // Measured at rest: the hero fix wanders up to ~2.3 px between updates and the state file is
+      // written ~1.3 times a second. A plain lerp turns that into a slow glide - the car looked
+      // like it was floating. So: ignore movement inside the measured noise band, and catch up
+      // proportionally outside it, snapping when the jump is far too big to be driving.
+      car.x = followAxis(car.x, v.x, CAR_DEADBAND_PX, CAR_FOLLOW_K, CAR_SNAP_PX);
+      car.y = followAxis(car.y, v.y, CAR_DEADBAND_PX, CAR_FOLLOW_K, CAR_SNAP_PX);
+      car.h = lerpAngle(car.h, th ?? car.h, 0.35);
     }
     car.visible = true;
   } else {

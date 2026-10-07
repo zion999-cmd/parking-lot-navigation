@@ -397,6 +397,55 @@ def test_line_widths_are_screen_space_not_world_space() -> None:
         assert needle in html, f"{name} is not screen-sized"
 
 
+def test_a_parked_car_does_not_drift() -> None:
+    """The reported feel: the hero marker floated as if on water.
+
+    Measured: at rest the hero fix wanders up to ~2.3 px and the state file is written ~1.3 times
+    a second, so an unconditional lerp turned that wander into a slow glide. followAxis ignores
+    movement inside the measured noise band, catches up proportionally outside it, and snaps only
+    when the jump is far too big to be driving.
+    """
+    cases = [
+        # (current, target, expected, why)
+        (100.0, 100.0, 100.0, "no movement"),
+        (100.0, 102.3, 100.0, "measured wander stays put"),
+        (100.0, 97.5, 100.0, "and the other way"),
+        (100.0, 96.8, 98.56, "just outside the band: it moves, proportionally"),
+        (100.0, 90.0, 95.5, "10 px out: half way, no glide"),
+        (100.0, 30.0, 30.0, "a hand move snaps"),
+    ]
+    payload = [{"cur": c, "target": t} for c, t, _, _ in cases]
+    # followAxis and its constants are top-level in the page, so pull them out directly
+    got = node_run_direct("followAxis(c.cur, c.target, CAR_DEADBAND_PX, CAR_FOLLOW_K, CAR_SNAP_PX)",
+                          payload)
+    for (cur, target, want, why), g in zip(cases, got):
+        assert abs(g - want) < 0.01, f"{why}: got {g}, wanted {want}"
+
+
+def node_run_direct(call: str, payload: list) -> list:
+    """Like node_run but with the page's top-level helper functions in scope (not just Nav)."""
+    if not shutil.which("node"):
+        raise unittest.SkipTest("node not installed")
+    html = open(PAGE, encoding="utf-8").read()
+    pieces = [extract_function(html, "followAxis"), extract_function(html, "lerp")]
+    consts = "\n".join(re.findall(
+        r"^const (?:CAR_DEADBAND_PX|CAR_FOLLOW_K|CAR_SNAP_PX) = .*$", html, re.M))
+    assert consts.count("const") == 3, consts
+    driver = (consts + "\n" + "\n".join(pieces) + "\n"
+              "const cs = JSON.parse(process.argv[2]);\n"
+              f"console.log(JSON.stringify(cs.map(c => {call})));\n")
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:
+        fh.write(driver)
+        path = fh.name
+    try:
+        out = subprocess.run(["node", path, json.dumps(payload)],
+                             capture_output=True, text=True, timeout=30)
+    finally:
+        os.unlink(path)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
 def test_clamping_the_camera_does_not_drop_the_rotation() -> None:
     """The bug that pixel checking found and a source guard could not.
 
