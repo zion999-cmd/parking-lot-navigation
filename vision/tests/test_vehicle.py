@@ -351,6 +351,36 @@ def test_a_sighting_with_no_front_known_keeps_the_position() -> None:
     assert abs(out.x - 333.0) < 1e-6
 
 
+# ---- front/rear profile sign (P0002.5 phase 1) ----
+
+def test_score_profile_matches_the_sampled_template_forward():
+    t = np.array([1,-1,1,-1,0.5,-0.5], dtype=float)
+    f, r, m, plus = vehicle.score_profile(t, t)
+    assert f > r and m > 0 and plus is True
+    assert f > 0.99
+
+def test_a_reversed_profile_wins_the_reverse_score():
+    t = np.array([1,-1,1,-1,0.5,-0.5], dtype=float)
+    f, r, m, plus = vehicle.score_profile(t[::-1], t)
+    assert r > f and m < 0 and plus is False
+    assert r > 0.99
+
+def test_a_symmetric_profile_has_no_sign():
+    t = np.array([1,-1,1,-1,0.5,-0.5], dtype=float)
+    # a profile equal to its own reverse leaves forward == reverse
+    symmetric = np.array([0,1,1,0], dtype=float)
+    tt = np.array([0,1,1,0], dtype=float)
+    f, r, m, plus = vehicle.score_profile(symmetric, tt)
+    assert abs(m) < 1e-9
+
+def test_forward_and_reverse_are_exact_opposites_for_p_and_its_flip():
+    t = np.linspace(-1, 1, 8)
+    a = vehicle.score_profile(t, t)
+    b = vehicle.score_profile(t[::-1], t)
+    assert abs(a[0]-b[1]) < 1e-9 and abs(a[1]-b[0]) < 1e-9
+    assert abs(a[2] + b[2]) < 1e-9
+
+
 def main() -> int:
     tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith("test_") and callable(f)]

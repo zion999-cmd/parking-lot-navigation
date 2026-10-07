@@ -28,12 +28,20 @@ largest "red object" in the picture.
 
 from __future__ import annotations
 
+import json
 import math
+import os
 from dataclasses import dataclass, replace
 from typing import List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
+
+# The sign template, sampled from the real car: tests/capture_vehicle_profile.py builds it.
+# 24 brightness bins read rear -> front (bin 0 at the boot, bin 23 at the nose).
+PROFILE_TEMPLATE_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "config", "vehicle_profile.json")
 
 # Red wraps around the hue circle, so it takes two ranges. Tight on purpose: see above.
 RED_HUE_RANGES: Tuple[Tuple[Tuple[int, int, int], Tuple[int, int, int]], ...] = (
@@ -97,6 +105,12 @@ class VehiclePose:
     # Grey levels between the two ends after removing the lighting trend. Positive means the
     # +axis end is brighter, which by the car's paint pattern means the front is that way.
     ends_grey: float = 0.0
+    # Full-profile sign, the replacement for ends_grey: how well the whole 24-bin profile
+    # matches the sampled template read rear->front, and the same read the other way; margin is
+    # the gap between them.
+    forward_score: Optional[float] = None
+    reverse_score: Optional[float] = None
+    score_margin: Optional[float] = None
     # Signed and normalised: +1 means the front is at the +axis end.
     front_evidence: Optional[float] = None
     front_heading: Optional[float] = None
@@ -324,6 +338,58 @@ class VehicleTracker:
                        front_heading=front if known else None, front_is_known=known)
 
 
+_TEMPLATE_CACHE = "unloaded"
+# Measured, not chosen: the correct-vs-reverse margin on 60 frames of the real car is 0.875, so a
+# confident frame maps to evidence near 1.0 and an uncertain one scales down. Re-measured any time
+# by tests/capture_vehicle_profile.py --build; the number belongs to this car, not to the code.
+MARGIN_SCALE = 0.9
+
+
+def vehicle_template(path: str = PROFILE_TEMPLATE_PATH) -> Optional[np.ndarray]:
+    """The sampled rear->front profile, loaded once. None when it has not been captured.
+
+    The sentinel is checked with isinstance on purpose: once loaded, the cache is an ndarray, and
+    `ndarray == "unloaded"` is an element-wise boolean array rather than one bool, which made the
+    first version raise when it tried to choose between the template and None.
+    """
+    global _TEMPLATE_CACHE
+    if isinstance(_TEMPLATE_CACHE, str):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                values = json.load(fh).get("template")
+            _TEMPLATE_CACHE = (np.asarray(values, dtype=np.float64)
+                               if values is not None else None)
+        except (OSError, ValueError):
+            _TEMPLATE_CACHE = None
+    return None if isinstance(_TEMPLATE_CACHE, str) else _TEMPLATE_CACHE
+
+
+def _shape(values: np.ndarray) -> np.ndarray:
+    """Zero-mean, unit-spread: compare the pattern shape, not the lighting level."""
+    v = np.asarray(values, dtype=np.float64)
+    v = v - v.mean()
+    spread = v.std()
+    return v / spread if spread > 1e-9 else v
+
+
+def _correlate(a: np.ndarray, b: np.ndarray) -> float:
+    """Pearson correlation of two equal-length profile shapes, in -1..1."""
+    return float(np.dot(_shape(a), _shape(b)) / len(a))
+
+
+def score_profile(profile, template):
+    """Match a profile to the sampled template both ways.
+
+    The template reads rear->front. forward > reverse means the current +axis projection also
+    reads rear->front, so the front is at the high-projection (+axis) end: front_is_plus. A
+    symmetric profile gives a margin of zero and no usable sign.
+    """
+    forward = _correlate(profile, template)
+    reverse = _correlate(profile, template[::-1])
+    margin = forward - reverse
+    return forward, reverse, margin, margin > 0
+
+
 def profile_of(along: np.ndarray, tones: np.ndarray, bins: int = 24
                ) -> Optional[np.ndarray]:
     """The brightness profile along the car's axis: one mean tone per slice.
@@ -438,11 +504,20 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
         # of the silhouette is the fallback for a car with no usable pattern.
         evidence: Optional[float] = None
         ends_grey = 0.0
+        forward_score = reverse_score = score_margin = None
         if profile is not None:
-            difference, magnitude = ends_of(profile)
-            ends_grey = difference
-            if magnitude >= ENDS_MIN_GREY:
-                evidence = float(np.clip(difference / ENDS_SCALE, -1.0, 1.0))
+            difference, _ = ends_of(profile)
+            ends_grey = difference                  # kept for the HUD, no longer the sign
+            template = vehicle_template()
+            if template is not None:
+                forward_score, reverse_score, score_margin, _plus = \
+                    score_profile(profile, template)
+                # A flat profile gives a margin of zero - a uniform red blob, or one with no
+                # asymmetry visible. That is the template *abstaining*, not answering zero:
+                # leave evidence None so the silhouette taper below still gets used, instead of
+                # a dead 0 that disables the fallback and still fails the front gate.
+                if abs(score_margin) > 1e-9:
+                    evidence = float(np.clip(score_margin / MARGIN_SCALE, -1.0, 1.0))
         if evidence is None and abs(taper) >= MIN_TAPER:
             signed = taper if FRONT_IS_THE_WIDER_END else -taper
             evidence = float(np.clip(signed / TAPER_SCALE, -1.0, 1.0))
@@ -460,6 +535,9 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
                                heading_pca=heading_pca, taper=taper,
                                band_pos=band_pos, band_contrast=band_contrast,
                                ends_grey=ends_grey,
+                               forward_score=forward_score,
+                               reverse_score=reverse_score,
+                               score_margin=score_margin,
                                front_evidence=evidence,
                                front_heading=front_heading, front_is_known=front_known))
     out.sort(key=lambda p: -p.area)
