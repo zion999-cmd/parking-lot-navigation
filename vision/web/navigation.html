@@ -794,6 +794,7 @@ const STYLE = {
   aisleEdge: "#dfe4ea",
   aisleWidth: 60,          // world px: the real corridor half-width x2, between the bay rows
   stubWidth: 44,           // world px: the entrance branch
+  minLanePx: 60,           // measured: bay access stubs are 27-40 px, real lane runs >= 83 px
   bayFree: "#e7ece6",
   bayTaken: "#e6e9ef",
   bayUnknown: "#e8ebef",
@@ -852,11 +853,19 @@ function drawRoads() {
     if (closed) ctx.closePath();
   };
   const rim = 1.6 / cam.scale;
+  // Butt ends, not round: a round cap on a wide corridor draws a semicircle at every end.
+  ctx.lineCap = "butt";
   const band = (pts, closed, half) => {
     trace(pts, closed);
     ctx.strokeStyle = STYLE.aisleEdge; ctx.lineWidth = half * 2 + rim; ctx.stroke();
     trace(pts, closed);
     ctx.strokeStyle = STYLE.aisleFill; ctx.lineWidth = half * 2; ctx.stroke();
+  };
+  const lengthOf = pts => {
+    let L = 0;
+    for (let i = 1; i < pts.length; i++)
+      L += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+    return L;
   };
   const loopPoints = new Set();
   for (const cyc of LOOPS)
@@ -872,6 +881,10 @@ function drawRoads() {
     if (chain.length < 2) continue;
     const onLoop = chain.every(p => loopPoints.has(Math.round(p[0]) + "," + Math.round(p[1])));
     if (onLoop) continue;
+    // The map's graph carries one short connector per bay (its access node) so the planner can
+    // route into a bay. That is navigation *data*, not a lane: drawn, each became a wide
+    // semicircle-tipped stub at every bay. Only real lane runs are drawn here.
+    if (lengthOf(chain) < STYLE.minLanePx) continue;
     band(chain, false, STYLE.stubWidth / 2);
   }
 }
