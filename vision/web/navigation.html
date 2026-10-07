@@ -385,10 +385,38 @@ const Nav = {
   // direction is up. A car navigator turns the map instead of turning the arrow: with the car on
   // a lane that is not vertical, a fixed north-up view shows the route at some angle and the
   // driver has to work out which way is forward.
-  fitCamera(viewW, viewH, worldW, worldH) {
+  fitCamera(viewW, viewH, worldW, worldH, insetBottom = 0) {
+    // insetBottom is the height of the sheet docked at the bottom: the lot must fit in the part
+    // of the screen a person can actually see, and be centred in that part rather than under the
+    // card. (Called with four arguments it behaves exactly as before.)
     const pad = 48;
-    const scale = Math.min((viewW - pad * 2) / worldW, (viewH - pad * 2) / worldH);
-    return { scale, cx: worldW / 2, cy: worldH / 2 };
+    const usableH = Math.max(120, viewH - insetBottom);
+    const scale = Math.min((viewW - pad * 2) / worldW, (usableH - pad * 2) / worldH);
+    // The viewport centre is viewH/2; the visible band's centre is usableH/2. Shift the world
+    // focal point so the lot lands in the band.
+    const shift = (viewH / 2 - usableH / 2) / scale;
+    return { scale, cx: worldW / 2, cy: worldH / 2 + shift };
+  },
+  // The camera while a route is being driven: the box the route and the car occupy, fitted on
+  // screen. Centring only on the car showed no route at all - a 900 px route does not fit a
+  // car-centred view of this lot - so the view follows the route's box, which itself follows the
+  // car as it moves. Clamped so it never zooms out past the lot nor in past driving zoom.
+  routeCamera(viewW, viewH, car, points, insetBottom = 0, minScale = 0.6, maxScale = 6.0) {
+    const pad = 56;
+    const usableH = Math.max(120, viewH - insetBottom);
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    const pts = (points || []).slice();
+    if (car && typeof car.x === "number") pts.push([car.x, car.y]);
+    if (!pts.length) return null;
+    for (const [x, y] of pts) {
+      x0 = Math.min(x0, x); y0 = Math.min(y0, y);
+      x1 = Math.max(x1, x); y1 = Math.max(y1, y);
+    }
+    const w = Math.max(x1 - x0, 24), h = Math.max(y1 - y0, 24);
+    const scale = Math.min((viewW - pad * 2) / w, (usableH - pad * 2) / h);
+    const shift = (viewH / 2 - usableH / 2) / Math.max(scale, 1e-6);
+    return { scale: Math.max(minScale, Math.min(maxScale, scale)),
+             cx: (x0 + x1) / 2, cy: (y0 + y1) / 2 + shift };
   },
   followCamera(viewW, viewH, x, y, scale) {
     return { scale, cx: x, cy: y };
@@ -695,6 +723,14 @@ function lerpAngle(a, b, t) {
   return Nav.normDeg(a + d * t);
 }
 
+// Height of whatever sheet is docked at the bottom right now, so the fitted view avoids it.
+function sheetHeight() {
+  const nav = document.getElementById("navSheet");
+  const pick = document.getElementById("pickSheet");
+  const vis = el => el && getComputedStyle(el).display !== "none" ? el.offsetHeight : 0;
+  return Math.max(vis(nav), vis(pick));
+}
+
 function updateCamera() {
   const worldW = MAP?.coordinate_system?.width ?? 800;
   const worldH = MAP?.coordinate_system?.height ?? 600;
@@ -703,10 +739,17 @@ function updateCamera() {
   // was the bay they were aiming for, so the camera keeps following the stopped car.
   const useFollow = (PHASE === "NAVIGATING" || PHASE === "ARRIVED") &&
                     v && v.visible !== false && car.x != null;
-  if (useFollow) targetCam = Nav.followCamera(viewW0, viewH0, car.x, car.y, driveScale());
-  else {
-    const fit = Nav.fitCamera(viewW0, viewH0, worldW, worldH);
-    targetCam = fit;
+  const sheetInset = sheetHeight();
+  if (useFollow) {
+    // Heading-up, and framing the route's own box so the whole route is on screen - a route is
+    // what "selected a bay" means, so it must be visible; the box follows the car as it moves.
+    const pts = ROUTE?.ok ? Nav.routePoints(ROUTE, NODES).points : [];
+    const framed = Nav.routeCamera(viewW0, viewH0, { x: car.x, y: car.y }, pts, sheetInset,
+                                   0.75, driveScale());
+    targetCam = framed ?? Nav.followCamera(viewW0, viewH0, car.x, car.y, driveScale());
+  } else {
+    // Nothing selected: the whole parking lot, fitted above the sheet.
+    targetCam = Nav.fitCamera(viewW0, viewH0, worldW, worldH, sheetInset);
   }
   // Turn the map so the car's own heading is up, which is what makes a route on a lane that is
   // not vertical readable at a glance. Eased, and along the short way round: at 359 degrees it
