@@ -146,6 +146,11 @@ class CalibrationApp:
                  template: Optional[np.ndarray] = None,
                  align_motion: str = "translation"):
         self.ed = editor
+        # Which key renames a bay. Standalone this app owns its window, so it is 'r'. main.py
+        # binds 'r' to capturing the reference frame, and a window that tells you to press a key
+        # that does something else is worse than one that says nothing - so it sets this to 'R'
+        # and the hint below tells the truth about the window you are actually looking at.
+        self.rename_hint = "r"
         self.out_path = out_path
         self.template = template          # the frame the bays were drawn on
         self.align_motion = align_motion
@@ -223,7 +228,8 @@ class CalibrationApp:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.52, colour, 1)
 
         if self.layer == "spots":
-            hint = ("drag | A align | a auto | g row | n add | d del | r rename | i inner | "
+            hint = ("drag | A align | a auto | g row | n add | d del | "
+                    f"{self.rename_hint} rename | i inner | "
                     "j ent | s save | z undo | c reset | 2468 (m) | Tab | t roads | q")
         else:
             hint = ("click = draw road | drag orange dot = fix a bay's way in | "
@@ -697,9 +703,18 @@ class CalibrationApp:
         spot = self.ed.selected_spot()
         try:
             if kind == "rename" and spot is not None:
-                new_id = input(f"  new id for spot {spot.id}: ").strip()
+                # The terminal is a second window and it is easy to miss a bare prompt buried in
+                # the diagnostics, so this one is not bare. Renaming happens here rather than in
+                # the picture because OpenCV cannot read a line of text.
+                print("\n  == 改名：请在【这个终端窗口】输入新的车位编号，然后按回车 ==")
+                new_id = input(f"  新编号（现在叫 {spot.id}）> ").strip()
                 if new_id:
-                    self.ed.rename_selected(new_id)
+                    if self.ed.rename_selected(new_id):
+                        print(f"  => 已改名为 {new_id}；按 s 立即保存，按 q 退出时也会自动保存")
+                    else:
+                        print("  => 没改成（编号不能为空，也不能和别的车位重复）")
+                else:
+                    print("  => 取消（没有输入）")
             elif kind == "inner" and spot is not None:
                 raw = input(f"  inner detection scale for spot {spot.id} "
                             f"[0.2-0.95, now {spot.inner_scale:.2f}]: ").strip()

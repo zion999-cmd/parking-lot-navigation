@@ -475,6 +475,14 @@ def run_edit_mode(get_frame, config_path: str, template_path: Optional[str],
     cv2.setMouseCallback(WINDOW, app.on_mouse)
 
     frame = None
+    # The window's own key hint comes from the editor, which standalone binds 'r' to rename.
+    # Here 'r' captures the reference frame, so the window must say 'R' instead - a window that
+    # tells you to press a key that does something else is how a rename "did not work".
+    app.rename_hint = "R"
+    print("  edit mode:  r = capture the empty reference    R = rename a bay "
+          "(type the new id in this terminal)")
+    print("              s = save now                       q = save and leave")
+
     while True:
         fresh = get_frame()
         if fresh is not None:
@@ -519,6 +527,11 @@ def run_edit_mode(get_frame, config_path: str, template_path: Optional[str],
             print(f"  error: could not write {config_path}", file=sys.stderr)
     else:
         print("  config unchanged")
+    # q and ESC both save on the way out, but this is a second net: the caller reloads the config
+    # from disk the moment we return, so an edit that never reached the file would vanish.
+    if app.ed.dirty or app.road.dirty:
+        app._save_all()
+
     return len(editor.spots)
 
 

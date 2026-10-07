@@ -17,7 +17,10 @@ import tempfile
 import cv2
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+HERE = os.path.dirname(os.path.abspath(__file__))
+SRC = os.path.join(HERE, "..", "src")
+REAL_CONFIG = os.path.join(HERE, "..", "config", "parking_spots.json")
+sys.path.insert(0, SRC)
 
 from calibration import CalibrationApp                        # noqa: E402
 from detector import DetectorParams                           # noqa: E402
@@ -508,6 +511,67 @@ def test_out_of_frame_bays_are_skipped_so_the_viewer_still_starts() -> None:
             raise AssertionError("a stray bay alone should still be an error by default")
         # ...but with skip_bad the viewer starts, which is what lets 'e' fix the file.
         assert len(load_spots(path, (H, W), skip_bad=True)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Renaming a bay
+# ---------------------------------------------------------------------------
+
+def a_loaded_editor(tmp: str):
+    """A real editor over a copy of the real map, so the ids are the ones a person sees."""
+    import shutil, spot_config, spot_editor
+    cfg = os.path.join(tmp, "parking_spots.json")
+    shutil.copy(REAL_CONFIG, cfg)
+    editor = spot_editor.SpotEditor((600, 800))
+    assert editor.load(cfg)
+    return editor, cfg
+
+
+def test_renaming_a_bay_works_and_refuses_only_empty_or_duplicate_ids() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        editor, cfg = a_loaded_editor(tmp)
+        original = [s.id for s in editor.spots[:3]]
+        editor.select(0)
+        assert editor.rename_selected("A1") is True
+        assert editor.spots[0].id == "A1" and editor.dirty is True
+        assert editor.rename_selected("") is False, "an empty id is not a name"
+        assert editor.rename_selected(original[1]) is False, "a duplicate id would be ambiguous"
+        assert editor.spots[0].id == "A1", "a refused rename must not half-apply"
+
+
+def test_a_renamed_bay_survives_saving_and_reloading_even_in_chinese() -> None:
+    """The user's case: rename a bay and it must still be called that afterwards."""
+    import spot_config
+    with tempfile.TemporaryDirectory() as tmp:
+        editor, cfg = a_loaded_editor(tmp)
+        editor.select(0)
+        assert editor.rename_selected("东 1") is True
+        assert editor.save(cfg) is True
+        again = spot_config.load_spots(cfg, skip_bad=True)
+        assert again[0].id == "东 1", [s.id for s in again[:3]]
+
+
+def test_the_window_says_which_key_renames_in_the_window_you_are_looking_at() -> None:
+    """The bug behind "renaming did not work": standalone the editor binds 'r' to rename, but
+    main.py binds 'r' to capturing the reference frame. The hint line has to follow the host, or
+    it tells you to press a key that does something else."""
+    editor_src = open(os.path.join(SRC, "calibration.py"), encoding="utf-8").read()
+    main_src = open(os.path.join(SRC, "main.py"), encoding="utf-8").read()
+    assert 'self.rename_hint = "r"' in editor_src, "the standalone default"
+    assert "{self.rename_hint} rename" in editor_src, "the hint must use it, not a literal"
+    assert 'app.rename_hint = "R"' in main_src, "main.py must say R, because it owns r"
+    assert "edit mode:  r = capture the empty reference" in main_src, \
+        "and say out loud what each key does when the mode starts"
+
+
+def test_leaving_the_editor_writes_the_change_even_if_q_was_not_the_last_key() -> None:
+    """The second net: the caller reloads the config as soon as the editor returns, so anything
+    still marked dirty has to be written before that happens."""
+    main_src = open(os.path.join(SRC, "main.py"), encoding="utf-8").read()
+    tail = main_src[main_src.index("def run_edit_mode("):main_src.index("def main() -> int:")]
+    assert "app._save_all()" in tail, "the edit mode must flush on the way out"
+    assert tail.index("app._save_all()") > tail.index("cv2.destroyAllWindows()"), \
+        "and after the loop, not before it"
 
 
 def main() -> int:
