@@ -211,13 +211,14 @@ def test_a_click_lands_on_the_bay_that_was_drawn_there() -> None:
     """
     bays = [{"id": "A", "polygon": [[100, 100], [148, 100], [148, 200], [100, 200]]},
             {"id": "B", "polygon": [[100, 240], [148, 240], [148, 340], [100, 340]]}]
-    payload = [{"rot": r, "inset": inset, "scale": sc}
+    payload = [{"rot": r, "anchorX": ax, "anchorY": ay, "scale": sc}
                for r in (0.0, -1.5707963267948966, 0.6)
-               for inset in (0, 150, 320)
+               for ax, ay in ((450, 600), (450, 400), (300, 250))
                for sc in (1.0, 2.5)]
     got = node_run(
         "(() => {"
-        " const cam = {scale: c.scale, cx: 124, cy: 160, inset: c.inset};"
+        " const cam = {scale: c.scale, cx: 124, cy: 160,"
+        "              anchorX: c.anchorX, anchorY: c.anchorY};"
         " const out = [];"
         " for (const b of bays) {"
         "   const [bx, by] = Nav.centroid(b.polygon);"
@@ -230,21 +231,65 @@ def test_a_click_lands_on_the_bay_that_was_drawn_there() -> None:
         payload,
         extra=f"const bays = {json.dumps(bays)};")
     for case, res in zip(payload, got):
-        assert res == ["A", "B"], f"rot {case['rot']} inset {case['inset']} scale {case['scale']} -> {res}"
+        assert res == ["A", "B"], (f"rot {case['rot']} anchor {case['anchorX']},{case['anchorY']}"
+                                  f" scale {case['scale']} -> {res}")
 
 
-def test_screen_and_world_invert_with_a_docked_sheet() -> None:
-    """The same pair, over a round trip: the sheet lift has to cancel exactly, not approximately."""
-    payload = [{"rot": r, "inset": i, "x": x, "y": y}
-               for r in (0.0, -1.5707963267948966, 0.7, 2.9) for i in (0, 88, 200, 340)
+def test_screen_and_world_invert_with_an_anchor() -> None:
+    """The same pair over a round trip: whatever the anchor, it has to cancel exactly."""
+    payload = [{"rot": r, "anchorX": ax, "anchorY": ay, "x": x, "y": y}
+               for r in (0.0, -1.5707963267948966, 0.7, 2.9)
+               for ax, ay in ((450, 600), (450, 400), (450, 340))
                for x, y in ((0.0, 0.0), (37.5, 512.25), (799.0, 599.0))]
     got = node_run(
-        "(() => { const cam = {scale: 3.1, cx: 400, cy: 300, inset: c.inset};"
+        "(() => { const cam = {scale: 3.1, cx: 400, cy: 300,"
+        "                    anchorX: c.anchorX, anchorY: c.anchorY};"
         " const s = Nav.toScreen(900, 1200, cam, c.rot, c.x, c.y);"
         " return Nav.screenToWorld(900, 1200, cam, c.rot, s[0], s[1]); })()", payload)
     for case, (x, y) in zip(payload, got):
         assert abs(x - case["x"]) < 1e-6, (case, x, y)
         assert abs(y - case["y"]) < 1e-6, (case, x, y)
+
+
+def test_the_driving_composition_holds_the_car_at_one_third() -> None:
+    """Asked for: while navigating the car is centred horizontally and a third of the way down.
+
+    navAnchor is that rule, and it has to be the rule for the whole screen rather than the part
+    above the sheet - the car has to be at a fixed place on the glass.
+    """
+    out = node_run("[Nav.navAnchor(900, 1200, 300, true), Nav.navAnchor(900, 1200, 300, false),"
+                   " Nav.navAnchor(900, 1200, 0, true)]", [0])[0]
+    assert out[0] == [450, 400], out              # 1200/3
+    assert out[1] == [450, 450], out              # centred in the band above a 300 px sheet
+    assert out[2] == [450, 400], out              # the sheet does not move the driving anchor
+
+
+def test_the_zoom_keeps_the_whole_route_on_screen_around_the_car() -> None:
+    """The property that matters: whatever the scale chosen, every route point must land inside
+    the frame with the car held at the anchor. Checked by projecting them, not by trusting the
+    formula - and under rotation, which is where a world-axis measurement would be wrong."""
+    cases = []
+    for heading in (0.0, 90.0, 200.0, 315.0):
+        for pts in ([[0, 0], [400, 0]], [[0, 0], [0, 500]], [[0, 0], [-300, 300], [700, -200]],
+                    [[0, 0], [40, 20]]):
+            cases.append({"h": heading, "pts": pts})
+    got = node_run(
+        "(() => {"
+        " const rot = Nav.worldRotation(c.h);"
+        " const anchorX = 450, anchorY = 400, viewW = 900, viewH = 1200;"
+        " const car = {x: 0, y: 0};"
+        " const scale = Nav.routeAroundScale(viewW, viewH, anchorX, anchorY, rot, car, c.pts,"
+        "                                    56, 0.3, 6.0, viewH - 300);"   # floor + sheet
+        " const cam = {scale, cx: car.x, cy: car.y, anchorX, anchorY};"
+        " const out = c.pts.map(p => Nav.toScreen(viewW, viewH, cam, rot, p[0], p[1]));"
+        " return [scale, out]; })()",
+        cases)
+    for case, (scale, pts) in zip(cases, got):
+        for sx, sy in pts:
+            assert 0 <= sx <= 900, (case, scale, sx, sy)
+            assert 0 <= sy <= 900, (case, scale, sx, sy)   # 900 = the sheet's top edge
+    # and the car's own anchor really is where the car is drawn
+    assert got[0][1][0] == [450, 400], got[0][1][0]
 
 
 def test_roads_are_merged_into_continuous_lines() -> None:
