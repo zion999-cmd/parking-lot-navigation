@@ -377,6 +377,24 @@ def test_the_route_is_replanned_when_the_car_moves() -> None:
     assert not wrong, "; ".join(f"{w}: got {g}, wanted {k}" for w, g, k in wrong)
 
 
+def test_clamping_the_camera_does_not_drop_the_rotation() -> None:
+    """The bug that pixel checking found and a source guard could not.
+
+    clampCamera returns a new object every frame, and the first version returned only scale and
+    the centre. The rotation was therefore undefined again before the renderer read it, so the map
+    never turned - while every string in the file still said it should. Any field the camera
+    carries has to survive the clamp; this is the one that did not.
+    """
+    payload = [{"scale": s, "cx": x, "cy": y, "rot": r}
+               for s, x, y, r in ((3.0, 100.0, 100.0, -1.2), (0.8, 400.0, 300.0, 0.0),
+                                  (2.0, 795.0, 590.0, 2.5))]
+    got = node_run("Nav.clampCamera(900, 1000, c, 800, 600).rot", payload)
+    assert got == [-1.2, 0.0, 2.5], got
+    # and a camera that never had one does not acquire a NaN
+    got2 = node_run("Nav.clampCamera(900, 1000, {scale: 2, cx: 10, cy: 10}, 800, 600).rot", [0])
+    assert got2 == [0], got2
+
+
 def test_camera_is_clamped_inside_the_lot() -> None:
     """Following a car into a corner must not show ground that is not a car park."""
     # view 900x1000, scale 3.75 -> half view is 120x133.3 world px, so the camera centre may sit
@@ -389,7 +407,9 @@ def test_camera_is_clamped_inside_the_lot() -> None:
     ]
     got = node_run("Nav.clampCamera(900,1000,c.cam,800,600)", payload)
     assert abs(got[0]["cx"] - 120) < 1e-6 and abs(got[0]["cy"] - 133.3333) < 1e-3, got[0]
-    assert got[1] == {"scale": 3.75, "cx": 400, "cy": 300}, got[1]
+    # The clamp moves the centre and nothing else: scale and rot come back untouched, which is
+    # what test_clamping_the_camera_does_not_drop_the_rotation is about.
+    assert got[1] == {"scale": 3.75, "cx": 400, "cy": 300, "rot": 0.0}, got[1]
     assert abs(got[2]["cx"] - 680) < 1e-6 and abs(got[2]["cy"] - 466.6667) < 1e-3, got[2]
     assert got[3]["cx"] == 400 and got[3]["cy"] == 300, got[3]
 

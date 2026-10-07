@@ -335,7 +335,11 @@ const Nav = {
                : Math.min(Math.max(cam.cx, halfW), worldW - halfW);
     const cy = (worldH <= halfH * 2) ? worldH / 2
                : Math.min(Math.max(cam.cy, halfH), worldH - halfH);
-    return { scale: cam.scale, cx, cy };
+    // rot has to come back with it. Leaving it out cost the whole feature: the clamp returns a
+    // new object every frame, so cam.rot was undefined again before the renderer looked at it and
+    // the map never turned. Only a pixel check caught that - a test that reads the source for
+    // "applyCamera(..., cam.rot)" is satisfied by code that cannot run.
+    return { scale: cam.scale, cx, cy, rot: cam.rot || 0 };
   },
   // Canvas order: translate to the middle of the view, rotate, scale, then move the world under
   // the focal point. The rotation is applied after the translation, so it is applied about the
@@ -622,133 +626,223 @@ function driveScale() {
   return _driveScale;
 }
 
+// ============================================================ the map style
+// A navigation map rather than a diagram. The rules that make one read as the other, in the order
+// they matter: the ground is flat and quiet, roads are *lighter* than the ground and carry a
+// casing so they keep an edge at any angle, the route is the brightest thing on screen, bays
+// become texture instead of colour once you are driving, only your destination has a marker, and
+// every label sits on a rounded plate so it stays legible over whatever is under it.
+const STYLE = {
+  ground: "#141a23",
+  lotEdge: "rgba(255,255,255,.07)",
+  roadCasing: "#3a4453",
+  roadFill: "#2c3544",
+  roadWidth: 18,
+  routeCasing: "#0f2d52",
+  routeFill: "#3fa9ff",
+  routeWidth: 10,
+  bayEdge: "rgba(255,255,255,.16)",
+  faintEdge: "rgba(255,255,255,.07)",
+  freeEdge: "rgba(74,222,128,.8)",
+  freeFill: "rgba(74,222,128,.10)",
+  takenFill: "rgba(255,255,255,.05)",
+  text: "#eaf0f8",
+  muted: "#98a3b4",
+  plate: "rgba(9,13,19,.82)",
+  car: "#ef4444",
+  target: "#3fa9ff",
+};
+
 function drawWorld() {
   ctx.clearRect(0, 0, viewW0, viewH0);
   if (!MAP) return;
 
   ctx.save();
   Nav.applyCamera(ctx, viewW0, viewH0, cam, cam.rot);
-
-  // ground
-  ctx.fillStyle = "#11151f";
-  ctx.fillRect(0, 0, 800, 600);
-
-  // Roads first, under the bays, as continuous lines rather than one stroke per stored edge: a
-  // road held as four segments should not look like four segments, and the centre dashes have to
-  // keep their rhythm across the whole run instead of restarting at every node.
   ctx.lineCap = "round"; ctx.lineJoin = "round";
-  const path = chain => { ctx.beginPath();
-    chain.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); };
-  for (const chain of CHAINS) {
-    if (chain.length < 2) continue;
-    path(chain);
-    ctx.strokeStyle = "#232a38"; ctx.lineWidth = 26; ctx.stroke();
-    ctx.strokeStyle = "#2b3344"; ctx.lineWidth = 22; ctx.stroke();
-  }
-  ctx.setLineDash([10, 10]);
-  ctx.strokeStyle = "rgba(255,255,255,.18)"; ctx.lineWidth = 1.5;
-  for (const chain of CHAINS) {
-    if (chain.length < 2) continue;
-    path(chain); ctx.stroke();
-  }
-  ctx.setLineDash([]);
 
-  // entrance marker
-  for (const g of MAP.entrances ?? []) {
-    const n = NODES[g.node];
-    if (!n) continue;
-    ctx.beginPath(); ctx.arc(n.x, n.y, 12, 0, Math.PI * 2);
-    ctx.fillStyle = "rgba(56,189,248,.25)"; ctx.fill();
-    ctx.strokeStyle = "#38bdf8"; ctx.lineWidth = 2; ctx.stroke();
-    label(n.x + 16, n.y + 4, "入口", "#7dd3fc", 13);
-  }
-
-  // bays
-  for (const s of MAP.spots) {
-    const state = STATE?.spots?.[String(s.id)]?.state ?? "UNKNOWN";
-    const isTarget = String(s.id) === targetId;
-    drawBay(s, state, isTarget);
-  }
-
-  // route highlight
-  if (ROUTE?.ok) {
-    const { points } = Nav.routePoints(ROUTE, NODES);
-    if (points.length > 1) {
-      ctx.beginPath();
-      points.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
-      ctx.strokeStyle = "#38bdf8"; ctx.lineWidth = 7; ctx.lineJoin = "round";
-      ctx.shadowColor = "rgba(56,189,248,.6)"; ctx.shadowBlur = 12; ctx.stroke();
-      ctx.shadowBlur = 0;
-    }
-  }
-
-  // the car
+  drawGround();
+  for (const s of MAP.spots) drawBayShape(s);
+  drawRoads();
+  drawRoute();
+  drawEntrances();
+  drawTarget();
+  for (const s of MAP.spots) drawBayLabel(s);
   if (car.visible && car.x != null) drawCar(car.x, car.y, car.h ?? 0);
 
   ctx.restore();
 }
 
-function drawBay(s, state, isTarget) {
+const drive = () => PHASE === "NAVIGATING" || PHASE === "ARRIVED";
+
+function drawGround() {
+  const w = MAP.coordinate_system?.width ?? 800;
+  const h = MAP.coordinate_system?.height ?? 600;
+  ctx.fillStyle = STYLE.ground;
+  ctx.fillRect(0, 0, w, h);
+  // The edge of the lot, so the map does not bleed into nothing at the boundary.
+  ctx.strokeStyle = STYLE.lotEdge;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(1, 1, w - 2, h - 2);
+}
+
+// Roads: one casing and one fill per chain, both the full length of the road. No centre dashes -
+// they are the thing that made a lane look like a row of pieces, and a real map does not draw them
+// on an aisle either.
+function drawRoads() {
+  const path = chain => {
+    ctx.beginPath();
+    chain.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
+  };
+  for (const chain of CHAINS) {
+    if (chain.length < 2) continue;
+    path(chain);
+    ctx.strokeStyle = STYLE.roadCasing; ctx.lineWidth = STYLE.roadWidth + 3; ctx.stroke();
+    path(chain);
+    ctx.strokeStyle = STYLE.roadFill; ctx.lineWidth = STYLE.roadWidth; ctx.stroke();
+  }
+}
+
+// The route is drawn last of the lines so nothing crosses over it, with a dark casing under a
+// bright fill: that is what makes it readable where it passes a junction, and it is the one thing
+// on the map the driver has to be able to follow without looking for it.
+function drawRoute() {
+  if (!ROUTE?.ok) return;
+  const { points } = Nav.routePoints(ROUTE, NODES);
+  if (points.length < 2) return;
+  const path = () => {
+    ctx.beginPath();
+    points.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
+  };
+  path(); ctx.strokeStyle = STYLE.routeCasing; ctx.lineWidth = STYLE.routeWidth + 5; ctx.stroke();
+  path(); ctx.strokeStyle = STYLE.routeFill; ctx.lineWidth = STYLE.routeWidth; ctx.stroke();
+}
+
+// Bays. While driving they are texture - a hairline each - because the free ones are no longer the
+// question; choosing one, they carry their state, because that is the question.
+function drawBayShape(s) {
+  const state = STATE?.spots?.[String(s.id)]?.state ?? "UNKNOWN";
+  const isTarget = String(s.id) === targetId;
   const p = s.polygon;
-  ctx.beginPath();
-  p.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+  const poly = () => {
+    ctx.beginPath();
+    p.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+    ctx.closePath();
+  };
+  if (isTarget) {
+    poly(); ctx.fillStyle = "rgba(63,169,255,.16)"; ctx.fill();
+    poly(); ctx.strokeStyle = STYLE.target; ctx.lineWidth = 3; ctx.stroke();
+    return;
+  }
+  if (drive()) {
+    poly(); ctx.strokeStyle = STYLE.faintEdge; ctx.lineWidth = 1; ctx.stroke();
+    return;
+  }
+  if (state === "EMPTY") {
+    poly(); ctx.fillStyle = STYLE.freeFill; ctx.fill();
+    poly(); ctx.strokeStyle = STYLE.freeEdge; ctx.lineWidth = 2; ctx.stroke();
+  } else if (state === "OCCUPIED") {
+    poly(); ctx.fillStyle = STYLE.takenFill; ctx.fill();
+    poly(); ctx.strokeStyle = STYLE.bayEdge; ctx.lineWidth = 1.25; ctx.stroke();
+  } else {
+    poly(); ctx.strokeStyle = STYLE.faintEdge; ctx.lineWidth = 1; ctx.stroke();
+  }
+}
+
+function drawBayLabel(s) {
+  const state = STATE?.spots?.[String(s.id)]?.state ?? "UNKNOWN";
+  const isTarget = String(s.id) === targetId;
+  const [cx, cy] = Nav.centroid(s.polygon);
+  if (isTarget) return;                       // the marker above carries the number
+  if (drive()) {
+    // Nothing but the road you are on and where you are going: that is the whole point of a
+    // navigation view, and forty numbers competing with the route is how it stops being one.
+    return;
+  }
+  const colour = state === "EMPTY" ? "#b9f6d0"
+    : state === "OCCUPIED" ? "#c8cedb" : STYLE.muted;
+  label(cx, cy, String(s.id), colour, 12);
+}
+
+// A destination pin, the way a map marks where you are going - not another outlined polygon for
+// the driver to find among forty of them.
+function drawTarget() {
+  if (targetId == null) return;
+  const s = (MAP.spots ?? []).find(sp => String(sp.id) === targetId);
+  if (!s) return;
+  const [x, y] = Nav.centroid(s.polygon);
+  const r = 9;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.shadowColor = "rgba(0,0,0,.5)"; ctx.shadowBlur = 6; ctx.shadowOffsetY = 2;
+  ctx.beginPath();                            // teardrop: a circle with a point at the bottom
+  ctx.moveTo(0, r * 1.9);
+  ctx.quadraticCurveTo(-r, r * 0.5, -r, 0);
+  ctx.arc(0, 0, r, Math.PI, 0);
+  ctx.quadraticCurveTo(r, r * 0.5, 0, r * 1.9);
   ctx.closePath();
+  ctx.fillStyle = STYLE.target; ctx.fill();
+  ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+  ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 2; ctx.stroke();
+  ctx.beginPath(); ctx.arc(0, 0, 3.4, 0, Math.PI * 2);
+  ctx.fillStyle = "#0b1220"; ctx.fill();
+  ctx.restore();
+  label(x, y - r * 3.4, String(targetId), "#ffffff", 13);
+}
 
-  let fill = "rgba(255,255,255,.03)", stroke = "rgba(255,255,255,.14)";
-  if (state === "EMPTY") { fill = "rgba(52,211,153,.13)"; stroke = "rgba(52,211,153,.55)"; }
-  else if (state === "OCCUPIED") { fill = "rgba(251,113,133,.12)"; stroke = "rgba(251,113,133,.5)"; }
-  else { fill = "rgba(139,150,171,.10)"; stroke = "rgba(139,150,171,.4)"; }
-  if (isTarget) { fill = "rgba(56,189,248,.20)"; stroke = "#38bdf8"; }
-
-  ctx.fillStyle = fill; ctx.fill();
-  ctx.strokeStyle = stroke; ctx.lineWidth = isTarget ? 3 : 1.5; ctx.stroke();
-
-  // Only label bays when zoomed out enough to read; while driving the labels would clutter.
-  if (cam.scale < driveScale() * 0.85) {
-    const [cx, cy] = Nav.centroid(p);
-    label(cx, cy + 4, String(s.id),
-          state === "EMPTY" ? "#86efac" : state === "OCCUPIED" ? "#fda4af" : "#aeb8c8", 12);
-  } else if (isTarget) {
-    const [cx, cy] = Nav.centroid(p);
-    label(cx, cy + 4, String(s.id), "#7dd3fc", 13);
+function drawEntrances() {
+  for (const g of MAP.entrances ?? []) {
+    const n = NODES[g.node];
+    if (!n) continue;
+    ctx.beginPath(); ctx.arc(n.x, n.y, 7, 0, Math.PI * 2);
+    ctx.fillStyle = "#8fd3ff"; ctx.fill();
+    ctx.strokeStyle = "#0b1220"; ctx.lineWidth = 2; ctx.stroke();
+    label(n.x, n.y - 18, "入口", "#cfe6ff", 12);
   }
 }
 
 function label(x, y, text, color, size) {
   // Bay numbers stay level while the map turns: a rotated label is unreadable, and a bay number
-  // nobody can read is worse than no bay number.
+  // nobody can read is worse than no bay number. On a rounded plate, the way a map draws a name
+  // over ground that could be anything.
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(-(cam.rot || 0));
   ctx.font = `600 ${size || 12}px system-ui, sans-serif`;
   ctx.textAlign = "center"; ctx.textBaseline = "middle";
-  ctx.lineWidth = 3; ctx.strokeStyle = "rgba(8,11,17,.8)";
-  ctx.strokeText(text, 0, 0);
+  const w = ctx.measureText(text).width + 12, h = (size || 12) + 8;
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(-w / 2, -h / 2, w, h, 5);
+  else ctx.rect(-w / 2, -h / 2, w, h);
+  ctx.fillStyle = STYLE.plate; ctx.fill();
   ctx.fillStyle = color; ctx.fillText(text, 0, 0);
   ctx.restore();
 }
 
-// The nose sits on the local +x axis and the body runs back along -x. Rotating the context by
-// the heading then points the nose exactly at the heading because image angles and canvas
-// rotation share one convention (0 = +x, increasing towards +y).
+// The car, as a navigation arrow: a rounded chevron with a white ring and a soft shadow, which is
+// what a driver's eye is trained to follow. Kept red, because on this lot the red car is the hero
+// and a blue arrow would be a different car.
 function drawCar(x, y, heading) {
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(heading * Math.PI / 180);
+  ctx.shadowColor = "rgba(0,0,0,.55)"; ctx.shadowBlur = 8; ctx.shadowOffsetY = 2;
 
-  ctx.beginPath();
-  ctx.moveTo(0, -15);                      // nose (up)
-  ctx.lineTo(9, -6); ctx.lineTo(8, 11); ctx.lineTo(0, 13);
-  ctx.lineTo(-8, 11); ctx.lineTo(-9, -6);
+  ctx.beginPath();                            // chevron, nose up the local -y axis
+  ctx.moveTo(0, -15);
+  ctx.quadraticCurveTo(8, -8, 9, 2);
+  ctx.quadraticCurveTo(9, 11, 5, 13);
+  ctx.lineTo(0, 10);
+  ctx.lineTo(-5, 13);
+  ctx.quadraticCurveTo(-9, 11, -9, 2);
+  ctx.quadraticCurveTo(-8, -8, 0, -15);
   ctx.closePath();
-  ctx.fillStyle = "#ef4444";
-  ctx.shadowColor = "rgba(239,68,68,.7)"; ctx.shadowBlur = 10;
-  ctx.fill();
-  ctx.shadowBlur = 0;
-  ctx.strokeStyle = "rgba(255,255,255,.85)"; ctx.lineWidth = 1.5; ctx.stroke();
-  // windscreen cue near the nose, so the front reads even in silhouette
-  ctx.beginPath(); ctx.moveTo(-6, -4); ctx.lineTo(0, -8); ctx.lineTo(6, -4);
-  ctx.strokeStyle = "rgba(255,255,255,.7)"; ctx.lineWidth = 1.2; ctx.stroke();
+  ctx.fillStyle = STYLE.car; ctx.fill();
+  ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+  ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 2.4; ctx.stroke();
+  // a windscreen line near the nose, so the front reads even in silhouette
+  ctx.beginPath(); ctx.moveTo(-4, -5); ctx.lineTo(0, -9); ctx.lineTo(4, -5);
+  ctx.strokeStyle = "rgba(255,255,255,.9)"; ctx.lineWidth = 1.6; ctx.stroke();
   ctx.restore();
 }
 
