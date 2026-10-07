@@ -229,10 +229,7 @@ def reference_audit(ref: np.ndarray, live: np.ndarray, spots: List[Spot],
     """
     p = detector.params.normalized()
     a = detector._prep(ref)
-    # Match the lighting exactly as the detector does, or the two disagree: with a plain diff a
-    # uniform light change made every bay different and the audit cried "stale" while the detector,
-    # which does match the light, was reporting every bay empty.
-    b = detector.match_lighting(detector._prep(live))
+    b = detector._prep(live)
     if a.shape != b.shape:
         print("  audit: the reference and the current frame differ in size - press r")
         return "size-mismatch"
