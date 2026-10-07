@@ -711,7 +711,7 @@ const STYLES = {
   // the bays cyan when free (11.6%) and coral when taken (6.2%), and green POI markers (1.5%).
   // Kept as exact samples rather than re-derived: these are measurements.
   real: {
-    roadSurfaceWidth: 96,    // generous ring band; bay polygons are carved out afterwards
+    roadSurfaceWidth: 68,    // ring corridor: half-width ~34 between the bay rows
     roadStubWidth: 44,       // entrance stub (short branch)
     ground: "#ffffff",
     lotEdge: "rgba(0,0,0,.10)",
@@ -839,10 +839,10 @@ function drawWorld() {
   ctx.lineCap = "round"; ctx.lineJoin = "round";
 
   drawGround();
-  // The road is a wide surface the bays sit on (see roadSurfaceWidth): draw it first so the bay
-  // polygons cover it; otherwise the corridor band paints the bays out.
-  drawRoads();
   for (const s of MAP.spots) drawBayShape(s);
+  // Road after the bays: its band is authoritative and covers the small case where a spot
+  // polygon intrudes into the corridor, so the aisle always reads as aisle.
+  drawRoads();
   drawRoute();
   drawEntrances();
   drawTarget();
@@ -888,7 +888,7 @@ function drawRoads() {
     const pts = cyc.map(id => [NODES[id].x, NODES[id].y]);
     if (pts.length < 3) continue;
     if (STYLE.roadSurfaceWidth) {
-      // No light casing (it read as a white outline): one solid band; bays are carved below.
+      // No light casing (it read as a white outline): one solid authoritative band.
       trace(pts, true);
       ctx.strokeStyle = STYLE.roadFill;
       ctx.lineWidth = STYLE.roadSurfaceWidth; ctx.stroke();
@@ -913,21 +913,9 @@ function drawRoads() {
                     (STYLE.roadSurfaceWidth ? 1 : cam.scale);
     ctx.stroke();
   }
-
-  // 3) Carve the bay polygons out of the surface: edges sit right against the spots, band never
-  // shows through a bay. destination-out erases the gray; bays are drawn after on top.
-  if (STYLE.roadSurfaceWidth) {
-    ctx.save();
-    ctx.globalCompositeOperation = "destination-out";
-    for (const spot of MAP.spots) {
-      ctx.beginPath();
-      spot.polygon.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
-      ctx.closePath();
-      ctx.fill();
-    }
-    ctx.restore();
-  }
 }
+
+
 
 // The route is drawn last of the lines so nothing crosses over it, with a dark casing under a
 // bright fill: that is what makes it readable where it passes a junction, and it is the one thing
