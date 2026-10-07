@@ -552,16 +552,19 @@ def test_a_renamed_bay_survives_saving_and_reloading_even_in_chinese() -> None:
 
 
 def test_the_window_says_which_key_renames_in_the_window_you_are_looking_at() -> None:
-    """The bug behind "renaming did not work": standalone the editor binds 'r' to rename, but
-    main.py binds 'r' to capturing the reference frame. The hint line has to follow the host, or
-    it tells you to press a key that does something else."""
+    """The bug behind "renaming did not work": the window's hint told you to press r, while r in
+    that window captured the reference frame. Both now agree that r renames, and the capture moved
+    to R - checked here so the two cannot drift apart again."""
     editor_src = open(os.path.join(SRC, "calibration.py"), encoding="utf-8").read()
     main_src = open(os.path.join(SRC, "main.py"), encoding="utf-8").read()
+    tail = main_src[main_src.index("def run_edit_mode("):main_src.index("def main() -> int:")]
     assert 'self.rename_hint = "r"' in editor_src, "the standalone default"
     assert "{self.rename_hint} rename" in editor_src, "the hint must use it, not a literal"
-    assert 'app.rename_hint = "R"' in main_src, "main.py must say R, because it owns r"
-    assert "edit mode:  r = capture the empty reference" in main_src, \
-        "and say out loud what each key does when the mode starts"
+    assert "app.rename_hint" not in tail, \
+        "the edit mode must not override it: r renames there too"
+    assert "key == ord('R')" in tail, "the reference capture must be uppercase R"
+    assert "key == ord('r')" not in tail, "and r must reach the editor, where it renames"
+    assert "r = rename" in tail, "the mode says out loud what each key does"
 
 
 def test_leaving_the_editor_writes_the_change_even_if_q_was_not_the_last_key() -> None:

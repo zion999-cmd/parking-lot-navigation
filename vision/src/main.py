@@ -478,10 +478,10 @@ def run_edit_mode(get_frame, config_path: str, template_path: Optional[str],
     # The window's own key hint comes from the editor, which standalone binds 'r' to rename.
     # Here 'r' captures the reference frame, so the window must say 'R' instead - a window that
     # tells you to press a key that does something else is how a rename "did not work".
-    app.rename_hint = "R"
-    print("  edit mode:  r = capture the empty reference    R = rename a bay "
-          "(type the new id in this terminal)")
-    print("              s = save now                       q = save and leave")
+    # No rename_hint override: 'r' renames here, which is what the editor's hint already says.
+    # (The reference capture moved to 'R' so that both agree on 'r'.)
+    print("  edit mode:  r = rename a bay (type the new id in this terminal)")
+    print("              R = capture the empty reference   s = save now   q = save and leave")
 
     while True:
         fresh = get_frame()
@@ -504,11 +504,11 @@ def run_edit_mode(get_frame, config_path: str, template_path: Optional[str],
         key = cv2.waitKey(20) & 0xFF
         if key == 255:
             continue
-        if key == ord('r'):
-            # 'r' means "capture the empty reference" in main.py, but the editor binds it
-            # to rename, so pressing r here renamed a bay instead of taking a reference -
-            # which is how a bay ended up renamed from 162 to 196. The host app's meaning
-            # wins inside its own window; renaming is 'R'.
+        if key == ord('R'):
+            # Uppercase R captures the empty reference *here*, so that lowercase r can mean in
+            # this window exactly what the editor's own hint says it means: rename. The two used
+            # to disagree, and whichever way round they were, the window told one of the two
+            # people to press a key that did the other thing.
             if reference_path:
                 capture_reference(frame, reference_path)
                 editor._say("empty reference captured from this frame")
