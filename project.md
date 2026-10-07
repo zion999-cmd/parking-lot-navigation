@@ -1472,6 +1472,7 @@ parking-lot-navigation/
 │   └── sdkconfig.defaults
 ├── vision/                 ← P0002：PC 端 OpenCV 车位占用
 │   ├── src/ tests/ config/ data/
+│   ├── web/                ← board.html（展示）· navigation.html（车载导航）· index.html（工程）
 │   └── README.md
 └── tools/
     ├── ota-server/         ← 薄 OTA 服务（Python 标准库）
@@ -1498,6 +1499,7 @@ parking-lot-navigation/
 | 10 | ~~P0003.6 跟随 route.json~~ | ✅ **已完成**（§8.9）：谁规划的路线页面都显示 |
 | 11 | ~~P0004 实时速度~~ | ✅ **已完成**（§10.7），**你确认「效果非常好」** |
 | 12 | ~~改名的两个 bug~~ | ✅ **已完成**（§6）：编辑模式 `r` = 改名 / `R` = 抓参考帧（两边说法终于一致 ✓）；保存时**顺手重发 `parking_map.json`** ✓，改名后页面自己就更新 ✓ |
+| 12b | ~~P0007 车载导航页~~ | ✅ **已完成**（§11.2）：`web/navigation.html`，**三个跟随**（车头/地图/路线）已用像素与接口实证 ✓，`board.html` 一行未改 ✓。⏳ **还需你现场走一遍 13 步验收**（第 ⑦⑧ 步必须用真车）|
 | 13 | **下一阶段（待你定）** | 候选：① **Route 下发给小车循迹**（真正让它开起来 —— **最有比赛看点** ✓）② **自动选车位策略**（最近 / 最优 / 保留车位）③ 把「车头朝向」用于路径（例如要求车尾朝内）④ 录 5 个验收案例，把占用阈值 0.15 从经验值变成测量值 |
 
 > **P0002.5 的依赖已经就绪**：`cv2.aruco` 在当前的 `opencv-python 4.13.0` 里自带（**不需要**装 `opencv-contrib-python`，已实测）。
