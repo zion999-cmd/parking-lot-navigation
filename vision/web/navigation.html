@@ -217,6 +217,59 @@ const Nav = {
     return chains;
   },
 
+  // Closed loops in the road graph, as ordered node ids. A ring drawn edge by edge reads as
+  // segments; a loop is one closed path with no end caps, so it is found and drawn once.
+  roadLoops(nodes, edges) {
+    // 2-core: peel degree-1 nodes (the entrance stub) until only cycle edges remain, then walk
+    // each cycle once. A DFS back-edge scan missed this ring entirely; leaf pruning cannot.
+    const adj = {};
+    for (const e of edges) {
+      if (!nodes[e.from] || !nodes[e.to]) continue;
+      (adj[e.from] ?? (adj[e.from] = [])).push(e.to);
+      (adj[e.to] ?? (adj[e.to] = [])).push(e.from);
+    }
+    const deg = Object.fromEntries(Object.keys(adj).map(k => [k, adj[k].length]));
+    const removed = new Set();
+    const leaf = Object.keys(deg).filter(k => deg[k] === 1);
+    while (leaf.length) {
+      const cur = leaf.pop();
+      if (removed.has(cur) || deg[cur] !== 1) continue;
+      removed.add(cur);
+      for (const nb of adj[cur]) {
+        if (removed.has(nb)) continue;
+        deg[nb] -= 1;
+        if (deg[nb] === 1) leaf.push(nb);
+      }
+    }
+    const onCycle = id => !removed.has(id) && deg[id] >= 2;
+    const cycAdj = {};
+    for (const id of Object.keys(adj))
+      if (onCycle(id)) cycAdj[id] = adj[id].filter(onCycle);
+
+    const loops = [];
+    const used = new Set();
+    const ekey = (a, b) => a < b ? a + "|" + b : b + "|" + a;
+    for (const start of Object.keys(cycAdj)) {
+      if (cycAdj[start].every(nb => used.has(ekey(start, nb)))) continue;
+      const ring = [start];
+      let prev = null, cur = start;
+      for (;;) {
+        let nxt = null;
+        for (const nb of cycAdj[cur])
+          if (nb !== prev && !used.has(ekey(cur, nb))) { nxt = nb; break; }
+        if (nxt == null || nxt === start) {
+          if (nxt === start) { used.add(ekey(cur, start)); ring.push(start); }
+          break;
+        }
+        used.add(ekey(cur, nxt));
+        ring.push(nxt);
+        prev = cur; cur = nxt;
+      }
+      if (ring.length >= 4) loops.push(ring);
+    }
+    return loops;
+  },
+
   // ---- units ------------------------------------------------------------
   metres(px) { return px / PX_PER_M; },
   formatMetres(px) {
@@ -397,7 +450,8 @@ let waitingNote = 0;
 // reported pose, so the icon glides instead of jumping on each 250 ms poll.
 const car = { x: null, y: null, h: null, visible: false };
 let cam = { scale: 1, cx: 400, cy: 300, rot: 0 };
-let CHAINS = [];        // the roads as continuous lines, worked out once per map
+let CHAINS = [];        // open road runs, worked out once per map
+let LOOPS = [];        // closed road loops (the ring), drawn as one closed path
 let targetCam = null;
 
 const cv = document.getElementById("map");
@@ -814,31 +868,52 @@ function drawGround() {
 // they are the thing that made a lane look like a row of pieces, and a real map does not draw them
 // on an aisle either.
 function drawRoads() {
-  const path = chain => {
+  const trace = (pts, closed) => {
     ctx.beginPath();
-    chain.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
+    pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
+    if (closed) ctx.closePath();
   };
-  for (const chain of CHAINS) {
-    if (chain.length < 2) continue;
+  // Coordinates of every node that belongs to a loop, so open runs already covered by a loop
+  // (the ring edges) are not stroked a second time.
+  const loopPoints = new Set();
+  for (const cyc of LOOPS)
+    for (const id of cyc) {
+      const n = NODES[id];
+      loopPoints.add(Math.round(n.x) + "," + Math.round(n.y));
+    }
+
+  // 1) The ring, one closed band per loop: no end caps, no per-edge seams.
+  for (const cyc of LOOPS) {
+    const pts = cyc.map(id => [NODES[id].x, NODES[id].y]);
+    if (pts.length < 3) continue;
     if (STYLE.roadSurfaceWidth) {
-      // The corridor is a real surface: a world-space band wide enough to reach the bays on
-      // either side (measured gaps 28-46 px). Bays render after and cover any gray that runs
-      // under them, so a generous width always reads as aisle, never as a fat centre line.
-      path(chain);
+      trace(pts, true);
       ctx.strokeStyle = STYLE.roadCasing;
       ctx.lineWidth = STYLE.roadSurfaceWidth + 4; ctx.stroke();
-      path(chain);
+      trace(pts, true);
       ctx.strokeStyle = STYLE.roadFill;
       ctx.lineWidth = STYLE.roadSurfaceWidth; ctx.stroke();
     } else {
-      // Other presets keep a thin screen-constant centre stroke.
-      path(chain);
+      trace(pts, true);
       ctx.strokeStyle = STYLE.roadCasing;
       ctx.lineWidth = (STYLE.roadWidth + 3) / cam.scale; ctx.stroke();
-      path(chain);
+      trace(pts, true);
       ctx.strokeStyle = STYLE.roadFill;
       ctx.lineWidth = STYLE.roadWidth / cam.scale; ctx.stroke();
     }
+  }
+
+  // 2) Open runs that are not part of a loop (the entrance stub), drawn the old way.
+  for (const chain of CHAINS) {
+    if (chain.length < 2) continue;
+    const onLoop = chain.every(p => loopPoints.has(Math.round(p[0]) + "," + Math.round(p[1])));
+    if (onLoop) continue;
+    trace(chain, false);
+    ctx.strokeStyle = STYLE.roadCasing;
+    ctx.lineWidth = (STYLE.roadWidth + 3) / cam.scale; ctx.stroke();
+    trace(chain, false);
+    ctx.strokeStyle = STYLE.roadFill;
+    ctx.lineWidth = STYLE.roadWidth / cam.scale; ctx.stroke();
   }
 }
 
@@ -1018,7 +1093,9 @@ async function loadMap() {
   if (!doc) return false;
   MAP = doc;
   NODES = Nav.nodesIndex(doc);
-  CHAINS = Nav.roadChains(NODES, doc.road_network?.edges ?? []);
+  const edges = doc.road_network?.edges ?? [];
+  CHAINS = Nav.roadChains(NODES, edges);
+  LOOPS = Nav.roadLoops(NODES, edges);
   return true;
 }
 
