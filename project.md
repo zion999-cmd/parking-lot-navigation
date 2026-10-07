@@ -1655,6 +1655,54 @@ profile sign 翻转  →  是否真发生了约 180° 的轴旋转？
 
 > 仍是"换 hero 车后整体校准"列表里的一项（重录模板 + 重定阈值），但当前缩短型抖动已基本闭环。
 
+## 12.10 更换 Hero 小车：操作手册
+
+车头/车尾识别依赖两类**本车数据**（几何轴 PCA/minAreaRect 通用，不用动）。换车按下面四步，**不需要改源码**：
+
+> 前提：把新车放在摄像头下、光照均匀，画面里**只有这一个车色物体**（暂时拿走同色道具/贴纸）。
+> 两次录制尽量在**同一位置原地转向**（录制沿轴 0..1 归一化，但位置不变最稳）。
+
+### ① 配置车辆颜色/尺寸 —— `vision/config/vehicle.json`
+
+| 字段 | 什么时候改 |
+|---|---|
+| `hue_ranges` | 新车**颜色不同** ⇒ 改成新车的 HSV 上下界（红 wrap 两段；其它颜色一段即可）|
+| `min_area` | 新车**大小不同** ⇒ 按新车面积调（过滤小杂物）|
+| `open_kernel` / `close_kernel` | 一般不动；新车细节更碎/更整时才微调 |
+
+怎么量 HSV：可参考旧值做一次拍摄确认（像素 H/S/V 落在 `hue_ranges` 内即可）。
+
+### ② 录制两个朝向（各跑一次，车原地转 180°）
+
+```zsh
+cd vision
+P=/usr/local/Caskroom/miniconda/base/envs/vision-dev/bin/python
+
+# 车头朝右（画面 +x 方向）：
+$P tests/capture_vehicle_profile.py --record --label right --frames 60
+
+# 把车原地转 180°，车头朝左：
+$P tests/capture_vehicle_profile.py --record --label left  --frames 60
+```
+⇒ 生成 `config/vehicle_right.json`、`config/vehicle_left.json`。
+注意：`--finalize` 只认 **`right` / `left`** 这两个标签，别用别的名字。
+
+### ③ 合成车头/车尾模板
+
+```zsh
+$P tests/capture_vehicle_profile.py --finalize
+```
+⇒ 写出 `config/vehicle_profile.json`（saturation + red_fraction 两通道，方向 rear→front）。
+
+### ④ 现场验收
+
+推车走一遍：**直行 → 左转 → 右转 → 靠近车位**。期望：
+- 车头方向全程稳定、不在静止/直行中翻 180°；
+- 真实掉头时方向能跟着转（防抖只挡短突发，持续反向会被跟随）。
+
+若某朝向仍频繁翻转 ⇒ 告诉我当时车的位置与 HUD 上的 `turn` 数值，我按新车数据重定阈值
+（`SCORE_USE_MIN / SIGN_VOTE_WINDOW / SIGN_VOTE_MIN`，现在这些阈值是按旧红车测的）。
+
 ## 13. 下一步
 
 | | 内容 | 备注 |
