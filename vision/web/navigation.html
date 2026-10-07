@@ -711,6 +711,7 @@ const STYLES = {
   // the bays cyan when free (11.6%) and coral when taken (6.2%), and green POI markers (1.5%).
   // Kept as exact samples rather than re-derived: these are measurements.
   real: {
+    showBayNumbers: false,   // per-spot numbers are backend labels; digits read as 半圆 on the map
     roadSurfaceWidth: 68,    // ring corridor: half-width ~34 between the bay rows
     roadStubWidth: 44,       // entrance stub (short branch)
     ground: "#ffffff",
@@ -730,7 +731,8 @@ const STYLES = {
     takenFill: "rgba(221,106,109,.38)",
     takenText: "#a04347",
     unknownText: "#777",
-    plate: "rgba(255,255,255,.92)",
+    plate: "none",          // no white disc - it read as a semicircle per spot
+    textHalo: "rgba(255,255,255,.85)",
     text: "#2a2d33",
     muted: "#5f6368",
     target: "#2f7bf0",
@@ -967,6 +969,7 @@ function drawBayLabel(s) {
   const state = STATE?.spots?.[String(s.id)]?.state ?? "UNKNOWN";
   const isTarget = String(s.id) === targetId;
   const [cx, cy] = Nav.centroid(s.polygon);
+  if (STYLE.showBayNumbers === false) return;  // navigation style: no per-bay number
   if (isTarget) return;                       // the marker above carries the number
   if (drive()) {
     // Nothing but the road you are on and where you are going: that is the whole point of a
@@ -1025,6 +1028,16 @@ function label(x, y, text, color, size) {
   const fsPx = (size || 12) / cam.scale;
   ctx.font = `600 ${fsPx}px system-ui, sans-serif`;
   ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  if (STYLE.plate === "none") {
+    // Just the number with a thin halo - no white plate (it read as a semicircle on each spot).
+    ctx.lineWidth = 2.4 / cam.scale
+    ctx.strokeStyle = STYLE.textHalo ?? "rgba(255,255,255,.8)"
+    ctx.strokeText(text, 0, 0)
+    ctx.fillStyle = color
+    ctx.fillText(text, 0, 0)
+    ctx.restore()
+    return
+  }
   const w = ctx.measureText(text).width + 12 / cam.scale, h = fsPx + 8 / cam.scale;
   ctx.beginPath();
   if (ctx.roundRect) ctx.roundRect(-w / 2, -h / 2, w, h, 5 / cam.scale);
