@@ -711,7 +711,8 @@ const STYLES = {
   // the bays cyan when free (11.6%) and coral when taken (6.2%), and green POI markers (1.5%).
   // Kept as exact samples rather than re-derived: these are measurements.
   real: {
-    roadSurfaceWidth: 88,    // world px: ring corridor; bays cover where it runs under them
+    roadSurfaceWidth: 96,    // generous ring band; bay polygons are carved out afterwards
+    roadStubWidth: 44,       // entrance stub (short branch)
     ground: "#ffffff",
     lotEdge: "rgba(0,0,0,.10)",
     roadCasing: "#e6e6e6",
@@ -887,9 +888,7 @@ function drawRoads() {
     const pts = cyc.map(id => [NODES[id].x, NODES[id].y]);
     if (pts.length < 3) continue;
     if (STYLE.roadSurfaceWidth) {
-      trace(pts, true);
-      ctx.strokeStyle = STYLE.roadCasing;
-      ctx.lineWidth = STYLE.roadSurfaceWidth + 4; ctx.stroke();
+      // No light casing (it read as a white outline): one solid band; bays are carved below.
       trace(pts, true);
       ctx.strokeStyle = STYLE.roadFill;
       ctx.lineWidth = STYLE.roadSurfaceWidth; ctx.stroke();
@@ -903,17 +902,30 @@ function drawRoads() {
     }
   }
 
-  // 2) Open runs that are not part of a loop (the entrance stub), drawn the old way.
+  // 2) Open runs not on a loop (the entrance stub): solid, no light rim.
   for (const chain of CHAINS) {
     if (chain.length < 2) continue;
     const onLoop = chain.every(p => loopPoints.has(Math.round(p[0]) + "," + Math.round(p[1])));
     if (onLoop) continue;
     trace(chain, false);
-    ctx.strokeStyle = STYLE.roadCasing;
-    ctx.lineWidth = (STYLE.roadWidth + 3) / cam.scale; ctx.stroke();
-    trace(chain, false);
     ctx.strokeStyle = STYLE.roadFill;
-    ctx.lineWidth = STYLE.roadWidth / cam.scale; ctx.stroke();
+    ctx.lineWidth = (STYLE.roadStubWidth ?? STYLE.roadWidth) /
+                    (STYLE.roadSurfaceWidth ? 1 : cam.scale);
+    ctx.stroke();
+  }
+
+  // 3) Carve the bay polygons out of the surface: edges sit right against the spots, band never
+  // shows through a bay. destination-out erases the gray; bays are drawn after on top.
+  if (STYLE.roadSurfaceWidth) {
+    ctx.save();
+    ctx.globalCompositeOperation = "destination-out";
+    for (const spot of MAP.spots) {
+      ctx.beginPath();
+      spot.polygon.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
   }
 }
 
