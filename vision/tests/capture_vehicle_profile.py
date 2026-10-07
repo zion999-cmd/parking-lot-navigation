@@ -142,11 +142,19 @@ def main() -> int:
     ap.add_argument("--source", default="http://192.168.3.118/stream")
     ap.add_argument("--build", action="store_true")
     ap.add_argument("--verify", action="store_true")
+    ap.add_argument("--record", action="store_true",
+                    help="record one orientation's full multi-channel profile")
+    ap.add_argument("--label", help="orientation label for --record (e.g. right)")
     ap.add_argument("--frames", type=int, default=60)
     ap.add_argument("--seconds", type=float, default=12.0)
     args = ap.parse_args()
-    if not (args.build or args.verify):
-        ap.error("say --build or --verify")
+    if not (args.build or args.verify or args.record):
+        ap.error("say --build, --verify or --record")
+    if args.record and not args.label:
+        ap.error("--record needs a --label")
+
+    if args.record:
+        return record(args.source, args.label, args.frames, args.seconds)
 
     rows = raw_profiles(args.source, args.frames, args.seconds)
     print(f"  captured profiles from {len(rows)} frames")
@@ -155,6 +163,111 @@ def main() -> int:
         return 1
     return build(rows) if args.build else verify(rows)
 
+
+
+
+# ---------------------------------------------------------------------------
+# Record one orientation, all channels
+# ---------------------------------------------------------------------------
+RECORD_BINS = 24
+CHANNELS = ("gray", "saturation", "red_fraction", "width")
+
+
+def record(source: str, label: str, want_frames: int, seconds: float) -> int:
+    """Capture one facing of the car across channels, without using the old sign to orient it.
+
+    Everything is binned along the current heading's +axis as-is; the label the person gives is
+    the only orientation fact, so the measurement cannot be contaminated by the weak sign. Four
+    channels are recorded because the gray profile proved not to survive a real turn:
+
+      gray           brightness (the old, fragile channel)
+      saturation     glass is low-sat, red paint high-sat - survives reflections
+      red_fraction   1 where the filled blob is red, 0 at an enclosed window: hole geometry
+      width          silhouette width per bin (the taper structure)
+    """
+    from camera import open_camera
+    cap = open_camera(source)
+    collected = {c: [] for c in CHANNELS}
+    headings, bboxes, elongations = [], [], []
+    t0 = time.time()
+    while time.time() - t0 < seconds and min((len(v) for v in collected.values()),
+                                             default=0) < want_frames:
+        frame = cap.read()
+        if frame is None:
+            continue
+        pose = vehicle.locate(frame)
+        if pose is None:
+            continue
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        filled = vehicle.red_mask(hsv)
+        raw_red = np.zeros(frame.shape[:2], np.uint8)
+        for lo, hi in vehicle.RED_HUE_RANGES:
+            raw_red |= cv2.inRange(hsv, np.array(lo, np.uint8), np.array(hi, np.uint8))
+        raw_red = cv2.morphologyEx(raw_red, cv2.MORPH_OPEN,
+                                   cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(filled, 8)
+        i = int(np.argmax(stats[1:, cv2.CC_STAT_AREA])) + 1
+        ys, xs = np.where(labels == i)
+        points = np.column_stack([xs, ys]).astype(np.float32)
+        r = np.radians(pose.heading)
+        along = points[:, 0] * np.cos(r) + points[:, 1] * np.sin(r)
+        across = -points[:, 0] * np.sin(r) + points[:, 1] * np.cos(r)
+        lo, hi = float(along.min()), float(along.max())
+        if hi - lo < 12:
+            continue
+        index = np.clip(((along - lo) / (hi - lo) * RECORD_BINS).astype(int),
+                        0, RECORD_BINS - 1)
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)[ys, xs].astype(np.float64)
+        sat = hsv[:, :, 1][ys, xs].astype(np.float64)
+        is_raw_red = (raw_red[ys, xs] > 0).astype(np.float64)
+
+        g = np.zeros(RECORD_BINS); s = np.zeros(RECORD_BINS)
+        f = np.zeros(RECORD_BINS); w = np.zeros(RECORD_BINS)
+        gc = np.zeros(RECord_bins if False else RECORD_BINS)
+        for b in range(RECORD_BINS):
+            m = index == b
+            if not m.any():
+                continue
+            g[b] = gray[m].mean()
+            s[b] = sat[m].mean()
+            f[b] = is_raw_red[m].mean()
+            w[b] = across[m].max() - across[m].min()
+        collected["gray"].append(g); collected["saturation"].append(s)
+        collected["red_fraction"].append(f); collected["width"].append(w)
+        headings.append(pose.heading); bboxes.append(pose.bbox)
+        elongations.append(pose.elongation)
+
+    n = min((len(v) for v in collected.values()), default=0)
+    if not n:
+        print("  no usable frames captured")
+        return 1
+    averaged = {c: np.mean(collected[c][:n], axis=0) for c in CHANNELS}
+
+    out_path = os.path.join(os.path.dirname(OUT_PATH), f"vehicle_{label}.json")
+    payload = {"label": label, "frames": n, "bins": RECORD_BINS,
+               "heading_deg": round(float(np.median(headings)), 1),
+               "bbox": [int(v) for v in np.median(bboxes, axis=0)],
+               "elongation": round(float(np.median(elongations)), 2),
+               "channels": {c: [round(float(v), 3) for v in averaged[c]]
+                            for c in CHANNELS}}
+    with open(out_path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2)
+
+    print(f"  recorded '{label}' from {n} frames, heading {payload['heading_deg']} deg")
+    print(f"  wrote {out_path}")
+
+    def bar(values, dark_is_low=True):
+        v = np.asarray(values, float); v = (v - v.mean())
+        v = v / max(v.std(), 1e-9); v = (v - v.min()) / (v.max() - v.min())
+        return "".join(("█" if x > .66 else ("▒" if x > .33 else "·")) for x in v)
+
+    print("  gray        " + bar(averaged["gray"]))
+    print("  saturation  " + bar(averaged["saturation"]))
+    print("  red_fraction " + bar(averaged["red_fraction"]) + "   (· = window/hole)")
+    print("  width       " + bar(averaged["width"]))
+    print("  ready: rotate the car 180 degrees, then record again with the new label.")
+    return 0
 
 if __name__ == "__main__":
     raise SystemExit(main())
