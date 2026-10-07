@@ -663,7 +663,9 @@ def main() -> int:
     if args.emit_map:
         em = emit_map.emit(args.config, args.map_out, quiet=True)
         if em in (0, 1):
-            print(f"emitted   {args.map_out}")
+            # Where it actually went: --map-out defaults to None and the path is decided by
+            # emit_map.out_for (the real config emits to out/, a copy emits beside itself).
+            print(f"emitted   {emit_map.out_for(args.config)}")
         else:
             print(f"warning: could not emit the map from {args.config}; the page may be out of "
                   f"step with this picture", file=sys.stderr)
@@ -803,7 +805,7 @@ def main() -> int:
                         if args.emit_map:
                             emit_map.emit(args.config, args.map_out, quiet=True)
                         print(f"  reloaded {args.config}: {len(spots)} bay(s), and re-emitted "
-                              f"{args.map_out}")
+                              f"{emit_map.out_for(args.config)}")
                     except Exception as exc:                             # noqa: BLE001
                         print(f"  could not reload {args.config}: {exc}", file=sys.stderr)
 
