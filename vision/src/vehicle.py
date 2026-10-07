@@ -31,6 +31,8 @@ from __future__ import annotations
 import json
 import math
 import os
+import time
+from collections import deque
 from dataclasses import dataclass, replace
 from typing import List, Optional, Sequence, Tuple
 
@@ -111,6 +113,8 @@ class VehiclePose:
     forward_score: Optional[float] = None
     reverse_score: Optional[float] = None
     score_margin: Optional[float] = None
+    # Motion guard diagnostic: summed axis rotation over the recent window, degrees; 0 at rest.
+    observed_turn: float = 0.0
     # Signed and normalised: +1 means the front is at the +axis end.
     front_evidence: Optional[float] = None
     front_heading: Optional[float] = None
@@ -215,6 +219,16 @@ FLIP_FRAMES = 3
 # known. Only a run of misses means it is a different situation.
 MAX_MISSES = 5
 
+# Motion guard (phase 2). A sign flip is accepted only when the axis really rotated about half
+# a turn: a car cannot reverse its facing without turning. The raw axis is 0..180, so consecutive
+# changes are unwrapped and accumulated over a window covering a real turn.
+TURN_MIN_DEG = 120.0       # summed unwrapped axis rotation needed to accept a flip
+TURN_WINDOW_FRAMES = 120
+TURN_WINDOW_SECONDS = 5.0
+# A flipped first frame cannot be motion-checked (no history): commit the sign only after this
+# many frames agreeing, so one bad frame cannot set it.
+ESTABLISH_FRAMES = 3
+
 
 class VehicleTracker:
     """Smooth the readings, and refuse to believe the car has turned round without cause.
@@ -260,6 +274,11 @@ class VehicleTracker:
         self._front_is_plus: Optional[bool] = None
         self._opposite_streak = 0
         self._misses = 0
+        # (axis heading, time) of recent raw poses, for the accumulated-rotation check.
+        self._heading_history: "deque[Tuple[float, float]]" = deque()
+        # Sign candidate while ESTABLISH_FRAMES votes accumulate, plus the vote count.
+        self._establish_plus: Optional[bool] = None
+        self._establish_votes = 0
 
     def reset(self) -> None:
         """Start again: the car has been out of sight long enough to be a new situation."""
@@ -268,6 +287,9 @@ class VehicleTracker:
         self._front_is_plus = None
         self._opposite_streak = 0
         self._misses = 0
+        self._heading_history.clear()
+        self._establish_plus = None
+        self._establish_votes = 0
 
     def update(self, pose: Optional[VehiclePose]) -> Optional[VehiclePose]:
         """One sighting in, a smoothed sighting out. None in, None out."""
@@ -277,6 +299,14 @@ class VehicleTracker:
                 self.reset()
             return None
         self._misses = 0
+
+        # Motion guard: remember the raw axis heading, trim the window by count and by age.
+        self._heading_history.append((float(pose.heading), time.monotonic()))
+        while (len(self._heading_history) > TURN_WINDOW_FRAMES
+                or (self._heading_history
+                    and time.monotonic() - self._heading_history[0][1]
+                        > TURN_WINDOW_SECONDS)):
+            self._heading_history.popleft()
 
         # A jump too big to be driving means the car was moved by hand. That invalidates where
         # it is, but not what shape it is - so only the position starts again.
@@ -322,12 +352,26 @@ class VehicleTracker:
             # while one contrary frame is being ignored - must not make the front disappear.
             # Only sustained contrary evidence changes it, which is what the trigger below is.
             if self._front_is_plus is None and abs(raw) >= self.keep_evidence:
-                self._front_is_plus = wants_plus
+                # No motion history exists at start-up, so one frame is not trusted: require
+                # ESTABLISH_FRAMES agreeing, restarting if they contradict.
+                if self._establish_plus == wants_plus:
+                    self._establish_votes += 1
+                else:
+                    self._establish_plus = wants_plus
+                    self._establish_votes = 1
+                if self._establish_votes >= ESTABLISH_FRAMES:
+                    self._front_is_plus = wants_plus
             elif wants_plus != self._front_is_plus and abs(raw) >= self.flip_evidence:
                 self._opposite_streak += 1
                 if self._opposite_streak >= self.flip_frames:
-                    self._front_is_plus = not self._front_is_plus
-                    self._opposite_streak = 0
+                    # The veto: strong contrary frames are believed only when the axis really
+                    # turned ~half a circle. A sign flip with ~0 rotation is a perception error
+                    # and the old facing is kept.
+                    if abs(self._accumulated_turn()) >= TURN_MIN_DEG:
+                        self._front_is_plus = not self._front_is_plus
+                        self._opposite_streak = 0
+                    # Not enough real rotation: hold. The streak stays so a genuine slow turn
+                    # completes when the summed rotation crosses the gate.
             else:
                 self._opposite_streak = 0
 
@@ -335,7 +379,21 @@ class VehicleTracker:
         front = ((heading if self._front_is_plus else (heading + 180.0) % 360.0)
                  if self._front_is_plus is not None else None)
         return replace(pose, x=self._x, y=self._y, heading=heading,
+                       observed_turn=self._accumulated_turn(),
                        front_heading=front if known else None, front_is_known=known)
+
+    def _accumulated_turn(self) -> float:
+        """Sum the minimal signed frame-to-frame axis changes over the history.
+
+        The axis wraps at 180, so each step is the smaller of `d` and `d - 180`, in [-90,90].
+        A real turn adds same-sign steps (total ~+180); stationary noise is equally signed and
+        cancels to ~0. Degrees.
+        """
+        history = list(self._heading_history)
+        total = 0.0
+        for (a, _ta), (b, _tb) in zip(history, history[1:]):
+            total += (b - a + 90.0) % 180.0 - 90.0
+        return total
 
 
 _TEMPLATE_CACHE = "unloaded"

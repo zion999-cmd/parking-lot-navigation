@@ -127,7 +127,8 @@ def annotate(frame: np.ndarray, spots: List[Spot], results: Dict[str, SpotResult
                     f"  front unknown{where}")
         ev = f"{pose.front_evidence:+.2f}" if pose.front_evidence is not None else "  -  "
         detail = (f"elon {pose.elongation:.2f}  pca {pose.heading_pca:.0f}deg  d{agree:.0f}deg"
-                  f"  ends {pose.ends_grey:+.1f}  taper {pose.taper:+.2f}  ev {ev}")
+                  f"  ends {pose.ends_grey:+.1f}  taper {pose.taper:+.2f}  ev {ev}"
+                  f"  turn {pose.observed_turn:+.0f}°")
         if pose.elongation < 1.6:
             detail += "  NO CLEAR AXIS"
         if agree > 10:

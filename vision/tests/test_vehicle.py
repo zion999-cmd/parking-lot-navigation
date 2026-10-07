@@ -250,22 +250,82 @@ def test_a_noisy_taper_does_not_make_the_front_flap() -> None:
     tracker = vehicle.VehicleTracker()
     poses = [a_pose(-0.12 if i % 3 else -0.02) for i in range(30)]
     known = [p.front_is_known for p in (tracker.update(p) for p in poses)]
-    assert all(known[2:]), f"the front dropped out after warm-up: {known}"
+    # Establishing now takes three VALID agreeing frames; frames where the taper dipped below
+    # MIN_TAPER carry no evidence and do not vote, so the sign commits at frame 4.
+    assert all(known[4:]), f"the front dropped out after warm-up: {known}"
     fronts = [p.front_heading for p in (tracker.update(p) for p in poses) if p.front_is_known]
     assert len(set(round(f, 0) for f in fronts)) == 1, fronts
 
 
 def test_a_genuine_turn_is_followed() -> None:
-    """Smoothing must not be so heavy that turning the car round is not noticed."""
+    """A real about-turn rotates the axis continuously; the motion guard must not block it."""
     tracker = vehicle.VehicleTracker()
     for _ in range(8):
-        before = tracker.update(a_pose(-0.12))
-    assert before.front_is_known
-    for _ in range(6):
-        after = tracker.update(a_pose(+0.12))
-    assert after.front_is_known, after.taper
-    turn = abs((after.front_heading - before.front_heading) % 360)
-    assert abs(turn - 180) < 10, (before.front_heading, after.front_heading, turn)
+        before = tracker.update(a_pose(-0.12, heading=0.0))
+    # Negative evidence: the front is at the -axis end, so front_heading is axis+180 = 180.
+    assert before.front_is_known and before.front_heading == 180.0, before.front_heading
+    # Rotate the axis: +36 deg per frame, five frames = 180 (the 180 heading wraps to 0 but the
+    # unwrapped accumulation keeps it). The guard accepts the flip once the sum passes 120 deg.
+    for k in range(1, 6):
+        turning = tracker.update(a_pose(+0.9, heading=float((36 * k) % 180)))
+    assert turning.observed_turn >= vehicle.TURN_MIN_DEG, turning.observed_turn
+    # Settle on the new heading so the smoothed axis catches up with the raw one.
+    after = turning
+    for _ in range(10):
+        after = tracker.update(a_pose(+0.9, heading=0.0))
+    assert after.front_is_known, after
+    delta = (after.front_heading - before.front_heading + 540) % 360 - 180
+    assert abs(delta - 0) < 15, (before.front_heading, after.front_heading, delta)
+
+def test_a_sign_flip_without_rotation_is_refused() -> None:
+    """The reported bug: car still / straight, visual sign flips 180.
+
+    Strong contrary frames with the axis unmoved must not swap the front - that is a perception
+    error, and a car cannot reverse facing without turning.
+    """
+    tracker = vehicle.VehicleTracker()
+    for _ in range(10):
+        tracker.update(a_pose(-0.12, heading=5.0))
+    held = tracker._front_is_plus
+    for _ in range(8):
+        out = tracker.update(a_pose(+0.12, heading=5.0))   # sign claims opposite; axis ~same
+    assert out.front_is_known
+    assert tracker._front_is_plus == held, "a flip with no real rotation was accepted"
+    assert abs(out.observed_turn) < 30, out.observed_turn
+    assert out.front_heading is not None and abs((out.front_heading - 5.0 + 180) % 360 - 0) < 10, \
+        out.front_heading
+
+def test_one_bad_frame_does_not_establish_the_sign() -> None:
+    """Start-up has no motion history; the sign is committed only after agreeing frames."""
+    tracker = vehicle.VehicleTracker()
+    tracker.update(a_pose(0.0, evidence=+0.9))             # one frame claiming plus
+    assert tracker._front_is_plus is None
+    for _ in range(2):
+        tracker.update(a_pose(0.0, evidence=+0.9))
+    assert tracker._front_is_plus is True
+    # contradictory frames during voting restart it
+    t2 = vehicle.VehicleTracker()
+    t2.update(a_pose(0.0, evidence=+0.9))
+    t2.update(a_pose(0.0, evidence=-0.9))
+    assert t2._establish_votes == 1 and t2._front_is_plus is None
+
+def test_accumulated_turn_unwraps_and_sums() -> None:
+    tracker = vehicle.VehicleTracker()
+    import time as _t
+    headings = [0, 30, 60, 90, 120, 150, 0, 0, 0]
+    # simulate: unwrap minimal deltas -> +30*6 = +180, then zeros keep 180
+    t0=_t.monotonic()
+    for k,h in enumerate(headings):
+        tracker._heading_history.append((float(h), t0 + k*0.05))
+    assert abs(tracker._accumulated_turn() - 180.0) < 1e-6, tracker._accumulated_turn()
+    # random stationary noise stays near zero
+    import random
+    t3=vehicle.VehicleTracker(); random.seed(1)
+    for k in range(30):
+        t3._heading_history.append((random.uniform(-2,2), t0 + k*0.05))
+    assert abs(t3._accumulated_turn()) < 25, t3._accumulated_turn()
+
+# (anchor kept below)
 
 
 def test_the_smoothed_axis_does_not_drift_to_ninety_degrees() -> None:
