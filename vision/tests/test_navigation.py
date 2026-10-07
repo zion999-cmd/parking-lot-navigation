@@ -201,6 +201,52 @@ def test_screen_and_world_are_exact_inverses() -> None:
         assert abs(y - case["y"]) < 1e-6, (case, x, y)
 
 
+def test_a_click_lands_on_the_bay_that_was_drawn_there() -> None:
+    """Reported: clicking a bay in the navigation view picked the wrong one.
+
+    The sheet docked at the bottom lifts the map in screen space (applyCamera), and the click
+    inverse did not undo that lift, so every click was half a sheet too low - about 75 px, which is
+    more than a bay is wide. This walks the real path: a bay's screen position, put back through
+    screenToWorld, must be inside the same bay.
+    """
+    bays = [{"id": "A", "polygon": [[100, 100], [148, 100], [148, 200], [100, 200]]},
+            {"id": "B", "polygon": [[100, 240], [148, 240], [148, 340], [100, 340]]}]
+    payload = [{"rot": r, "inset": inset, "scale": sc}
+               for r in (0.0, -1.5707963267948966, 0.6)
+               for inset in (0, 150, 320)
+               for sc in (1.0, 2.5)]
+    got = node_run(
+        "(() => {"
+        " const cam = {scale: c.scale, cx: 124, cy: 160, inset: c.inset};"
+        " const out = [];"
+        " for (const b of bays) {"
+        "   const [bx, by] = Nav.centroid(b.polygon);"
+        "   const [sx, sy] = Nav.toScreen(900, 1200, cam, c.rot, bx, by);"
+        "   const [wx, wy] = Nav.screenToWorld(900, 1200, cam, c.rot, sx, sy);"
+        "   const hit = Nav.bayAt({spots: bays}, wx, wy);"
+        "   out.push(hit ? hit.id : null);"
+        " }"
+        " return out; })()",
+        payload,
+        extra=f"const bays = {json.dumps(bays)};")
+    for case, res in zip(payload, got):
+        assert res == ["A", "B"], f"rot {case['rot']} inset {case['inset']} scale {case['scale']} -> {res}"
+
+
+def test_screen_and_world_invert_with_a_docked_sheet() -> None:
+    """The same pair, over a round trip: the sheet lift has to cancel exactly, not approximately."""
+    payload = [{"rot": r, "inset": i, "x": x, "y": y}
+               for r in (0.0, -1.5707963267948966, 0.7, 2.9) for i in (0, 88, 200, 340)
+               for x, y in ((0.0, 0.0), (37.5, 512.25), (799.0, 599.0))]
+    got = node_run(
+        "(() => { const cam = {scale: 3.1, cx: 400, cy: 300, inset: c.inset};"
+        " const s = Nav.toScreen(900, 1200, cam, c.rot, c.x, c.y);"
+        " return Nav.screenToWorld(900, 1200, cam, c.rot, s[0], s[1]); })()", payload)
+    for case, (x, y) in zip(payload, got):
+        assert abs(x - case["x"]) < 1e-6, (case, x, y)
+        assert abs(y - case["y"]) < 1e-6, (case, x, y)
+
+
 def test_roads_are_merged_into_continuous_lines() -> None:
     """A road stored as four segments must not be drawn as four segments.
 

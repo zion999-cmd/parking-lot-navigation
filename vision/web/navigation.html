@@ -411,8 +411,7 @@ const Nav = {
   framesPoint(cam, viewW, viewH, rot, x, y, margin = 24) {
     // Where the point actually lands on screen, rotation included, and it must be inside the part
     // of the screen the sheet does not cover.
-    const [sx, sy0] = this.toScreen(viewW, viewH, cam, rot, x, y);
-    const sy = sy0 - (cam.inset || 0) / 2;
+    const [sx, sy] = this.toScreen(viewW, viewH, cam, rot, x, y);
     const usableH = Math.max(120, viewH - (cam.inset || 0));
     return sx >= margin && sx <= viewW - margin
         && sy >= margin && sy <= usableH - margin;
@@ -454,13 +453,17 @@ const Nav = {
   toScreen(viewW, viewH, cam, rot, wx, wy) {
     const r = rot || 0, cos = Math.cos(r), sin = Math.sin(r);
     const dx = (wx - cam.cx) * cam.scale, dy = (wy - cam.cy) * cam.scale;
-    return [viewW / 2 + dx * cos - dy * sin, viewH / 2 + dx * sin + dy * cos];
+    // The same lift applyCamera applies, so this stays the true forward map of the renderer.
+    return [viewW / 2 + dx * cos - dy * sin,
+            viewH / 2 - (cam.inset || 0) / 2 + dx * sin + dy * cos];
   },
   // The exact inverse, so a click lands on the bay under the pointer in a turned map. It has to
   // be the inverse or the two would drift apart, and clicking a bay would pick its neighbour.
   screenToWorld(viewW, viewH, cam, rot, sx, sy) {
     const r = rot || 0, cos = Math.cos(r), sin = Math.sin(r);
-    const dx = sx - viewW / 2, dy = sy - viewH / 2;
+    // Undo the sheet lift that applyCamera applies. Without this every click in a framed view was
+    // half a sheet too low in screen terms and landed on the neighbouring bay.
+    const dx = sx - viewW / 2, dy = sy - (viewH / 2 - (cam.inset || 0) / 2);
     return [cam.cx + (dx * cos + dy * sin) / cam.scale,
             cam.cy + (-dx * sin + dy * cos) / cam.scale];
   },
