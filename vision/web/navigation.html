@@ -417,6 +417,21 @@ const Nav = {
   followCamera(viewW, viewH, x, y, scale) {
     return { scale, cx: x, cy: y };
   },
+  // The overview inset: a small north-up picture of the whole lot in the corner. North-up on
+  // purpose - the main view turns with the car, and a second view turning with it would say
+  // nothing new; fixed, it is what tells a driver which way round they are.
+  miniMapRect(viewW, viewH, insetBottom, worldW, worldH, width = 176, margin = 14) {
+    const h = Math.round(width * worldH / Math.max(worldW, 1));
+    return { x: viewW - width - margin, y: viewH - insetBottom - h - margin,
+             w: width, h };
+  },
+  // World -> inside the inset. Pure, so the drawing and the click guard agree on where it is.
+  miniMapTransform(rect, worldW, worldH) {
+    const scale = Math.min(rect.w / Math.max(worldW, 1), rect.h / Math.max(worldH, 1));
+    return { scale, ox: rect.x + (rect.w - worldW * scale) / 2,
+             oy: rect.y + (rect.h - worldH * scale) / 2 };
+  },
+
   // Is this world point inside the camera's frame, with a margin, above the docked sheet? Used to
   // refuse a framing that would leave the car off screen.
   framesPoint(cam, viewW, viewH, rot, x, y, margin = 24) {
@@ -613,6 +628,11 @@ function eventWorld(evt) {
 
 cv.addEventListener("click", evt => {
   if (!MAP) return;
+  const r0 = cv.getBoundingClientRect();
+  const cx0 = evt.clientX - r0.left, cy0 = evt.clientY - r0.top;
+  if (MINI_RECT && cx0 >= MINI_RECT.x && cx0 <= MINI_RECT.x + MINI_RECT.w
+      && cy0 >= MINI_RECT.y && cy0 <= MINI_RECT.y + MINI_RECT.h)
+    return;                                  // the overview inset is not a bay
   const w = eventWorld(evt);
   const bay = Nav.bayAt(MAP, w.x, w.y);
   if (!bay) return;
@@ -872,6 +892,75 @@ function drawWorld() {
   if (car.visible && car.x != null) drawCar(car.x, car.y, car.h ?? 0);
 
   ctx.restore();
+
+  drawMiniMap();
+}
+
+// The inset: the whole lot, the whole route, and where the car is in it - the two things the
+// zoomed-in view cannot show. No bay colours and no numbers: it is a position, not a dashboard.
+let MINI_RECT = null;
+function drawMiniMap() {
+  const worldW = MAP?.coordinate_system?.width ?? 800;
+  const worldH = MAP?.coordinate_system?.height ?? 600;
+  const rect = Nav.miniMapRect(viewW0, viewH0, sheetHeight(), worldW, worldH);
+  MINI_RECT = rect;
+  const t = Nav.miniMapTransform(rect, worldW, worldH);
+  const px = x => t.ox + x * t.scale, py = y => t.oy + y * t.scale;
+
+  ctx.save();
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(rect.x, rect.y, rect.w, rect.h, 8);
+  else ctx.rect(rect.x, rect.y, rect.w, rect.h);
+  ctx.fillStyle = "rgba(255,255,255,.88)";
+  ctx.fill();
+  ctx.clip();
+
+  ctx.beginPath();                       // the lot
+  ctx.rect(px(0), py(0), worldW * t.scale, worldH * t.scale);
+  ctx.fillStyle = "#f2f4f7"; ctx.fill();
+
+  ctx.lineJoin = "round"; ctx.lineCap = "round";
+  for (const cyc of LOOPS) {             // the aisles, as lines
+    ctx.beginPath();
+    cyc.forEach((id, i) => {
+      const n = NODES[id];
+      return i ? ctx.lineTo(px(n.x), py(n.y)) : ctx.moveTo(px(n.x), py(n.y));
+    });
+    ctx.closePath();
+    ctx.strokeStyle = "#c9d2dc"; ctx.lineWidth = 2.2; ctx.stroke();
+  }
+  if (ROUTE?.ok) {                       // the whole route, which the main view may crop
+    const pts = Nav.routePoints(ROUTE, NODES).points;
+    if (pts.length > 1) {
+      ctx.beginPath();
+      pts.forEach((p, i) => i ? ctx.lineTo(px(p[0]), py(p[1])) : ctx.moveTo(px(p[0]), py(p[1])));
+      ctx.strokeStyle = STYLE.routeFill; ctx.lineWidth = 2.4; ctx.stroke();
+    }
+  }
+  const target = (MAP.spots ?? []).find(sp => String(sp.id) === targetId);
+  if (target) {
+    const [tx, ty] = Nav.centroid(target.polygon);
+    ctx.beginPath(); ctx.arc(px(tx), py(ty), 3.4, 0, Math.PI * 2);
+    ctx.fillStyle = STYLE.bayTargetEdge; ctx.fill();
+  }
+  if (car.x != null && car.visible) {    // the car, as a little arrow: north-up, so its heading reads
+    const hx = (car.h ?? 0) * Math.PI / 180;
+    ctx.save();
+    ctx.translate(px(car.x), py(car.y));
+    ctx.rotate(hx);
+    ctx.beginPath();
+    ctx.moveTo(0, -5.5); ctx.lineTo(4, 4.5); ctx.lineTo(0, 2.4); ctx.lineTo(-4, 4.5);
+    ctx.closePath();
+    ctx.fillStyle = STYLE.carBody[1]; ctx.fill();
+    ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.1; ctx.stroke();
+    ctx.restore();
+  }
+  ctx.restore();
+
+  ctx.beginPath();                       // border last, over the clip
+  if (ctx.roundRect) ctx.roundRect(rect.x, rect.y, rect.w, rect.h, 8);
+  else ctx.rect(rect.x, rect.y, rect.w, rect.h);
+  ctx.strokeStyle = "rgba(15,20,26,.18)"; ctx.lineWidth = 1.5; ctx.stroke();
 }
 
 const drive = () => PHASE === "NAVIGATING" || PHASE === "ARRIVED";

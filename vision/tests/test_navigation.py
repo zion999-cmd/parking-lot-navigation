@@ -295,6 +295,39 @@ def test_the_zoom_keeps_the_whole_route_on_screen_around_the_car() -> None:
     assert got[0][1][0] == [450, 400], got[0][1][0]
 
 
+def test_the_overview_inset_sits_inside_the_screen_above_the_sheet() -> None:
+    """The inset is drawn where this says it is, and the click guard uses the same value.
+
+    If the two ever disagreed, clicking the inset would fall through and pick whichever bay
+    happened to be under it in the zoomed view.
+    """
+    cases = [{"viewW": 900, "viewH": 1113, "inset": 216, "worldW": 800, "worldH": 600},
+             {"viewW": 1440, "viewH": 900, "inset": 0, "worldW": 800, "worldH": 600},
+             {"viewW": 420, "viewH": 820, "inset": 240, "worldW": 800, "worldH": 600}]
+    got = node_run("Nav.miniMapRect(c.viewW, c.viewH, c.inset, c.worldW, c.worldH)", cases)
+    for case, r in zip(cases, got):
+        assert r["x"] >= 0 and r["y"] >= 0, (case, r)
+        assert r["x"] + r["w"] <= case["viewW"], (case, r)
+        assert r["y"] + r["h"] <= case["viewH"] - case["inset"], \
+            f"the inset overlaps the sheet: {r} with inset {case['inset']}"
+        assert abs(r["w"] / r["h"] - case["worldW"] / case["worldH"]) < 0.02, (case, r)
+
+
+def test_the_overview_inset_maps_the_whole_lot_inside_itself() -> None:
+    """Every corner of the lot has to land inside the inset, or it is not an overview."""
+    cases = [{"rect": {"x": 710, "y": 883, "w": 176, "h": 132}, "worldW": 800, "worldH": 600},
+             {"rect": {"x": 10, "y": 10, "w": 200, "h": 150}, "worldW": 800, "worldH": 600}]
+    got = node_run(
+        "(() => { const t = Nav.miniMapTransform(c.rect, c.worldW, c.worldH);"
+        " const f = (x, y) => [t.ox + x * t.scale, t.oy + y * t.scale];"
+        " return [f(0, 0), f(c.worldW, c.worldH)]; })()", cases)
+    for case, (tl, br) in zip(cases, got):
+        r = case["rect"]
+        for (x, y) in (tl, br):
+            assert r["x"] - 0.5 <= x <= r["x"] + r["w"] + 0.5, (case, tl, br)
+            assert r["y"] - 0.5 <= y <= r["y"] + r["h"] + 0.5, (case, tl, br)
+
+
 def test_roads_are_merged_into_continuous_lines() -> None:
     """A road stored as four segments must not be drawn as four segments.
 
