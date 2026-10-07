@@ -345,20 +345,21 @@ _TEMPLATE_CACHE = "unloaded"
 MARGIN_SCALE = 0.9
 
 
-def vehicle_template(path: str = PROFILE_TEMPLATE_PATH) -> Optional[np.ndarray]:
-    """The sampled rear->front profile, loaded once. None when it has not been captured.
+def vehicle_template(path: str = PROFILE_TEMPLATE_PATH):
+    """The sampled sign template, loaded once. None when it has not been finalized.
 
-    The sentinel is checked with isinstance on purpose: once loaded, the cache is an ndarray, and
-    `ndarray == "unloaded"` is an element-wise boolean array rather than one bool, which made the
-    first version raise when it tried to choose between the template and None.
+    Two channels chosen by measuring both orientations: saturation (glass low, paint high;
+    separation 0.94) and red_fraction (where the enclosed windows are; 0.81). The cache is a dict
+    of arrays, not one vector. The sentinel uses isinstance: comparing an ndarray to the string
+    "unloaded" gives an element-wise boolean array rather than one bool.
     """
     global _TEMPLATE_CACHE
     if isinstance(_TEMPLATE_CACHE, str):
         try:
             with open(path, "r", encoding="utf-8") as fh:
-                values = json.load(fh).get("template")
-            _TEMPLATE_CACHE = (np.asarray(values, dtype=np.float64)
-                               if values is not None else None)
+                values = json.load(fh).get("template", {})
+            _TEMPLATE_CACHE = {k: np.asarray(v, dtype=np.float64)
+                               for k, v in values.items()}
         except (OSError, ValueError):
             _TEMPLATE_CACHE = None
     return None if isinstance(_TEMPLATE_CACHE, str) else _TEMPLATE_CACHE
@@ -377,15 +378,46 @@ def _correlate(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(_shape(a), _shape(b)) / len(a))
 
 
-def score_profile(profile, template):
-    """Match a profile to the sampled template both ways.
+def binned(index, values, bins: int = 24) -> np.ndarray:
+    """Mean value per axis bin; NaN where a bin has no pixels (profile_of aborts instead)."""
+    out = np.full(bins, np.nan)
+    values = np.asarray(values, dtype=np.float64)
+    for b in range(bins):
+        m = index == b
+        if m.any():
+            out[b] = values[m].mean()
+    return out
 
-    The template reads rear->front. forward > reverse means the current +axis projection also
-    reads rear->front, so the front is at the high-projection (+axis) end: front_is_plus. A
-    symmetric profile gives a margin of zero and no usable sign.
+
+def _z_finite(values):
+    """Zero-mean unit-spread over the finite bins, zero elsewhere, plus the finite mask."""
+    values = np.asarray(values, dtype=np.float64)
+    finite = np.isfinite(values)
+    v = values[finite] - values[finite].mean()
+    spread = v.std()
+    out = np.zeros_like(values)
+    out[finite] = v / spread if spread > 1e-9 else v
+    return out, finite
+
+
+def _corr_finite(a, b) -> float:
+    """Pearson over the bins finite in both, in -1..1 (0 if nothing overlaps)."""
+    za, fa = _z_finite(a); zb, fb = _z_finite(b); m = fa & fb
+    den = math.sqrt((za[m] ** 2).sum() * (zb[m] ** 2).sum())
+    return float((za[m] * zb[m]).sum() / den) if den > 1e-9 else 0.0
+
+
+def score_sign(sat_profile, redfraction_profile, template):
+    """Match the two robust channels against the template both directions.
+
+    The template reads rear->front. A forward (rear->front along +axis) win means the front is at
+    the high-projection end: front_is_plus. The gray brightness that failed is not used.
     """
-    forward = _correlate(profile, template)
-    reverse = _correlate(profile, template[::-1])
+    ts, tr = template["saturation"], template["red_fraction"]
+    forward = (_corr_finite(sat_profile, ts)
+               + _corr_finite(redfraction_profile, tr)) / 2.0
+    reverse = (_corr_finite(sat_profile, ts[::-1])
+               + _corr_finite(redfraction_profile, tr[::-1])) / 2.0
     margin = forward - reverse
     return forward, reverse, margin, margin > 0
 
@@ -465,7 +497,16 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
     """Every red thing big enough to be the car, largest first."""
     if frame is None or frame.size == 0:
         return []
-    mask = red_mask(cv2.cvtColor(frame, cv2.COLOR_BGR2HSV), close_kernel)
+    hsv_full = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    mask = red_mask(hsv_full, close_kernel)
+    # Paint without the hole fill, so the windows stay visible as gaps: red_fraction per bin says
+    # where the enclosed glass is. (One inRange + open per frame.)
+    raw_red = np.zeros(frame.shape[:2], np.uint8)
+    for _lo, _hi in RED_HUE_RANGES:
+        raw_red |= cv2.inRange(hsv_full, np.array(_lo, np.uint8), np.array(_hi, np.uint8))
+    raw_red = cv2.morphologyEx(
+        raw_red, cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
     gray_image = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
     out: List[VehiclePose] = []
@@ -480,6 +521,8 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
         ys, xs = np.where(labels == i)
         points = np.column_stack([xs, ys]).astype(np.float32)
         gray_values = gray_image[ys, xs].astype(np.float64)
+        sat_values = hsv_full[ys, xs, 1].astype(np.float64)
+        is_raw_red = (raw_red[ys, xs] > 0).astype(np.float64)
         centre = points.mean(axis=0)
         values, vectors = np.linalg.eigh(np.cov((points - centre).T))
         major = vectors[:, int(np.argmax(values))]
@@ -498,6 +541,16 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
         band_contrast = 0.0
         if profile is not None:
             band_pos, band_contrast = band_of(profile)
+        # Bins by position along the axis (0..1), so the profiles align even when the blob is a
+        # pixel longer or shorter frame to frame.
+        _lo, _hi = float(along.min()), float(along.max())
+        axis_index = None
+        if _hi - _lo >= 12:
+            axis_index = np.clip((((along - _lo) / (_hi - _lo)) * 24).astype(int), 0, 23)
+        sat_profile = redfraction_profile = None
+        if axis_index is not None:
+            sat_profile = binned(axis_index, sat_values)
+            redfraction_profile = binned(axis_index, is_raw_red)
 
         # Which end the front is on, as signed evidence along the axis: +1 means the +axis end.
         # The car's pattern is the first choice - the brighter end is the front - and the taper
@@ -508,16 +561,14 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
         if profile is not None:
             difference, _ = ends_of(profile)
             ends_grey = difference                  # kept for the HUD, no longer the sign
-            template = vehicle_template()
-            if template is not None:
-                forward_score, reverse_score, score_margin, _plus = \
-                    score_profile(profile, template)
-                # A flat profile gives a margin of zero - a uniform red blob, or one with no
-                # asymmetry visible. That is the template *abstaining*, not answering zero:
-                # leave evidence None so the silhouette taper below still gets used, instead of
-                # a dead 0 that disables the fallback and still fails the front gate.
-                if abs(score_margin) > 1e-9:
-                    evidence = float(np.clip(score_margin / MARGIN_SCALE, -1.0, 1.0))
+        template = vehicle_template()
+        if template is not None and sat_profile is not None:
+            forward_score, reverse_score, score_margin, _plus = \
+                score_sign(sat_profile, redfraction_profile, template)
+            # Margin ~0 is the template abstaining - leave evidence None so the silhouette
+            # taper below still gets used, instead of a dead 0 that disables the fallback.
+            if abs(score_margin) > 1e-9:
+                evidence = float(np.clip(score_margin / MARGIN_SCALE, -1.0, 1.0))
         if evidence is None and abs(taper) >= MIN_TAPER:
             signed = taper if FRONT_IS_THE_WIDER_END else -taper
             evidence = float(np.clip(signed / TAPER_SCALE, -1.0, 1.0))

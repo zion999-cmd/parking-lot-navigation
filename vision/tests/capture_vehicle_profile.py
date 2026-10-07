@@ -144,14 +144,18 @@ def main() -> int:
     ap.add_argument("--verify", action="store_true")
     ap.add_argument("--record", action="store_true",
                     help="record one orientation's full multi-channel profile")
+    ap.add_argument("--finalize", action="store_true",
+                    help="build config/vehicle_profile.json from vehicle_<label>.json recordings")
     ap.add_argument("--label", help="orientation label for --record (e.g. right)")
     ap.add_argument("--frames", type=int, default=60)
     ap.add_argument("--seconds", type=float, default=12.0)
     args = ap.parse_args()
-    if not (args.build or args.verify or args.record):
-        ap.error("say --build, --verify or --record")
+    if not (args.build or args.verify or args.record or args.finalize):
+        ap.error("say --build, --verify, --record or --finalize")
     if args.record and not args.label:
         ap.error("--record needs a --label")
+    if args.finalize:
+        return finalize()
 
     if args.record:
         return record(args.source, args.label, args.frames, args.seconds)
@@ -267,6 +271,46 @@ def record(source: str, label: str, want_frames: int, seconds: float) -> int:
     print("  red_fraction " + bar(averaged["red_fraction"]) + "   (· = window/hole)")
     print("  width       " + bar(averaged["width"]))
     print("  ready: rotate the car 180 degrees, then record again with the new label.")
+    return 0
+
+
+
+
+def finalize() -> int:
+    """Build the sign template from the two orientation recordings.
+
+    vehicle_right.json and vehicle_left.json were recorded along heading ~0 (axis points +x),
+    bins low->high from the -x end. Facing right, the front is +x so the bins read rear->front;
+    facing left they read front->rear, so the left recording is reversed before averaging.
+
+    The template keeps the two channels the head-to-head test picked - saturation (separation
+    0.94) and red_fraction (0.81):
+    """
+    base = os.path.dirname(OUT_PATH)
+    paths = {lbl: os.path.join(base, f"vehicle_{lbl}.json") for lbl in ("right", "left")
+             }
+    for lbl, path in paths.items():
+        if not os.path.exists(path):
+            print(f"  missing {path}; record --label {lbl} first")
+            return 1
+    rec = {lbl: json.load(open(path, encoding="utf-8")) for lbl, path in paths.items()}
+    r, l = rec["right"]["channels"], rec["left"]["channels"]
+    template = {}
+    for c in ("saturation", "red_fraction"):
+        right_c = np.asarray(r[c], dtype=float)
+        left_c = np.asarray(l[c], dtype=float)[::-1]     # canonical rear->front
+        template[c] = (right_c + left_c) / 2.0
+    payload = {"bins": len(template["saturation"]),
+               "orientation": "rear->front, bin0 at the boot",
+               "sources": {lbl: rec[lbl]["frames"] for lbl in rec},
+               "template": {c: [round(float(v), 3) for v in template[c]]
+                            for c in template}}
+    with open(OUT_PATH, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2)
+    print(f"  wrote {OUT_PATH}")
+    for c in template:
+        v=template[c]; v=(v-v.mean())/max(v.std(),1e-9); v=(v-v.min())/(v.max()-v.min())
+        print(f"    {c:<14} " + "".join("█" if x>.66 else ("▒" if x>.33 else "·") for x in v))
     return 0
 
 if __name__ == "__main__":

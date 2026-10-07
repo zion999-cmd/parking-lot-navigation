@@ -351,34 +351,38 @@ def test_a_sighting_with_no_front_known_keeps_the_position() -> None:
     assert abs(out.x - 333.0) < 1e-6
 
 
-# ---- front/rear profile sign (P0002.5 phase 1) ----
+# ---- front/rear profile sign: saturation + red_fraction (P0002.5 phase 1) ----
+# Patterns are deliberately asymmetric like the real car: the two low-sat windows sit at
+# different positions with different depth, and the red end runs differ.
 
-def test_score_profile_matches_the_sampled_template_forward():
-    t = np.array([1,-1,1,-1,0.5,-0.5], dtype=float)
-    f, r, m, plus = vehicle.score_profile(t, t)
-    assert f > r and m > 0 and plus is True
-    assert f > 0.99
+SAT = [1,1,-0.4,1,1,1,-1,-1]          # front glass shallow at bin2, rear glass deep at 6-7
+RF  = [1,1, 0.5,1,1,1, 0, 0]
 
-def test_a_reversed_profile_wins_the_reverse_score():
-    t = np.array([1,-1,1,-1,0.5,-0.5], dtype=float)
-    f, r, m, plus = vehicle.score_profile(t[::-1], t)
-    assert r > f and m < 0 and plus is False
-    assert r > 0.99
+def _template():
+    return {"saturation": np.asarray(SAT, float),
+            "red_fraction": np.asarray(RF, float)}
 
-def test_a_symmetric_profile_has_no_sign():
-    t = np.array([1,-1,1,-1,0.5,-0.5], dtype=float)
-    # a profile equal to its own reverse leaves forward == reverse
-    symmetric = np.array([0,1,1,0], dtype=float)
-    tt = np.array([0,1,1,0], dtype=float)
-    f, r, m, plus = vehicle.score_profile(symmetric, tt)
-    assert abs(m) < 1e-9
+def test_score_sign_forward_wins_when_profile_reads_rear_to_front():
+    t=_template()
+    f, r, m, plus = vehicle.score_sign(np.array(SAT), np.array(RF), t)
+    assert f > r and m > 0 and plus is True and f > 0.99, (f,r,m)
 
-def test_forward_and_reverse_are_exact_opposites_for_p_and_its_flip():
-    t = np.linspace(-1, 1, 8)
-    a = vehicle.score_profile(t, t)
-    b = vehicle.score_profile(t[::-1], t)
-    assert abs(a[0]-b[1]) < 1e-9 and abs(a[1]-b[0]) < 1e-9
-    assert abs(a[2] + b[2]) < 1e-9
+def test_reversed_profile_wins_the_reverse_score():
+    t=_template()
+    f, r, m, plus = vehicle.score_sign(np.array(SAT)[::-1], np.array(RF)[::-1], t)
+    assert r > f and m < 0 and plus is False and r > 0.99, (f,r,m)
+
+def test_a_profile_with_no_contrast_abstains():
+    flat=np.zeros(len(SAT)); t=_template()
+    f,r,m,plus=vehicle.score_sign(flat,flat,t)
+    assert abs(m)<1e-9
+
+def test_p_and_its_flip_swap_the_scores():
+    t=_template()
+    a=vehicle.score_sign(np.array(SAT),np.array(RF),t)
+    b=vehicle.score_sign(np.array(SAT)[::-1],np.array(RF)[::-1],t)
+    assert abs(a[0]-b[1])<1e-9 and abs(a[1]-b[0])<1e-9
+    assert abs(a[2]+b[2])<1e-9
 
 
 def main() -> int:
