@@ -392,10 +392,9 @@ const Nav = {
     const pad = 48;
     const usableH = Math.max(120, viewH - insetBottom);
     const scale = Math.min((viewW - pad * 2) / worldW, (usableH - pad * 2) / worldH);
-    // The viewport centre is viewH/2; the visible band's centre is usableH/2. Shift the world
-    // focal point so the lot lands in the band.
-    const shift = (viewH / 2 - usableH / 2) / scale;
-    return { scale, cx: worldW / 2, cy: worldH / 2 + shift };
+    // The inset travels with the camera in *screen* space (see applyCamera): the map is rotated
+    // heading-up, so shifting the world focal point would move the view sideways instead.
+    return { scale, cx: worldW / 2, cy: worldH / 2, inset: insetBottom };
   },
   // The camera while a route is being driven: the box the route and the car occupy, fitted on
   // screen. Centring only on the car showed no route at all - a 900 px route does not fit a
@@ -413,13 +412,24 @@ const Nav = {
       x1 = Math.max(x1, x); y1 = Math.max(y1, y);
     }
     const w = Math.max(x1 - x0, 24), h = Math.max(y1 - y0, 24);
-    const scale = Math.min((viewW - pad * 2) / w, (usableH - pad * 2) / h);
-    const shift = (viewH / 2 - usableH / 2) / Math.max(scale, 1e-6);
-    return { scale: Math.max(minScale, Math.min(maxScale, scale)),
-             cx: (x0 + x1) / 2, cy: (y0 + y1) / 2 + shift };
+    const scale = Math.max(minScale,
+                           Math.min(maxScale, Math.min((viewW - pad * 2) / w,
+                                                       (usableH - pad * 2) / h)));
+    return { scale, cx: (x0 + x1) / 2, cy: (y0 + y1) / 2, inset: insetBottom };
   },
   followCamera(viewW, viewH, x, y, scale) {
     return { scale, cx: x, cy: y };
+  },
+  // Is this world point inside the camera's frame, with a margin, above the docked sheet? Used to
+  // refuse a framing that would leave the car off screen.
+  framesPoint(cam, viewW, viewH, rot, x, y, margin = 24) {
+    // Where the point actually lands on screen, rotation included, and it must be inside the part
+    // of the screen the sheet does not cover.
+    const [sx, sy0] = this.toScreen(viewW, viewH, cam, rot, x, y);
+    const sy = sy0 - (cam.inset || 0) / 2;
+    const usableH = Math.max(120, viewH - (cam.inset || 0));
+    return sx >= margin && sx <= viewW - margin
+        && sy >= margin && sy <= usableH - margin;
   },
   // The angle the world is turned by so that the car's heading points up the screen. Radians, as
   // canvas wants, and null in the north-up view.
@@ -447,7 +457,10 @@ const Nav = {
   // the focal point. The rotation is applied after the translation, so it is applied about the
   // middle of the screen - which is where the car is drawn.
   applyCamera(ctx, viewW, viewH, cam, rot) {
-    ctx.translate(viewW / 2, viewH / 2);
+    // The sheet docked at the bottom is not part of the map: the content is centred in the part
+    // of the screen above it. Done here, in screen space, because the map is rotated.
+    const lift = (cam.inset || 0) / 2;
+    ctx.translate(viewW / 2, viewH / 2 - lift);
     ctx.rotate(rot || 0);
     ctx.scale(cam.scale, cam.scale);
     ctx.translate(-cam.cx, -cam.cy);
@@ -740,13 +753,20 @@ function updateCamera() {
   const useFollow = (PHASE === "NAVIGATING" || PHASE === "ARRIVED") &&
                     v && v.visible !== false && car.x != null;
   const sheetInset = sheetHeight();
+  let framing = false;
   if (useFollow) {
-    // Heading-up, and framing the route's own box so the whole route is on screen - a route is
-    // what "selected a bay" means, so it must be visible; the box follows the car as it moves.
+    // Heading-up, framing the route's own box so the whole route is on screen - a route is what
+    // "selected a bay" means, so it must be visible. The car must stay on screen too, so the
+    // framing is only taken when the car actually lands inside it.
     const pts = ROUTE?.ok ? Nav.routePoints(ROUTE, NODES).points : [];
     const framed = Nav.routeCamera(viewW0, viewH0, { x: car.x, y: car.y }, pts, sheetInset,
                                    0.75, driveScale());
-    targetCam = framed ?? Nav.followCamera(viewW0, viewH0, car.x, car.y, driveScale());
+    if (framed && Nav.framesPoint(framed, viewW0, viewH0, cam.rot, car.x, car.y)) {
+      targetCam = framed; framing = true;
+    } else {
+      targetCam = Nav.followCamera(viewW0, viewH0, car.x, car.y, driveScale());
+      targetCam.inset = sheetInset;
+    }
   } else {
     // Nothing selected: the whole parking lot, fitted above the sheet.
     targetCam = Nav.fitCamera(viewW0, viewH0, worldW, worldH, sheetInset);
@@ -762,7 +782,12 @@ function updateCamera() {
   cam.scale = lerp(cam.scale, targetCam.scale, t);
   cam.cx = lerp(cam.cx, targetCam.cx, t);
   cam.cy = lerp(cam.cy, targetCam.cy, t);
-  if (useFollow) cam = Nav.clampCamera(viewW0, viewH0, cam, worldW, worldH);
+  // The inset has to travel with the camera the renderer actually uses - it was set on the target
+  // only, so the lift never happened and the route sat half under the sheet.
+  cam.inset = lerp(cam.inset ?? 0, targetCam.inset ?? 0, t);
+  // Clamping keeps the view inside the lot, which is right for the follow view; while framing a
+  // route it is what pushed the car off screen, so it is skipped there.
+  if (useFollow && !framing) cam = Nav.clampCamera(viewW0, viewH0, cam, worldW, worldH);
 }
 
 // Shortest-arc interpolation in radians, for the same reason lerpAngle exists in degrees.
@@ -795,10 +820,16 @@ const STYLE = {
   aisleWidth: 60,          // world px: the real corridor half-width x2, between the bay rows
   stubWidth: 44,           // world px: the entrance branch
   minLanePx: 60,           // measured: bay access stubs are 27-40 px, real lane runs >= 83 px
-  bayFree: "#e7ece6",
-  bayTaken: "#e6e9ef",
-  bayUnknown: "#e8ebef",
-  bayEdge: "#d3dce5",
+  // Bay state colours, the convention every car park uses: free is green, taken is red, and the
+  // one being driven to is highlighted yellow. Fills stay light enough to read under the route.
+  bayFree: "#dcf3e3",
+  bayFreeEdge: "#2f9e5f",
+  bayTaken: "#fbe0e0",
+  bayTakenEdge: "#d64545",
+  bayUnknown: "#eceff3",
+  bayUnknownEdge: "#c9d2dc",
+  bayTarget: "#fff2c2",
+  bayTargetEdge: "#e8a200",
   routeCasing: "rgba(255,255,255,.92)",
   routeFill: "#1f7aff",
   routeWidth: 7,           // screen px
@@ -916,20 +947,19 @@ function drawBayShape(s) {
     p.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
     ctx.closePath();
   };
-  if (isTarget) {
-    poly(); ctx.fillStyle = "rgba(31,122,255,.10)"; ctx.fill();
-    poly(); ctx.strokeStyle = STYLE.routeFill; ctx.lineWidth = 2.2 / cam.scale; ctx.stroke();
-    return;
-  }
-  if (drive()) {
-    poly(); ctx.strokeStyle = "rgba(15,20,26,.10)"; ctx.lineWidth = 1.2 / cam.scale; ctx.stroke();
-    return;
-  }
-  poly();
-  ctx.fillStyle = state === "EMPTY" ? STYLE.bayFree
-    : state === "OCCUPIED" ? STYLE.bayTaken : STYLE.bayUnknown;
-  ctx.fill();
-  poly(); ctx.strokeStyle = STYLE.bayEdge; ctx.lineWidth = 1.3 / cam.scale; ctx.stroke();
+  // The selected bay is yellow; free is green; taken is red. While driving the fills are drawn
+  // a little lighter so the route still reads on top, but the state stays legible.
+  const alpha = drive() ? 0.55 : 1;
+  const paint = (fill, edge, width) => {
+    ctx.save(); ctx.globalAlpha = alpha;
+    poly(); ctx.fillStyle = fill; ctx.fill();
+    poly(); ctx.strokeStyle = edge; ctx.lineWidth = width / cam.scale; ctx.stroke();
+    ctx.restore();
+  };
+  if (isTarget) return paint(STYLE.bayTarget, STYLE.bayTargetEdge, 2.6);
+  if (state === "EMPTY") return paint(STYLE.bayFree, STYLE.bayFreeEdge, 1.6);
+  if (state === "OCCUPIED") return paint(STYLE.bayTaken, STYLE.bayTakenEdge, 1.6);
+  return paint(STYLE.bayUnknown, STYLE.bayUnknownEdge, 1.3);
 }
 
 // Numbers are for choosing a bay, not for driving. The pick list carries them; the map does not.
@@ -958,7 +988,7 @@ function drawTarget() {
   ctx.arc(0, 0, r, Math.PI, 0);
   ctx.quadraticCurveTo(r, r * 0.4, 0, r * 1.6);
   ctx.closePath();
-  ctx.fillStyle = STYLE.target; ctx.fill();
+  ctx.fillStyle = STYLE.bayTargetEdge; ctx.fill();
   ctx.shadowColor = "transparent";
   ctx.beginPath(); ctx.arc(0, 0, r * 0.36, 0, Math.PI * 2);
   ctx.fillStyle = "#fff"; ctx.fill();
