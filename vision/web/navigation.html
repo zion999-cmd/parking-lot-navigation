@@ -63,6 +63,18 @@
            pointer-events: none; text-align: center; backdrop-filter: blur(12px); }
   #toast.show { opacity: 1; transform: translate(-50%,-50%) scale(1); }
   #toast .big { font-size: 30px; margin-bottom: 4px; }
+
+  /* The chrome follows the map: a light map inside a dark frame looks like a mistake. The three
+     styles set the same variables the panels already use, so nothing else has to know. */
+  :root[data-style="day"] { --bg: #f1efe9; --panel: rgba(255,255,255,.88);
+    --line: rgba(0,0,0,.12); --muted: #5f6368; --accent: #1a73e8; --green: #137333;
+    color-scheme: light; }
+  :root[data-style="day"] body { color: #202124; }
+  :root[data-style="day"] #cancelBtn { background: rgba(0,0,0,.08); color: #202124; }
+  :root[data-style="day"] #againBtn { color: #ffffff; }
+  :root[data-style="indoor"] { --bg: #2b2e33; --panel: rgba(24,26,30,.88);
+    --line: rgba(255,255,255,.12); --accent: #ffd60a; --green: #ffd60a; }
+  :root[data-style="indoor"] #againBtn { background: #ffd60a; color: #21232a; }
 </style>
 
 <canvas id="map"></canvas>
@@ -632,26 +644,103 @@ function driveScale() {
 // casing so they keep an edge at any angle, the route is the brightest thing on screen, bays
 // become texture instead of colour once you are driving, only your destination has a marker, and
 // every label sits on a rounded plate so it stays legible over whatever is under it.
-const STYLE = {
-  ground: "#141a23",
-  lotEdge: "rgba(255,255,255,.07)",
-  roadCasing: "#3a4453",
-  roadFill: "#2c3544",
-  roadWidth: 18,
-  routeCasing: "#0f2d52",
-  routeFill: "#3fa9ff",
-  routeWidth: 10,
-  bayEdge: "rgba(255,255,255,.16)",
-  faintEdge: "rgba(255,255,255,.07)",
-  freeEdge: "rgba(74,222,128,.8)",
-  freeFill: "rgba(74,222,128,.10)",
-  takenFill: "rgba(255,255,255,.05)",
-  text: "#eaf0f8",
-  muted: "#98a3b4",
-  plate: "rgba(9,13,19,.82)",
-  car: "#ef4444",
-  target: "#3fa9ff",
+// Three of them, because "like a navigation app" is not one thing: the night view is what a
+// phone shows after dark, the day view is the beige-on-white that a map shows at noon, and the
+// indoor view is what an underground car park looks like - concrete, white markings, no beige.
+// Pick with ?style=day or ?style=indoor; the default is night.
+//
+// Every colour a drawing function needs is in here, including the label colours, so a style is
+// one object and nothing has to be changed in two places to try one.
+const STYLES = {
+  night: {
+    ground: "#10151d",
+    lotEdge: "rgba(255,255,255,.07)",
+    roadCasing: "#39434f",
+    roadFill: "#2a3340",
+    roadWidth: 18,
+    routeCasing: "#0d2a4d",
+    routeFill: "#3fa9ff",
+    routeWidth: 10,
+    faintEdge: "rgba(255,255,255,.07)",
+    bayEdge: "rgba(255,255,255,.16)",
+    freeEdge: "rgba(74,222,128,.85)",
+    freeFill: "rgba(74,222,128,.12)",
+    freeText: "#b9f6d0",
+    takenEdge: "rgba(255,255,255,.16)",
+    takenFill: "rgba(255,255,255,.05)",
+    takenText: "#c8cedb",
+    unknownText: "#98a3b4",
+    plate: "rgba(9,13,19,.82)",
+    text: "#eaf0f8",
+    muted: "#98a3b4",
+    target: "#3fa9ff",
+    targetDot: "#0b1220",
+    entrance: "#8fd3ff",
+    entranceText: "#cfe6ff",
+    car: "#ef4444",
+    carRing: "#ffffff",
+  },
+  day: {
+    ground: "#f1efe9",
+    lotEdge: "rgba(0,0,0,.10)",
+    roadCasing: "#dedbd2",
+    roadFill: "#ffffff",
+    roadWidth: 18,
+    routeCasing: "#1a5fd0",
+    routeFill: "#4285f4",
+    routeWidth: 10,
+    faintEdge: "rgba(0,0,0,.07)",
+    bayEdge: "rgba(0,0,0,.16)",
+    freeEdge: "#137333",
+    freeFill: "rgba(19,115,51,.10)",
+    freeText: "#137333",
+    takenEdge: "rgba(0,0,0,.16)",
+    takenFill: "rgba(0,0,0,.05)",
+    takenText: "#5f6368",
+    unknownText: "#80868b",
+    plate: "rgba(255,255,255,.92)",
+    text: "#202124",
+    muted: "#5f6368",
+    target: "#1a73e8",
+    targetDot: "#ffffff",
+    entrance: "#1a73e8",
+    entranceText: "#1a73e8",
+    car: "#e8453c",
+    carRing: "#ffffff",
+  },
+  indoor: {
+    ground: "#33363b",
+    lotEdge: "rgba(255,255,255,.08)",
+    roadCasing: "#4b5057",
+    roadFill: "#3f444b",
+    roadWidth: 20,
+    routeCasing: "#12365e",
+    routeFill: "#4aa8ff",
+    routeWidth: 11,
+    faintEdge: "rgba(255,255,255,.10)",
+    bayEdge: "rgba(255,255,255,.32)",
+    freeEdge: "rgba(255,214,10,.85)",
+    freeFill: "rgba(255,214,10,.10)",
+    freeText: "#ffd60a",
+    takenEdge: "rgba(255,255,255,.18)",
+    takenFill: "rgba(255,255,255,.06)",
+    takenText: "#d7dbe2",
+    unknownText: "#a9aeb6",
+    plate: "rgba(18,20,24,.85)",
+    text: "#f2f4f8",
+    muted: "#a9aeb6",
+    target: "#ffd60a",
+    targetDot: "#2b2f34",
+    entrance: "#c9d1d9",
+    entranceText: "#e7ebf0",
+    car: "#ef4444",
+    carRing: "#ffffff",
+  },
 };
+const styleName = new URLSearchParams(location.search).get("style") || "night";
+const STYLE = STYLES[styleName] ?? STYLES.night;
+// The page chrome follows the map, or a light map would sit inside a dark frame.
+document.documentElement.dataset.style = styleName;
 
 function drawWorld() {
   ctx.clearRect(0, 0, viewW0, viewH0);
@@ -743,7 +832,7 @@ function drawBayShape(s) {
     poly(); ctx.strokeStyle = STYLE.freeEdge; ctx.lineWidth = 2; ctx.stroke();
   } else if (state === "OCCUPIED") {
     poly(); ctx.fillStyle = STYLE.takenFill; ctx.fill();
-    poly(); ctx.strokeStyle = STYLE.bayEdge; ctx.lineWidth = 1.25; ctx.stroke();
+    poly(); ctx.strokeStyle = STYLE.takenEdge; ctx.lineWidth = 1.25; ctx.stroke();
   } else {
     poly(); ctx.strokeStyle = STYLE.faintEdge; ctx.lineWidth = 1; ctx.stroke();
   }
@@ -759,8 +848,8 @@ function drawBayLabel(s) {
     // navigation view, and forty numbers competing with the route is how it stops being one.
     return;
   }
-  const colour = state === "EMPTY" ? "#b9f6d0"
-    : state === "OCCUPIED" ? "#c8cedb" : STYLE.muted;
+  const colour = state === "EMPTY" ? STYLE.freeText
+    : state === "OCCUPIED" ? STYLE.takenText : STYLE.unknownText;
   label(cx, cy, String(s.id), colour, 12);
 }
 
@@ -783,11 +872,11 @@ function drawTarget() {
   ctx.closePath();
   ctx.fillStyle = STYLE.target; ctx.fill();
   ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
-  ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 2; ctx.stroke();
+  ctx.strokeStyle = STYLE.carRing; ctx.lineWidth = 2; ctx.stroke();
   ctx.beginPath(); ctx.arc(0, 0, 3.4, 0, Math.PI * 2);
-  ctx.fillStyle = "#0b1220"; ctx.fill();
+  ctx.fillStyle = STYLE.targetDot; ctx.fill();
   ctx.restore();
-  label(x, y - r * 3.4, String(targetId), "#ffffff", 13);
+  label(x, y - r * 3.4, String(targetId), STYLE.text, 13);
 }
 
 function drawEntrances() {
@@ -795,9 +884,9 @@ function drawEntrances() {
     const n = NODES[g.node];
     if (!n) continue;
     ctx.beginPath(); ctx.arc(n.x, n.y, 7, 0, Math.PI * 2);
-    ctx.fillStyle = "#8fd3ff"; ctx.fill();
-    ctx.strokeStyle = "#0b1220"; ctx.lineWidth = 2; ctx.stroke();
-    label(n.x, n.y - 18, "入口", "#cfe6ff", 12);
+    ctx.fillStyle = STYLE.entrance; ctx.fill();
+    ctx.strokeStyle = STYLE.plate; ctx.lineWidth = 2; ctx.stroke();
+    label(n.x, n.y - 18, "入口", STYLE.entranceText, 12);
   }
 }
 
@@ -839,7 +928,7 @@ function drawCar(x, y, heading) {
   ctx.closePath();
   ctx.fillStyle = STYLE.car; ctx.fill();
   ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
-  ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 2.4; ctx.stroke();
+  ctx.strokeStyle = STYLE.carRing; ctx.lineWidth = 2.4; ctx.stroke();
   // a windscreen line near the nose, so the front reads even in silhouette
   ctx.beginPath(); ctx.moveTo(-4, -5); ctx.lineTo(0, -9); ctx.lineTo(4, -5);
   ctx.strokeStyle = "rgba(255,255,255,.9)"; ctx.lineWidth = 1.6; ctx.stroke();
