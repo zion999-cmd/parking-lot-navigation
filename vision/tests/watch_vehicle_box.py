@@ -68,8 +68,10 @@ def main() -> int:
         frames += 1
         long_side = max(pose.bbox[2], pose.bbox[3])
         lengths.append(long_side)
-        median = float(np.median(lengths[-60:]))
-        if len(lengths) > 20 and long_side < args.ratio * median:
+        median = float(np.median(lengths[-60:])) if len(lengths) >= 10 else long_side
+        # From the very first frame: a box that is short only during start-up is a different fault
+        # from one that shorts while running, and the first frames used to be skipped as warm-up.
+        if long_side < args.ratio * median:
             events += 1
             hsv = cv2.cvtColor(f, cv2.COLOR_BGR2HSV)
             mask = vehicle.red_mask(hsv, open_kernel=cfg["open_kernel"])
@@ -82,7 +84,9 @@ def main() -> int:
             print(f"  [{frames:5d}] SHORT: box {pose.bbox} long={long_side} median={median:.0f} "
                   f"pieces={len(pieces)} {pieces[:4]} -> {name}")
     rate = frames / max(time.time() - started, 1e-6)
-    print(f"\n  {frames} frames in {time.time() - started:.0f}s ({rate:.1f} fps), {events} shortened")
+    early = sum(1 for L in lengths[:20] if lengths and L < args.ratio * float(np.median(lengths)))
+    print(f"\n  {frames} frames in {time.time() - started:.0f}s ({rate:.1f} fps), {events} shortened"
+          f"{f' ({early} of them in the first 20 frames)' if events else ''}")
     if rate < 15:
         # The camera gives each client a share of its frames, so a client running beside main.py
         # sees a subset - and a fault that alternates frame to frame would hide in the gaps.
