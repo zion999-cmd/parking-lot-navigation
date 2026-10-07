@@ -503,7 +503,9 @@ def run_edit_mode(get_frame, config_path: str, template_path: Optional[str],
             cv2.setMouseCallback(WINDOW, app.on_mouse)
 
         cv2.imshow(WINDOW, app.render(frame))
-        key = cv2.waitKey(20) & 0xFF
+        # Same 5 ms as calibration.py's loop, and for the same measured reason: it is the event
+        # pump, not the drawing, that decides how closely a dragged bay follows the pointer.
+        key = cv2.waitKey(5) & 0xFF
         if key == 255:
             continue
         if key == ord('R'):

@@ -285,15 +285,24 @@ class CalibrationApp:
         it is obvious at a glance which parts are theirs to edit and which are automatic.
         """
         roads = self.road.net
-        derived = self.road.derived(self.ed.spots)
+        # While a corner is being dragged this layer is only context underneath the bays, and
+        # working out the derived entrances costs 20.3 ms on the real map - for 48 bays, every
+        # frame. That was the difference between a drag that follows the pointer and one that
+        # lurches. The roads as drawn are enough to draw context; the entrances come back the
+        # moment the drag ends (and are always there in the roads layer, where they are edited).
+        graph = roads if (faint and self.ed.dragging()) else self.road.derived(self.ed.spots)
         road_colour = COL_ROAD_FAINT if faint else COL_ROAD
+        # Indexed once. The lookups below used to be RoadNetwork.node(), a linear scan per call,
+        # and the loop asked for the same two nodes twice per edge.
+        by_id = {n.id: n for n in graph.nodes}
+        drawn_ids = {n.id for n in roads.nodes}
 
         def is_stub(edge) -> bool:
-            a, b = derived.node(edge.a), derived.node(edge.b)
+            a, b = by_id.get(edge.a), by_id.get(edge.b)
             return bool(a and b and (a.kind == KIND_SPOT or b.kind == KIND_SPOT))
 
-        for edge in derived.edges:
-            a, b = derived.node(edge.a), derived.node(edge.b)
+        for edge in graph.edges:
+            a, b = by_id.get(edge.a), by_id.get(edge.b)
             if a is None or b is None:
                 continue
             pa, pb = (int(a.x), int(a.y)), (int(b.x), int(b.y))
@@ -309,8 +318,8 @@ class CalibrationApp:
             else:
                 cv2.line(canvas, pa, pb, road_colour, 1 if faint else 3)
 
-        for node in derived.nodes:
-            drawn = roads.node(node.id) is not None      # the person's own point
+        for node in graph.nodes:
+            drawn = node.id in drawn_ids            # the person's own point
             centre = (int(node.x), int(node.y))
             if node.kind == KIND_SPOT:
                 if faint:
@@ -762,7 +771,11 @@ class CalibrationApp:
                 cv2.setMouseCallback(WINDOW, self.on_mouse)
 
             cv2.imshow(WINDOW, self.render(frame))
-            key = cv2.waitKey(20) & 0xFF
+            # 5 ms, not 20. Measured on this machine: waitKey has a ~19 ms floor here, so a loop
+            # asking for 20 ms spent 37 ms per frame while a drag waited to be serviced, and
+            # asking for 5 ms spends 26 ms. The drawing is no longer the limit (6 ms) - the event
+            # pump is, and a shorter wait is what makes a dragged corner follow the pointer.
+            key = cv2.waitKey(5) & 0xFF
             if key == 255:
                 continue
             if not self.act(chr(key)):

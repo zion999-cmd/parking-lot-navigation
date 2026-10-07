@@ -182,6 +182,15 @@ class SpotEditor:
         self._prepare(spot)
         self.dirty = True
 
+    def dragging(self) -> bool:
+        """True while a corner or a whole bay is being dragged.
+
+        The window asks this to decide what is worth drawing: while the pointer is moving, what
+        matters is that the bay follows it, and anything expensive that only decorates the view
+        can wait for the button to come up.
+        """
+        return self._drag is not None
+
     def end_drag(self) -> None:
         if self._drag is None:
             return
