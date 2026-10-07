@@ -479,6 +479,7 @@ let MAP = null, NODES = {}, STATE = null, ROUTE = null;
 let PHASE = "IDLE";            // IDLE | NAVIGATING | ARRIVED
 let targetId = null;
 let lastPlan = { x: null, y: null, at: 0 };
+let online = true;          // false while the server is not answering; shown, not spam-retried
 let replanSeq = 0;
 let waitingNote = 0;
 
@@ -538,8 +539,11 @@ async function requestRoute(manual) {
     ROUTE = doc;
     const v = vehicleOf();
     lastPlan = { x: v?.x ?? null, y: v?.y ?? null, at: Date.now() };
-  } else if (manual) {
-    transient("正在连接导航服务…", "•");
+  } else {
+    // Failed: back off a whole replan interval, or the gate refires on the next poll (250 ms) and
+    // floods the console while the server is down.
+    lastPlan = { x: null, y: null, at: Date.now() };
+    if (manual) transient("正在连接导航服务…", "•");
   }
 }
 
@@ -656,6 +660,13 @@ function refreshSheets() {
 function updateHud() {
   const v = vehicleOf();
   refreshSheets();
+  if (!online) {
+    el("statusPill").textContent = "连接断开 · 正在重试…";
+    el("title").textContent = "离线";
+    el("distV").innerHTML = "–";
+    el("subtitle").textContent = "检查 src/main.py 与 src/serve.py 是否在运行";
+    return;
+  }
 
   if (PHASE === "IDLE") {
     el("statusPill").textContent = "选择一个空车位开始导航";
@@ -1065,18 +1076,20 @@ async function poll() {
     return;
   }
   const stateDoc = await getJSON(DOCS.state);
+  online = !!stateDoc;
   if (stateDoc) STATE = stateDoc;
 
-  // Adopt a route written by anyone (plan.py, another tab) the same way board does.
-  const fileRoute = await getJSON(DOCS.route);
-  if (fileRoute && targetId != null &&
-      String(fileRoute.target_spot) === String(targetId) &&
-      JSON.stringify(fileRoute) !== JSON.stringify(ROUTE)) {
-    ROUTE = fileRoute;
+  if (online) {
+    // Adopt a route written by anyone (plan.py, another tab) the same way board does.
+    const fileRoute = await getJSON(DOCS.route);
+    if (fileRoute && targetId != null &&
+        String(fileRoute.target_spot) === String(targetId) &&
+        JSON.stringify(fileRoute) !== JSON.stringify(ROUTE)) {
+      ROUTE = fileRoute;
+    }
+    checkArrival();
+    if (PHASE === "NAVIGATING" && shouldReplan(Date.now())) await requestRoute(false);
   }
-
-  checkArrival();
-  if (PHASE === "NAVIGATING" && shouldReplan(Date.now())) await requestRoute(false);
 
   updateHud();
 }
@@ -1090,8 +1103,12 @@ async function boot() {
   const stateDoc = await getJSON(DOCS.state);
   if (stateDoc) STATE = stateDoc;
   tick();
-  poll();
-  setInterval(poll, POLL_MS);
+  // Self-scheduling rather than setInterval: while the server is down the poll backs off, so a
+  // disconnected page does not write a failed request into the console five times a second.
+  (async function loop() {
+    await poll();
+    setTimeout(loop, online ? POLL_MS : 2000);
+  })();
   // Deep link: ?spot=10 starts guiding straight to a bay, the same as clicking it.
   const deep = new URLSearchParams(location.search).get("spot");
   if (deep && STATE?.spots?.[deep]?.state === "EMPTY") startNavigation(deep);
