@@ -657,6 +657,7 @@ const STYLES = {
   // the bays cyan when free (11.6%) and coral when taken (6.2%), and green POI markers (1.5%).
   // Kept as exact samples rather than re-derived: these are measurements.
   real: {
+    roadSurfaceWidth: 88,    // world px: ring corridor; bays cover where it runs under them
     ground: "#ffffff",
     lotEdge: "rgba(0,0,0,.10)",
     roadCasing: "#e6e6e6",
@@ -783,8 +784,10 @@ function drawWorld() {
   ctx.lineCap = "round"; ctx.lineJoin = "round";
 
   drawGround();
-  for (const s of MAP.spots) drawBayShape(s);
+  // The road is a wide surface the bays sit on (see roadSurfaceWidth): draw it first so the bay
+  // polygons cover it; otherwise the corridor band paints the bays out.
   drawRoads();
+  for (const s of MAP.spots) drawBayShape(s);
   drawRoute();
   drawEntrances();
   drawTarget();
@@ -817,13 +820,25 @@ function drawRoads() {
   };
   for (const chain of CHAINS) {
     if (chain.length < 2) continue;
-    // Widths are screen px and undone by the camera scale, so an aisle is the same width when
-    // the view zooms in and never dwarfs the bays beside it. (Measured from the reference:
-    // the aisle runs ~1.5-2x a bay, not the 5x it reached in world units.)
-    path(chain);
-    ctx.strokeStyle = STYLE.roadCasing; ctx.lineWidth = (STYLE.roadWidth + 3) / cam.scale; ctx.stroke();
-    path(chain);
-    ctx.strokeStyle = STYLE.roadFill; ctx.lineWidth = STYLE.roadWidth / cam.scale; ctx.stroke();
+    if (STYLE.roadSurfaceWidth) {
+      // The corridor is a real surface: a world-space band wide enough to reach the bays on
+      // either side (measured gaps 28-46 px). Bays render after and cover any gray that runs
+      // under them, so a generous width always reads as aisle, never as a fat centre line.
+      path(chain);
+      ctx.strokeStyle = STYLE.roadCasing;
+      ctx.lineWidth = STYLE.roadSurfaceWidth + 4; ctx.stroke();
+      path(chain);
+      ctx.strokeStyle = STYLE.roadFill;
+      ctx.lineWidth = STYLE.roadSurfaceWidth; ctx.stroke();
+    } else {
+      // Other presets keep a thin screen-constant centre stroke.
+      path(chain);
+      ctx.strokeStyle = STYLE.roadCasing;
+      ctx.lineWidth = (STYLE.roadWidth + 3) / cam.scale; ctx.stroke();
+      path(chain);
+      ctx.strokeStyle = STYLE.roadFill;
+      ctx.lineWidth = STYLE.roadWidth / cam.scale; ctx.stroke();
+    }
   }
 }
 
