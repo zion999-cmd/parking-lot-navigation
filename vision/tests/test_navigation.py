@@ -142,14 +142,97 @@ def test_image_to_driver_frame_fixes_left_right() -> None:
     assert out == [90, 180, 270, 180], out
 
 
-def test_car_heading_prefers_front() -> None:
+def test_car_heading_is_converted_out_of_the_image_frame() -> None:
+    """The bug this would have been: front_heading is measured the way the map is.
+
+    vehicle.py: heading is atan2(dy, dx) as a 0..180 axis, and front_heading is that axis plus the
+    one fact a person supplied - which end is the front. So 0 means *right*, not up, while the icon
+    is drawn nose-up. Taking it raw pointed every car 90 degrees off, and a fixture that supplied an
+    already-converted angle hid it: these cases are now what the camera actually emits.
+    """
     cases = [
-        ({"heading": 30, "front_is_known": True, "front_heading": 210}, 210),
-        ({"heading": 0, "front_is_known": False}, 90),    # image axis 0 (right) -> driver 90
+        # the car facing east: image 0 -> driver 90
+        ({"heading": 0, "front_is_known": True, "front_heading": 0}, 90),
+        # facing south: image 90 (+y is down) -> driver 180
+        ({"heading": 90, "front_is_known": True, "front_heading": 90}, 180),
+        # facing north: image 270 -> driver 0 - the one case where raw and converted agree is
+        # nowhere, and this is the check that a wrong conversion cannot pass.
+        ({"heading": 90, "front_is_known": True, "front_heading": 270}, 0),
+        ({"heading": 0, "front_is_known": False}, 90),    # no front: the axis, converted
         ({}, None),
     ]
     out = node_run("Nav.carHeading(c)", [c for c, _ in cases])
     assert out == [w for _, w in cases], out
+
+
+def test_the_map_turns_so_the_car_faces_up() -> None:
+    """Heading-up: turn the world by minus the car's bearing and its nose points up the screen.
+
+    Checked through the projection rather than by looking: a point one metre ahead of the car must
+    land directly above the middle of the screen, whatever direction the car is facing.
+    """
+    cases = [0, 45, 90, 180, 270, 315]
+    # The point ahead of the car is placed in *image* coordinates, because that is the frame the
+    # map is in: a driver bearing of c is an image bearing of c - 90. (Getting this the wrong way
+    # round in the test is what made it fail while the page was right.)
+    got = node_run(
+        "(() => { const rot = Nav.worldRotation(c);"
+        " const a = (c - 90) * Math.PI / 180;"
+        " const p = Nav.toScreen(900, 1000, {scale: 2, cx: 100, cy: 100}, rot,"
+        "                         100 + 20 * Math.cos(a), 100 + 20 * Math.sin(a));"
+        " return [Math.round((p[0] - 450) * 100) / 100, Math.round((p[1] - 500) * 100) / 100]; })()",
+        cases)
+    for bearing, (dx, dy) in zip(cases, got):
+        assert abs(dx) < 0.01, (bearing, dx, dy)
+        assert dy < -30, (bearing, dx, dy)      # ahead of the car is *up* the screen
+
+
+def test_screen_and_world_are_exact_inverses() -> None:
+    """Clicking a bay has to pick that bay, and the map is turned: so the two must invert."""
+    payload = [{"rot": r, "x": x, "y": y} for r in (0.0, 0.7, -1.9, 3.0)
+               for x, y in ((0.0, 0.0), (37.5, 512.25), (799.0, 599.0))]
+    got = node_run(
+        "(() => { const cam = {scale: 3.1, cx: 400, cy: 300};"
+        " const s = Nav.toScreen(900, 1000, cam, c.rot, c.x, c.y);"
+        " const w = Nav.screenToWorld(900, 1000, cam, c.rot, s[0], s[1]);"
+        " return w; })()", payload)
+    for case, (x, y) in zip(payload, got):
+        assert abs(x - case["x"]) < 1e-6, (case, x, y)
+        assert abs(y - case["y"]) < 1e-6, (case, x, y)
+
+
+def test_roads_are_merged_into_continuous_lines() -> None:
+    """A road stored as four segments must not be drawn as four segments.
+
+    Runs of edges through a node of degree 2 are one line; a road that really branches is not.
+    """
+    nodes = {"a": {"x": 0, "y": 0}, "b": {"x": 10, "y": 0}, "c": {"x": 20, "y": 0},
+             "d": {"x": 30, "y": 0}, "t": {"x": 20, "y": 10}, "e": {"x": 40, "y": 10}}
+    e = lambda p, q: {"from": p, "to": q}
+    cases = [
+        # a straight run through three degree-2 nodes: one line, four points, in order
+        ([e("a", "b"), e("b", "c"), e("c", "d")], [[[0, 0], [10, 0], [20, 0], [30, 0]]]),
+        # a T: the through-road and the branch, two lines
+        ([e("a", "b"), e("b", "c"), e("c", "d"), e("c", "t")],
+         [[[0, 0], [10, 0], [20, 0], [30, 0]], [[20, 0], [20, 10]]]),
+        # a single edge is a line of two points
+        ([e("a", "b")], [[[0, 0], [10, 0]]]),
+        # a loop has no end to start from and must still come out as one line
+        ([e("b", "c"), e("c", "b")], None),
+        # an edge to a node the map does not have is ignored rather than breaking the line
+        ([e("a", "b"), e("b", "gone"), e("b", "c")], [[[0, 0], [10, 0], [20, 0]]]),
+    ]
+    payload = [{"nodes": nodes, "edges": edges} for edges, _ in cases]
+    got = node_run(
+        "Nav.roadChains(c.nodes, c.edges).map(ch => ch.map(p => "
+        "[Math.round(p[0]), Math.round(p[1])]))", payload)
+    for (edges, want), result in zip(cases, got):
+        if want is None:
+            assert len(result) == 1, result
+            assert sorted(tuple(p) for p in result[0]) == [(10, 0), (20, 0)], result
+            continue
+        assert sorted(map(tuple, map(lambda ch: tuple(map(tuple, ch)), result))) == \
+            sorted(map(lambda ch: tuple(map(tuple, ch)), want)), (edges, result, want)
 
 
 # ---------------------------------------------------------------------------
@@ -185,9 +268,9 @@ def test_maneuver_says_straight_and_turns_in_driver_frame() -> None:
     # heading 0 (facing +x, along the lane) -> straight; facing 90 (down) while lane goes +x:
     # the lane is to the driver's right -> a right turn.
     out = node_run("Nav.maneuver({x:0,y:0,front_is_known:true,front_heading:c}, r, n)",
-                   [90, 0], extra=extra)
-    # Lane runs to image +x = driver east (90). Facing east (90) is straight; facing north (0)
-    # means the lane is off to the right -> right turn.
+                   [0, 270], extra=extra)        # image 0 = east, image 270 = north
+    # The lane runs to image +x, which is driver east (90). front_heading is emitted in image
+    # terms, so facing east is image 0 and facing north is image 270.
     assert "直行" in out[0]["text"] and out[0]["icon"] == "⬆️", out[0]
     assert "右转" in out[1]["text"] and out[1]["icon"] == "➡️", out[1]
 
@@ -224,7 +307,7 @@ def test_fit_and_follow_camera() -> None:
     follow = node_run("Nav.followCamera(800,600,123,77,1.5)", [0])[0]
     assert follow == {"scale": 1.5, "cx": 123, "cy": 77}, follow
     # the focal point maps to screen centre
-    screen = node_run("Nav.toScreen(800,600,c,123,77)", [follow])[0]
+    screen = node_run("Nav.toScreen(800,600,c,0,123,77)", [follow])[0]
     assert abs(screen[0] - 400) < 1e-9 and abs(screen[1] - 300) < 1e-9, screen
 
 
@@ -309,6 +392,26 @@ def test_camera_is_clamped_inside_the_lot() -> None:
     assert got[1] == {"scale": 3.75, "cx": 400, "cy": 300}, got[1]
     assert abs(got[2]["cx"] - 680) < 1e-6 and abs(got[2]["cy"] - 466.6667) < 1e-3, got[2]
     assert got[3]["cx"] == 400 and got[3]["cy"] == 300, got[3]
+
+
+def test_the_renderer_actually_applies_the_turn() -> None:
+    """A pure function nobody calls is not a feature.
+
+    The projection above can be perfect while the renderer still draws a north-up map, so the
+    shipped page is read for the three things that make the turn real: the camera transform with
+    a rotation, a rotation that is eased towards the car's heading, and labels counter-rotated so
+    bay numbers stay readable while the map turns.
+    """
+    html = open(PAGE, encoding="utf-8").read()
+    assert "Nav.applyCamera(ctx, viewW0, viewH0, cam, cam.rot)" in html, \
+        "the renderer does not apply the camera rotation"
+    assert "Nav.worldRotation(heading)" in html, "nothing asks for the map to be turned"
+    assert "lerpRad(cam.rot" in html, "the turn is not eased"
+    label = html[html.index("function label("):html.index("function drawCar(")]
+    assert "ctx.rotate(-(cam.rot" in label, "labels would turn with the map and become unreadable"
+    # and clicking must be the inverse, or a turned map picks the wrong bay
+    assert "Nav.screenToWorld(viewW0, viewH0, cam, cam.rot" in html, \
+        "clicks do not undo the rotation"
 
 
 def test_page_shows_no_camera_or_internal_terms() -> None:

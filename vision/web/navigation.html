@@ -143,6 +143,68 @@ const Nav = {
     return { points, unknown };
   },
 
+  // ---- the road, as continuous lines --------------------------------------
+  // Edges are how the map is stored, not how a road looks. Drawn edge by edge, a road made of
+  // four stored segments reads as four segments: the lane band shows its seams and the centre
+  // dashes restart at every node. Chains merge runs of edges through nodes that are merely
+  // somewhere along the road (degree 2) and stop where the road really branches.
+  roadChains(nodes, edges) {
+    const adj = {};
+    const add = (a, b) => { (adj[a] = adj[a] || []).push(b); };
+    for (const e of edges) {
+      if (!nodes[e.from] || !nodes[e.to]) continue;
+      add(e.from, e.to); add(e.to, e.from);
+    }
+    const degree = id => (adj[id] || []).length;
+    const used = new Set();
+    const key = (a, b) => a < b ? a + "|" + b : b + "|" + a;
+    const chains = [];
+    // Carry on through a junction when one way out is plainly the same road continuing. This is
+    // the case that matters here: every bay's entrance is a branch off a lane, so a lane has a
+    // junction at every bay, and stopping at each of them is what made one road look like forty
+    // short ones. The branch is left for its own chain.
+    const STRAIGHT_TOL = 50 * Math.PI / 180;
+    const walk = (start, next) => {
+      const ids = [start, next];
+      used.add(key(start, next));
+      let prev = start, cur = next;
+      for (;;) {
+        const options = (adj[cur] || []).filter(id => id !== prev && !used.has(key(cur, id)));
+        if (!options.length) break;
+        let onward = null;
+        if (degree(cur) === 2) {
+          onward = options[0];                       // nothing to choose: the road goes on
+        } else {
+          const into = this.bearing(nodes[prev].x, nodes[prev].y, nodes[cur].x, nodes[cur].y);
+          let best = Infinity;
+          for (const id of options) {
+            const out = this.bearing(nodes[cur].x, nodes[cur].y, nodes[id].x, nodes[id].y);
+            const turn = Math.abs(this.turnDeg(into, out));
+            if (turn < best) { best = turn; onward = id; }
+          }
+          if (best > STRAIGHT_TOL * 180 / Math.PI) onward = null;
+        }
+        if (onward == null) break;
+        used.add(key(cur, onward));
+        ids.push(onward);
+        prev = cur; cur = onward;
+      }
+      chains.push(ids.map(id => [nodes[id].x, nodes[id].y]));
+    };
+    // Start at the ends and the junctions first, so a road is traced through from one end to the
+    // other rather than in pieces from whatever node happened to come first.
+    for (const id of Object.keys(adj)) {
+      if (degree(id) === 2) continue;
+      for (const other of adj[id]) if (!used.has(key(id, other))) walk(id, other);
+    }
+    // What is left is loops, which have no end to start from.
+    for (const e of edges) {
+      if (!nodes[e.from] || !nodes[e.to]) continue;
+      if (!used.has(key(e.from, e.to))) walk(e.from, e.to);
+    }
+    return chains;
+  },
+
   // ---- units ------------------------------------------------------------
   metres(px) { return px / PX_PER_M; },
   formatMetres(px) {
@@ -176,14 +238,18 @@ const Nav = {
   driverBearing(ax, ay, bx, by) {
     return this.imageToDriverDeg(this.bearing(ax, ay, bx, by));
   },
-  // Which way to point the car. front_heading already resolves front from back and is reported
-  // in driver/screen terms (0 = up, clockwise); the bare heading is only the 0..180 image axis
-  // and must not be used to rotate the icon on its own. The icon is drawn north-up and rotated
-  // by this driver angle in the renderer.
+  // Which way to point the car. front_heading is the direction the car faces in 0..360, but it
+  // is measured the way the map is: 0 along +x (right), increasing towards +y (down). The icon is
+  // drawn nose-up, so it needs the driver frame and every path here goes through the same
+  // conversion. Leaving it raw pointed the car 90 degrees off - and a test fixture that supplied
+  // an already-converted angle hid it, which is why the fixture below now builds what the camera
+  // really emits.
   carHeading(vehicle) {
     if (!vehicle) return null;
     if (vehicle.front_is_known && typeof vehicle.front_heading === "number")
-      return vehicle.front_heading;
+      return this.imageToDriverDeg(vehicle.front_heading);
+    // No front: the axis is all there is, so the car may be drawn backwards. Better than
+    // pointing it at a right angle to the road it is on.
     if (typeof vehicle.heading === "number") return this.imageToDriverDeg(vehicle.heading);
     return null;
   },
@@ -241,8 +307,10 @@ const Nav = {
   },
 
   // ---- the follow camera ------------------------------------------------
-  // World->screen: uniform scale, then centred on a focal point. In IDLE the whole lot is
-  // framed; while navigating the focal point is the car, so the lot slides past it. Pure.
+  // World->screen: uniform scale, then centred on a focal point, then rotated so the car's own
+  // direction is up. A car navigator turns the map instead of turning the arrow: with the car on
+  // a lane that is not vertical, a fixed north-up view shows the route at some angle and the
+  // driver has to work out which way is forward.
   fitCamera(viewW, viewH, worldW, worldH) {
     const pad = 48;
     const scale = Math.min((viewW - pad * 2) / worldW, (viewH - pad * 2) / worldH);
@@ -250,6 +318,12 @@ const Nav = {
   },
   followCamera(viewW, viewH, x, y, scale) {
     return { scale, cx: x, cy: y };
+  },
+  // The angle the world is turned by so that the car's heading points up the screen. Radians, as
+  // canvas wants, and null in the north-up view.
+  worldRotation(driverHeading) {
+    if (driverHeading == null) return 0;
+    return -driverHeading * Math.PI / 180;
   },
   // Keep the view inside the lot. Following a car that parks in a corner would otherwise put a
   // third of the screen on ground that is not a car park at all; a real navigator slides the map
@@ -263,9 +337,27 @@ const Nav = {
                : Math.min(Math.max(cam.cy, halfH), worldH - halfH);
     return { scale: cam.scale, cx, cy };
   },
-  toScreen(viewW, viewH, cam, wx, wy) {
-    return [viewW / 2 + (wx - cam.cx) * cam.scale,
-            viewH / 2 + (wy - cam.cy) * cam.scale];
+  // Canvas order: translate to the middle of the view, rotate, scale, then move the world under
+  // the focal point. The rotation is applied after the translation, so it is applied about the
+  // middle of the screen - which is where the car is drawn.
+  applyCamera(ctx, viewW, viewH, cam, rot) {
+    ctx.translate(viewW / 2, viewH / 2);
+    ctx.rotate(rot || 0);
+    ctx.scale(cam.scale, cam.scale);
+    ctx.translate(-cam.cx, -cam.cy);
+  },
+  toScreen(viewW, viewH, cam, rot, wx, wy) {
+    const r = rot || 0, cos = Math.cos(r), sin = Math.sin(r);
+    const dx = (wx - cam.cx) * cam.scale, dy = (wy - cam.cy) * cam.scale;
+    return [viewW / 2 + dx * cos - dy * sin, viewH / 2 + dx * sin + dy * cos];
+  },
+  // The exact inverse, so a click lands on the bay under the pointer in a turned map. It has to
+  // be the inverse or the two would drift apart, and clicking a bay would pick its neighbour.
+  screenToWorld(viewW, viewH, cam, rot, sx, sy) {
+    const r = rot || 0, cos = Math.cos(r), sin = Math.sin(r);
+    const dx = sx - viewW / 2, dy = sy - viewH / 2;
+    return [cam.cx + (dx * cos + dy * sin) / cam.scale,
+            cam.cy + (-dx * sin + dy * cos) / cam.scale];
   },
 };
 
@@ -288,7 +380,8 @@ let waitingNote = 0;
 // The smoothly animated car: we render every frame and lerp this display pose towards the last
 // reported pose, so the icon glides instead of jumping on each 250 ms poll.
 const car = { x: null, y: null, h: null, visible: false };
-let cam = { scale: 1, cx: 400, cy: 300 };
+let cam = { scale: 1, cx: 400, cy: 300, rot: 0 };
+let CHAINS = [];        // the roads as continuous lines, worked out once per map
 let targetCam = null;
 
 const cv = document.getElementById("map");
@@ -387,10 +480,10 @@ function showArrived(id) {
 function eventWorld(evt) {
   const r = cv.getBoundingClientRect();
   const sx = (evt.clientX - r.left), sy = (evt.clientY - r.top);
-  return {
-    x: cam.cx + (sx - viewW0 / 2) / cam.scale,
-    y: cam.cy + (sy - viewH0 / 2) / cam.scale,
-  };
+  // The map can be turned, so this has to be the exact inverse of what the renderer applied;
+  // otherwise clicking a bay picks whichever one happens to be 90 degrees away.
+  const [wx, wy] = Nav.screenToWorld(viewW0, viewH0, cam, cam.rot, sx, sy);
+  return { x: wx, y: wy };
 }
 
 cv.addEventListener("click", evt => {
@@ -499,11 +592,25 @@ function updateCamera() {
     const fit = Nav.fitCamera(viewW0, viewH0, worldW, worldH);
     targetCam = fit;
   }
+  // Turn the map so the car's own heading is up, which is what makes a route on a lane that is
+  // not vertical readable at a glance. Eased, and along the short way round: at 359 degrees it
+  // must go forward by two, not backwards by 358.
+  const heading = Nav.carHeading(v);
+  const wantRot = (useFollow && heading != null) ? Nav.worldRotation(heading) : 0;
+  cam.rot = lerpRad(cam.rot ?? 0, wantRot, 0.12);
+
   const t = 0.14;
   cam.scale = lerp(cam.scale, targetCam.scale, t);
   cam.cx = lerp(cam.cx, targetCam.cx, t);
   cam.cy = lerp(cam.cy, targetCam.cy, t);
   if (useFollow) cam = Nav.clampCamera(viewW0, viewH0, cam, worldW, worldH);
+}
+
+// Shortest-arc interpolation in radians, for the same reason lerpAngle exists in degrees.
+function lerpRad(a, b, t) {
+  const two = Math.PI * 2;
+  let d = ((b - a + Math.PI) % two + two) % two - Math.PI;
+  return a + d * t;
 }
 
 let _driveScale = null;
@@ -520,32 +627,29 @@ function drawWorld() {
   if (!MAP) return;
 
   ctx.save();
-  ctx.translate(viewW0 / 2, viewH0 / 2);
-  ctx.scale(cam.scale, cam.scale);
-  ctx.translate(-cam.cx, -cam.cy);
+  Nav.applyCamera(ctx, viewW0, viewH0, cam, cam.rot);
 
   // ground
   ctx.fillStyle = "#11151f";
   ctx.fillRect(0, 0, 800, 600);
 
-  // roads first (under the bays): stroke every graph edge as a lane band.
+  // Roads first, under the bays, as continuous lines rather than one stroke per stored edge: a
+  // road held as four segments should not look like four segments, and the centre dashes have to
+  // keep their rhythm across the whole run instead of restarting at every node.
   ctx.lineCap = "round"; ctx.lineJoin = "round";
-  for (const e of MAP.road_network?.edges ?? []) {
-    const a = NODES[e.from], b = NODES[e.to];
-    if (!a || !b) continue;
-    ctx.beginPath();
-    ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+  const path = chain => { ctx.beginPath();
+    chain.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); };
+  for (const chain of CHAINS) {
+    if (chain.length < 2) continue;
+    path(chain);
     ctx.strokeStyle = "#232a38"; ctx.lineWidth = 26; ctx.stroke();
     ctx.strokeStyle = "#2b3344"; ctx.lineWidth = 22; ctx.stroke();
   }
-  // centre dashes on the lanes
   ctx.setLineDash([10, 10]);
-  for (const e of MAP.road_network?.edges ?? []) {
-    const a = NODES[e.from], b = NODES[e.to];
-    if (!a || !b) continue;
-    ctx.beginPath();
-    ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
-    ctx.strokeStyle = "rgba(255,255,255,.18)"; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.strokeStyle = "rgba(255,255,255,.18)"; ctx.lineWidth = 1.5;
+  for (const chain of CHAINS) {
+    if (chain.length < 2) continue;
+    path(chain); ctx.stroke();
   }
   ctx.setLineDash([]);
 
@@ -611,11 +715,17 @@ function drawBay(s, state, isTarget) {
 }
 
 function label(x, y, text, color, size) {
+  // Bay numbers stay level while the map turns: a rotated label is unreadable, and a bay number
+  // nobody can read is worse than no bay number.
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(-(cam.rot || 0));
   ctx.font = `600 ${size || 12}px system-ui, sans-serif`;
   ctx.textAlign = "center"; ctx.textBaseline = "middle";
   ctx.lineWidth = 3; ctx.strokeStyle = "rgba(8,11,17,.8)";
-  ctx.strokeText(text, x, y);
-  ctx.fillStyle = color; ctx.fillText(text, x, y);
+  ctx.strokeText(text, 0, 0);
+  ctx.fillStyle = color; ctx.fillText(text, 0, 0);
+  ctx.restore();
 }
 
 // The nose sits on the local +x axis and the body runs back along -x. Rotating the context by
@@ -670,6 +780,7 @@ async function loadMap() {
   if (!doc) return false;
   MAP = doc;
   NODES = Nav.nodesIndex(doc);
+  CHAINS = Nav.roadChains(NODES, doc.road_network?.edges ?? []);
   return true;
 }
 
