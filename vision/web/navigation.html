@@ -501,6 +501,10 @@ let viewW0 = 0, viewH0 = 0;
 const DOCS = { map: "../out/parking_map.json", state: "../out/parking_state.json",
                route: "../out/route.json" };
 const POLL_MS = 250;
+// The navigation zoom, as a multiple of the driving zoom: [floor, ceiling]. Raise the floor to be
+// closer in; it is the one that bites, because a route rarely fits at full zoom.
+const NAV_ZOOM_FLOOR = 0.85;
+const NAV_ZOOM_CEIL = 1.6;
 const REPLAN_MOVE_PX = 4;
 const REPLAN_AFTER_MS = 1500;
 
@@ -795,9 +799,13 @@ function updateCamera() {
     // Zoomed in, not fitted: a route that does not fit is allowed to leave the screen, because a
     // navigator shows the road ahead rather than the whole trip. The band keeps it a driving view
     // (at least a bit past half the driving zoom) and lets the route fit when it is short enough.
+    // How much of the driving zoom to use. The floor is what decides in practice: a route is
+    // almost never short enough to fit at full zoom, so the picture sits at the floor and these
+    // two numbers are the knob for "how close in is the navigation view".
     const drive = driveScale();
     const scale = Nav.routeAroundScale(viewW0, viewH0, ax, ay, cam.rot, car, pts,
-                                       56, drive * 0.55, drive, viewH0 - sheetInset);
+                                       56, drive * NAV_ZOOM_FLOOR, drive * NAV_ZOOM_CEIL,
+                                       viewH0 - sheetInset);
     targetCam = { scale, cx: car.x, cy: car.y, anchorX: ax, anchorY: ay, inset: sheetInset };
   } else {
     // Nothing selected: the whole parking lot, centred in the part above the sheet.
