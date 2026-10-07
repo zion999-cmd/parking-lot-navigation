@@ -377,6 +377,26 @@ def test_the_route_is_replanned_when_the_car_moves() -> None:
     assert not wrong, "; ".join(f"{w}: got {g}, wanted {k}" for w, g, k in wrong)
 
 
+def test_line_widths_are_screen_space_not_world_space() -> None:
+    """The roads read wrong when they are world units: the camera zoom multiplies them.
+
+    A band of 18 world px at a driving zoom of 3.75 was 67 screen px wide and swallowed the bays
+    beside it. Every width that is a *styling* decision rather than geometry is undone by the
+    camera scale in the shipped code. This is a source guard - the behavioural version is
+    tests/check_navigation_views.py, which renders the page and measures the band.
+    """
+    html = open(PAGE, encoding="utf-8").read()
+    body = html[html.index("function drawRoads"):html.index("// The route is drawn last")]
+    assert "/ cam.scale" in body, "the aisle width is still a world width"
+    route = html[html.index("function drawRoute"):html.index("// Bays.")]
+    assert "/ cam.scale" in route, "the route width is still a world width"
+    # And the markers, text and car cannot be left behind: the same rule applies to anything not
+    # expressed by a polygon.
+    for name, needle in (("drawTarget", "10 / cam.scale"), ("drawCar", "1 / cam.scale"),
+                          ("label()", "fsPx =")):
+        assert needle in html, f"{name} is not screen-sized"
+
+
 def test_clamping_the_camera_does_not_drop_the_rotation() -> None:
     """The bug that pixel checking found and a source guard could not.
 

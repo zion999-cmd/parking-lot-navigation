@@ -66,11 +66,11 @@
 
   /* The chrome follows the map: a light map inside a dark frame looks like a mistake. The three
      styles set the same variables the panels already use, so nothing else has to know. */
-  :root[data-style="day"] { --bg: #f1efe9; --panel: rgba(255,255,255,.88);
+  :root[data-style="real"], :root[data-style="day"] { --bg: #f1efe9; --panel: rgba(255,255,255,.88);
     --line: rgba(0,0,0,.12); --muted: #5f6368; --accent: #1a73e8; --green: #137333;
     color-scheme: light; }
-  :root[data-style="day"] body { color: #202124; }
-  :root[data-style="day"] #cancelBtn { background: rgba(0,0,0,.08); color: #202124; }
+  :root[data-style="real"] body, :root[data-style="day"] body { color: #202124; }
+  :root[data-style="real"] #cancelBtn, :root[data-style="day"] #cancelBtn { background: rgba(0,0,0,.08); color: #202124; }
   :root[data-style="day"] #againBtn { color: #ffffff; }
   :root[data-style="indoor"] { --bg: #2b2e33; --panel: rgba(24,26,30,.88);
     --line: rgba(255,255,255,.12); --accent: #ffd60a; --green: #ffd60a; }
@@ -652,6 +652,38 @@ function driveScale() {
 // Every colour a drawing function needs is in here, including the label colours, so a style is
 // one object and nothing has to be changed in two places to try one.
 const STYLES = {
+  // Measured off ~/Desktop/nv.png (721x675), the style that was asked for: a white floor, the
+  // aisle as a wide grey surface (grey covers 23%, in large connected regions - not a thin road),
+  // the bays cyan when free (11.6%) and coral when taken (6.2%), and green POI markers (1.5%).
+  // Kept as exact samples rather than re-derived: these are measurements.
+  real: {
+    ground: "#ffffff",
+    lotEdge: "rgba(0,0,0,.10)",
+    roadCasing: "#e6e6e6",
+    roadFill: "#a7a7a7",
+    roadWidth: 20,
+    routeCasing: "#ffffff",
+    routeFill: "#2f7bf0",
+    routeWidth: 9,
+    faintEdge: "rgba(0,0,0,.10)",
+    bayEdge: "rgba(0,0,0,.22)",
+    freeEdge: "#1f9cb8",
+    freeFill: "rgba(58,197,226,.42)",
+    freeText: "#0b6c84",
+    takenEdge: "#c85a5d",
+    takenFill: "rgba(221,106,109,.38)",
+    takenText: "#a04347",
+    unknownText: "#777",
+    plate: "rgba(255,255,255,.92)",
+    text: "#2a2d33",
+    muted: "#5f6368",
+    target: "#2f7bf0",
+    targetDot: "#ffffff",
+    entrance: "#34a853",
+    entranceText: "#137333",
+    car: "#ef4444",
+    carRing: "#ffffff",
+  },
   night: {
     ground: "#10151d",
     lotEdge: "rgba(255,255,255,.07)",
@@ -737,7 +769,7 @@ const STYLES = {
     carRing: "#ffffff",
   },
 };
-const styleName = new URLSearchParams(location.search).get("style") || "night";
+const styleName = new URLSearchParams(location.search).get("style") || "real";
 const STYLE = STYLES[styleName] ?? STYLES.night;
 // The page chrome follows the map, or a light map would sit inside a dark frame.
 document.documentElement.dataset.style = styleName;
@@ -771,7 +803,7 @@ function drawGround() {
   ctx.fillRect(0, 0, w, h);
   // The edge of the lot, so the map does not bleed into nothing at the boundary.
   ctx.strokeStyle = STYLE.lotEdge;
-  ctx.lineWidth = 2;
+  ctx.lineWidth = 2 / cam.scale;
   ctx.strokeRect(1, 1, w - 2, h - 2);
 }
 
@@ -785,10 +817,13 @@ function drawRoads() {
   };
   for (const chain of CHAINS) {
     if (chain.length < 2) continue;
+    // Widths are screen px and undone by the camera scale, so an aisle is the same width when
+    // the view zooms in and never dwarfs the bays beside it. (Measured from the reference:
+    // the aisle runs ~1.5-2x a bay, not the 5x it reached in world units.)
     path(chain);
-    ctx.strokeStyle = STYLE.roadCasing; ctx.lineWidth = STYLE.roadWidth + 3; ctx.stroke();
+    ctx.strokeStyle = STYLE.roadCasing; ctx.lineWidth = (STYLE.roadWidth + 3) / cam.scale; ctx.stroke();
     path(chain);
-    ctx.strokeStyle = STYLE.roadFill; ctx.lineWidth = STYLE.roadWidth; ctx.stroke();
+    ctx.strokeStyle = STYLE.roadFill; ctx.lineWidth = STYLE.roadWidth / cam.scale; ctx.stroke();
   }
 }
 
@@ -803,8 +838,8 @@ function drawRoute() {
     ctx.beginPath();
     points.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
   };
-  path(); ctx.strokeStyle = STYLE.routeCasing; ctx.lineWidth = STYLE.routeWidth + 5; ctx.stroke();
-  path(); ctx.strokeStyle = STYLE.routeFill; ctx.lineWidth = STYLE.routeWidth; ctx.stroke();
+  path(); ctx.strokeStyle = STYLE.routeCasing; ctx.lineWidth = (STYLE.routeWidth + 5) / cam.scale; ctx.stroke();
+  path(); ctx.strokeStyle = STYLE.routeFill; ctx.lineWidth = STYLE.routeWidth / cam.scale; ctx.stroke();
 }
 
 // Bays. While driving they are texture - a hairline each - because the free ones are no longer the
@@ -819,22 +854,22 @@ function drawBayShape(s) {
     ctx.closePath();
   };
   if (isTarget) {
-    poly(); ctx.fillStyle = "rgba(63,169,255,.16)"; ctx.fill();
-    poly(); ctx.strokeStyle = STYLE.target; ctx.lineWidth = 3; ctx.stroke();
+    poly(); ctx.fillStyle = "rgba(47,123,240,.16)"; ctx.fill();
+    poly(); ctx.strokeStyle = STYLE.target; ctx.lineWidth = 3 / cam.scale; ctx.stroke();
     return;
   }
   if (drive()) {
-    poly(); ctx.strokeStyle = STYLE.faintEdge; ctx.lineWidth = 1; ctx.stroke();
+    poly(); ctx.strokeStyle = STYLE.faintEdge; ctx.lineWidth = 1.5 / cam.scale; ctx.stroke();
     return;
   }
   if (state === "EMPTY") {
     poly(); ctx.fillStyle = STYLE.freeFill; ctx.fill();
-    poly(); ctx.strokeStyle = STYLE.freeEdge; ctx.lineWidth = 2; ctx.stroke();
+    poly(); ctx.strokeStyle = STYLE.freeEdge; ctx.lineWidth = 2.2 / cam.scale; ctx.stroke();
   } else if (state === "OCCUPIED") {
     poly(); ctx.fillStyle = STYLE.takenFill; ctx.fill();
-    poly(); ctx.strokeStyle = STYLE.takenEdge; ctx.lineWidth = 1.25; ctx.stroke();
+    poly(); ctx.strokeStyle = STYLE.takenEdge; ctx.lineWidth = 1.6 / cam.scale; ctx.stroke();
   } else {
-    poly(); ctx.strokeStyle = STYLE.faintEdge; ctx.lineWidth = 1; ctx.stroke();
+    poly(); ctx.strokeStyle = STYLE.faintEdge; ctx.lineWidth = 1.5 / cam.scale; ctx.stroke();
   }
 }
 
@@ -860,7 +895,7 @@ function drawTarget() {
   const s = (MAP.spots ?? []).find(sp => String(sp.id) === targetId);
   if (!s) return;
   const [x, y] = Nav.centroid(s.polygon);
-  const r = 9;
+  const r = 10 / cam.scale;            // screen px, undone by the zoom like every other marker
   ctx.save();
   ctx.translate(x, y);
   ctx.shadowColor = "rgba(0,0,0,.5)"; ctx.shadowBlur = 6; ctx.shadowOffsetY = 2;
@@ -873,7 +908,7 @@ function drawTarget() {
   ctx.fillStyle = STYLE.target; ctx.fill();
   ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
   ctx.strokeStyle = STYLE.carRing; ctx.lineWidth = 2; ctx.stroke();
-  ctx.beginPath(); ctx.arc(0, 0, 3.4, 0, Math.PI * 2);
+  ctx.beginPath(); ctx.arc(0, 0, 3.6 / cam.scale, 0, Math.PI * 2);
   ctx.fillStyle = STYLE.targetDot; ctx.fill();
   ctx.restore();
   label(x, y - r * 3.4, String(targetId), STYLE.text, 13);
@@ -883,10 +918,10 @@ function drawEntrances() {
   for (const g of MAP.entrances ?? []) {
     const n = NODES[g.node];
     if (!n) continue;
-    ctx.beginPath(); ctx.arc(n.x, n.y, 7, 0, Math.PI * 2);
+    ctx.beginPath(); ctx.arc(n.x, n.y, 7 / cam.scale, 0, Math.PI * 2);
     ctx.fillStyle = STYLE.entrance; ctx.fill();
-    ctx.strokeStyle = STYLE.plate; ctx.lineWidth = 2; ctx.stroke();
-    label(n.x, n.y - 18, "入口", STYLE.entranceText, 12);
+    ctx.strokeStyle = STYLE.plate; ctx.lineWidth = 2 / cam.scale; ctx.stroke();
+    label(n.x, n.y - 18 / cam.scale, "入口", STYLE.entranceText, 12);
   }
 }
 
@@ -897,11 +932,12 @@ function label(x, y, text, color, size) {
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(-(cam.rot || 0));
-  ctx.font = `600 ${size || 12}px system-ui, sans-serif`;
+  const fsPx = (size || 12) / cam.scale;
+  ctx.font = `600 ${fsPx}px system-ui, sans-serif`;
   ctx.textAlign = "center"; ctx.textBaseline = "middle";
-  const w = ctx.measureText(text).width + 12, h = (size || 12) + 8;
+  const w = ctx.measureText(text).width + 12 / cam.scale, h = fsPx + 8 / cam.scale;
   ctx.beginPath();
-  if (ctx.roundRect) ctx.roundRect(-w / 2, -h / 2, w, h, 5);
+  if (ctx.roundRect) ctx.roundRect(-w / 2, -h / 2, w, h, 5 / cam.scale);
   else ctx.rect(-w / 2, -h / 2, w, h);
   ctx.fillStyle = STYLE.plate; ctx.fill();
   ctx.fillStyle = color; ctx.fillText(text, 0, 0);
@@ -915,7 +951,11 @@ function drawCar(x, y, heading) {
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(heading * Math.PI / 180);
-  ctx.shadowColor = "rgba(0,0,0,.55)"; ctx.shadowBlur = 8; ctx.shadowOffsetY = 2;
+  // The whole marker is screen px, not the 15 world units it was drawn in - at driving zoom that
+  // came out at 56 px. Scaling the shape by the inverse zoom keeps the arrow the same size and
+  // every width inside it (ring, windscreen) reads on screen as written.
+  ctx.scale(1 / cam.scale, 1 / cam.scale);
+  ctx.shadowColor = "rgba(0,0,0,.35)"; ctx.shadowBlur = 6; ctx.shadowOffsetY = 2;
 
   ctx.beginPath();                            // chevron, nose up the local -y axis
   ctx.moveTo(0, -15);
@@ -928,7 +968,7 @@ function drawCar(x, y, heading) {
   ctx.closePath();
   ctx.fillStyle = STYLE.car; ctx.fill();
   ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
-  ctx.strokeStyle = STYLE.carRing; ctx.lineWidth = 2.4; ctx.stroke();
+  ctx.strokeStyle = STYLE.carRing; ctx.lineWidth = 2.6; ctx.stroke();
   // a windscreen line near the nose, so the front reads even in silhouette
   ctx.beginPath(); ctx.moveTo(-4, -5); ctx.lineTo(0, -9); ctx.lineTo(4, -5);
   ctx.strokeStyle = "rgba(255,255,255,.9)"; ctx.lineWidth = 1.6; ctx.stroke();
