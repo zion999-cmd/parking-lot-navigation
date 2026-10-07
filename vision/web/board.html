@@ -155,6 +155,19 @@ function routePolyline(stateDoc, routeDoc, nodes) {
     return { points: [[v.x, v.y], ...points], carLeg: true, unknown };
   return { points, carLeg: false, unknown };
 }
+// A rename in the editor changes a bay's id in the state before the map has been re-emitted, so
+// a bay can exist in one document and not the other. When it is the map that is behind, the page
+// is describing bays that no longer exist - reload it rather than wait for the slow refresh.
+function mapLooksStale(stateDoc, mapDoc) {
+  if (!stateDoc || !mapDoc) return false;
+  const known = new Set((mapDoc.spots ?? []).map(s => String(s.id)));
+  return Object.keys(stateDoc.spots ?? {}).some(id => !known.has(String(id)));
+}
+
+function stateSignature(doc) {
+  return doc ? Object.keys(doc.spots ?? {}).sort().join(",") : "";
+}
+
 function shouldReplan(stateDoc, last, picked, now) {
   if (picked == null) return false;
   if (!last) return true;
@@ -339,7 +352,10 @@ async function poll() {
       LAST = heroAsLast();
     }
     if (shouldReplan(STATE, LAST, PICKED, Date.now())) await planSpot(PICKED, true);
-    if (ROUTE && (ROUTE.nodes ?? []).some(id => !NODES[id])) {
+    if (mapLooksStale(STATE, MAP)) {
+      const staleSig = stateSignature(STATE);
+      if (staleSig !== mapStaleFor) { mapStaleFor = staleSig; await loadMap(); }
+    } else if (ROUTE && (ROUTE.nodes ?? []).some(id => !NODES[id])) {
       const sig = routeSignature(ROUTE);
       if (sig !== mapTriedFor) { mapTriedFor = sig; await loadMap(); }
     } else if (++polls % MAP_EVERY_POLLS === 0) {

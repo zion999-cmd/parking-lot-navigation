@@ -71,7 +71,8 @@ const ctx = cv.getContext("2d");
 let MAP = null, STATE = null, ROUTE = null, PICKED = null, HOVER = null;
 let NODES = {};             // the map's nodes by id, rebuilt whenever the map is reloaded
 let planSeq = 0;            // so a slow answer for an old target cannot overwrite a newer one
-let mapTriedFor = "";      // the broken route we already reloaded the map for, so it happens once
+let mapTriedFor = "";
+let mapStaleFor = "";      // the broken route we already reloaded the map for, so it happens once
 let LAST = null;            // where the hero was when the page last planned
 let busy = false;           // one request at a time, so a slow reply cannot pile up
 let polls = 0;
@@ -102,6 +103,19 @@ function routePolyline(stateDoc, routeDoc, nodes) {
   if (v && v.visible !== false && typeof v.x === "number" && typeof v.y === "number")
     return { points: [[v.x, v.y], ...points], carLeg: true, unknown: unknown };
   return { points: points, carLeg: false, unknown: unknown };
+}
+
+// A rename in the editor changes a bay's id in the state before the map has been re-emitted, so
+// a bay can exist in one document and not the other. When it is the map that is behind, the page
+// is describing bays that no longer exist - reload it rather than wait for the slow refresh.
+function mapLooksStale(stateDoc, mapDoc) {
+  if (!stateDoc || !mapDoc) return false;
+  const known = new Set((mapDoc.spots ?? []).map(s => String(s.id)));
+  return Object.keys(stateDoc.spots ?? {}).some(id => !known.has(String(id)));
+}
+
+function stateSignature(doc) {
+  return doc ? Object.keys(doc.spots ?? {}).sort().join(",") : "";
 }
 
 function shouldReplan(stateDoc, last, picked, now) {
@@ -384,7 +398,10 @@ async function poll() {
     if (shouldReplan(STATE, LAST, PICKED, Date.now())) {
       await planSpot(PICKED, true);                 // silent: the line should not flash at 2 Hz
     }
-    if (ROUTE && (ROUTE.nodes ?? []).some(id => !NODES[id])) {
+    if (mapLooksStale(STATE, MAP)) {
+      const staleSig = stateSignature(STATE);
+      if (staleSig !== mapStaleFor) { mapStaleFor = staleSig; await loadMap(); }
+    } else if (ROUTE && (ROUTE.nodes ?? []).some(id => !NODES[id])) {
       // The map moved under us. Reload it once per distinct route: if the route file is the stale
       // thing rather than the map, retrying every poll would fetch 42 KB twice a second forever.
       const sig = routeSignature(ROUTE);

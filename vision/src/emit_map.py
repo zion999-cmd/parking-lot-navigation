@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -28,6 +29,47 @@ from road_network import RoadNetwork                            # noqa: E402
 from spot_config import SpotConfigError, load_spots              # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+
+def emit(config: str, out: Optional[str] = None, strict: bool = False,
+         quiet: bool = False) -> int:
+    """Emit the contract from an editable map. Returns 0, or 1 for a strict failure.
+
+    Separated from main() so the editor can keep the two documents in step: a rename changes a
+    bay's id in the config, and the page reads the ids in the emitted map, so a config saved
+    without an emit leaves the page describing a bay that no longer exists.
+    """
+    out = out or os.path.join(ROOT, "out", "parking_map.json")
+    shape = _shape_of(config)
+    if shape is None:
+        print(f"error: {config} does not say what size frame it was drawn on", file=sys.stderr)
+        return 2
+    try:
+        spots = load_spots(config, shape)
+    except SpotConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    roads = RoadNetwork.load(config, shape)
+    document = contract.build_map(spots, roads.derive(spots), shape)
+    contract.write_json(out, document)
+
+    if not quiet:
+        print(f"map      {config}")
+        print(f"         {contract.summarize_map(document)}")
+        print(f"emitted  {out}")
+
+    missing = [s["id"] for s in document["spots"] if not s.get("access")]
+    if missing:
+        shown = ", ".join(missing[:8])
+        more = f" (+{len(missing) - 8} more)" if len(missing) > 8 else ""
+        print(f"warning: {len(missing)} bay(s) have no road access: {shown}{more}",
+              file=sys.stderr)
+        print("         draw a road in front of them, or check with 'p' in the editor",
+              file=sys.stderr)
+        if strict:
+            return 1
+    return 0
 
 
 def main() -> int:
@@ -40,38 +82,7 @@ def main() -> int:
                     help="fail if any bay has no road access (useful in a check)")
     args = ap.parse_args()
 
-    shape = _shape_of(args.config)
-    if shape is None:
-        print(f"error: {args.config} does not say what size frame it was drawn on",
-              file=sys.stderr)
-        return 2
-
-    try:
-        spots = load_spots(args.config, shape)
-    except SpotConfigError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-
-    roads = RoadNetwork.load(args.config, shape)
-    graph = roads.derive(spots)
-    document = contract.build_map(spots, graph, shape)
-    contract.write_json(args.out, document)
-
-    print(f"map      {args.config}")
-    print(f"         {contract.summarize_map(document)}")
-    print(f"emitted  {args.out}")
-
-    missing = [s["id"] for s in document["spots"] if not s.get("access")]
-    if missing:
-        shown = ", ".join(missing[:8])
-        more = f" (+{len(missing) - 8} more)" if len(missing) > 8 else ""
-        print(f"warning: {len(missing)} bay(s) have no road access: {shown}{more}",
-              file=sys.stderr)
-        print("         draw a road in front of them, or check with 'p' in the editor",
-              file=sys.stderr)
-        if args.strict:
-            return 1
-    return 0
+    return emit(args.config, args.out, strict=args.strict)
 
 
 def _shape_of(path: str):

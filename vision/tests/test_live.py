@@ -169,7 +169,8 @@ def extract_function(html: str, name: str) -> str:
     raise AssertionError("unbalanced braces")
 
 
-def node_eval(names: list, call: str, payload: list, constants: bool = True) -> list:
+def node_eval(names: list, call: str, payload: list, constants: bool = True,
+              page: str = None) -> list:
     """Run the shipped page's own functions in node, over the given cases.
 
     Copies nothing: the function text is pulled out of web/index.html, so a page that changes
@@ -177,7 +178,7 @@ def node_eval(names: list, call: str, payload: list, constants: bool = True) -> 
     """
     if not shutil.which("node"):
         raise unittest.SkipTest("node not installed")
-    html = open(PAGE, encoding="utf-8").read()
+    html = open(page or PAGE, encoding="utf-8").read()
     parts = []
     if constants:
         consts = "\n".join(re.findall(
@@ -295,6 +296,26 @@ def test_the_page_follows_the_route_document_however_it_was_written() -> None:
                     "adoptsRoute(c.shown, c.file)", payload, constants=False)
     wrong = [(why, g, want) for (_, _, want, why), g in zip(cases, got) if g is not want]
     assert not wrong, "; ".join(f"{why}: got {g}, wanted {w}" for why, g, w in wrong)
+
+
+def test_a_bay_the_state_knows_and_the_map_does_not_makes_the_page_reload() -> None:
+    """The other half of "the page did not refresh": renaming a bay changes its id in the state
+    before the emitted map has been rewritten, so for a moment the two documents name different
+    bays. Both pages must notice and reload, rather than wait for the slow refresh."""
+    cases = [
+        ({"spots": {"10": {}, "11": {}}}, {"spots": [{"id": "10"}, {"id": "11"}]}, False),
+        ({"spots": {"10": {}, "ZZ9": {}}}, {"spots": [{"id": "10"}, {"id": "11"}]}, True),
+        ({"spots": {"10": {}}}, {"spots": [{"id": "10"}, {"id": "11"}]}, False),  # map ahead: fine
+        (None, {"spots": [{"id": "10"}]}, False),
+        ({"spots": {"10": {}}}, None, False),
+    ]
+    payload = [{"state": st, "map": mp} for st, mp, _ in cases]
+    for page in (PAGE, os.path.join(os.path.dirname(PAGE), "board.html")):
+        got = node_eval(["mapLooksStale"], "mapLooksStale(c.state, c.map)", payload,
+                        constants=False, page=page)
+        wrong = [(os.path.basename(page), st, g, want)
+                 for (st, _, want), g in zip(cases, got) if g is not want]
+        assert not wrong, wrong
 
 
 def test_the_map_is_not_reloaded_in_a_loop_when_the_route_is_the_stale_half() -> None:
