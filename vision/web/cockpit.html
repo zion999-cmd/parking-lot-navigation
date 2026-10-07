@@ -1,0 +1,404 @@
+<!doctype html>
+<meta charset="utf-">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>车载停车导航</title>
+<!--
+  In-car parking navigation (redesign). Pure consumer of parking_map.json / parking_state.json /
+  route endpoint; no perception, no planning, no debug nodes/edges shown. Heading-up, car is the
+  visual centre; route is the high-contrast hero; bays recede; one docked navigation sheet.
+-->
+<style>
+  :root { color-scheme: light;
+    --ground:#e9edf1; --sheet:#ffffff; --sheet-line:#e7eaef;
+    --ink:#0f141a; --sub:#5b6572; --route:#1f7aff; --target:#ff3b30; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body{ height:100%; }
+  body{ margin:0; overflow:hidden; background:var(--ground); color:var(--ink);
+        font:16px/1.4 system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; }
+  #map{ position:fixed; inset:0; width:100%; height:100%; display:block; }
+
+  .topbar{ position:fixed; top:14px; left:0; right:0; display:flex; justify-content:center;
+           z-index:2; pointer-events:none; }
+  .chip{ background:rgba(255,255,255,.85); border:1px solid rgba(0,0,0,.06); border-radius:999px;
+         padding:7px 16px; font-size:13.5px; color:var(--sub); backdrop-filter:blur(8px);
+         box-shadow:0 2px 12px rgba(20,30,50,.10); }
+  .chip b{ color:var(--ink); font-weight:600; }
+
+  .sheet{ position:fixed; left:0; right:0; bottom:0; z-index:3; background:var(--sheet);
+          border-top:1px solid var(--sheet-line); border-radius:22px 22px 0 0;
+          padding:8px 20px calc(18px + env(safe-area-inset-bottom));
+          box-shadow:0 -12px 40px rgba(20,30,50,.16); }
+  .grab{ width:42px; height:4px; border-radius:2px; background:#e4e8ed; margin:4px auto 12px; }
+  .head{ display:flex; align-items:center; justify-content:space-between; }
+  .dest{ display:flex; align-items:center; gap:10px; font-size:16px; font-weight:600; }
+  .pin{ width:20px; height:20px; border-radius:50% 50% 50% 0; transform:rotate(-45deg);
+        background:var(--target); position:relative; flex:0 0 auto; }
+  .pin::after{ content:""; position:absolute; inset:0; margin:auto; width:8px; height:8px;
+               border-radius:50%; background:#fff; }
+  .end{ background:transparent; border:0; color:var(--sub); font-size:14px; font-weight:600;
+        padding:6px 2px; cursor:pointer; }
+
+  .maneuver{ display:flex; align-items:center; gap:14px; margin:10px 0 2px; }
+  .ar{ width:52px; height:52px; flex:0 0 auto; border-radius:14px;
+       background:color-mix(in srgb, var(--route) 13%, #fff);
+       display:flex; align-items:center; justify-content:center; }
+  .ar svg{ width:30px; height:30px; }
+  .what{ font-size:21px; font-weight:700; }
+  .where{ font-size:13.5px; color:var(--sub); margin-top:1px; }
+
+  .stats{ display:flex; gap:26px; margin-top:12px; padding-top:12px; border-top:1px solid var(--sheet-line); }
+  .k{ font-size:12px; color:var(--sub); }
+  .v{ font-size:23px; font-weight:700; margin-top:1px; }
+  .v small{ font-size:12.5px; font-weight:600; color:var(--sub); margin-left:2px; }
+
+  /* choose-a-spot sheet */
+  .picklist{ max-height:38vh; overflow:auto; display:flex; flex-direction:column; gap:6px; margin:2px 0 6px; }
+  .spotrow{ display:flex; align-items:center; gap:12px; width:110%; text-align:left; background:#f6f8fa;
+            border:1px solid #e8ebef; border-radius:12px; padding:10px 14px; cursor:pointer; font:inherit; color:var(--ink); }
+  .spotrow:hover{ background:#eef4ff; border-color:#c7dcff; }
+  .spotrow .num{ width:34px; height:34px; border-radius:10px; background:#fff; border:1px solid #e2e6eb;
+                 display:flex; align-items:center; justify-content:center; font-weight:700; color:var(--route); flex:0 0 auto; }
+  .spotrow .meta{ flex:1; }
+  .spotrow .st{ font-size:13px; color:var(--sub); }
+  .spotrow .go{ color:var(--route); font-weight:700; font-size:14px; }
+  .hidden{ display:none !important; }
+</style>
+
+<canvas id="map"></canvas>
+
+<div class="topbar"><div class="chip" id="chip">正在连接…</div></div>
+
+<!-- navigating sheet -->
+<div class="sheet" id="navSheet">
+  <div class="grab"></div>
+  <div class="head">
+    <div class="dest"><span class="pin"></span>前往 <span id="destId">–</span> 号车位</div>
+    <button class="end" id="endBtn">结束导航</button>
+  </div>
+  <div class="maneuver">
+    <div class="ar" id="arBox"></div>
+    <div>
+      <div class="what" id="what">沿路线行驶</div>
+      <div class="where" id="where">–</div>
+    </div>
+  </div>
+  <div class="stats">
+    <div><div class="k">剩余距离</div><div class="v" id="dist">–</div></div>
+    <div><div class="k">预计到达</div><div class="v" id="eta">–</div></div>
+    <div><div class="k">当前状态</div><div class="v" id="modeTxt" style="font-size:17px;line-height:1.7">导航中</div></div>
+  </div>
+</div>
+
+<!-- choosing sheet -->
+<div class="sheet hidden" id="pickSheet">
+  <div class="grab"></div>
+  <div class="head" style="margin-bottom:8px">
+    <div class="dest" style="font-size:17px">选择一个空车位</div>
+  </div>
+  <div class="picklist" id="pickList"></div>
+</div>
+
+<script>
+"use strict";
+const MAP_URL = "../out/parking_map.json";
+const STATE_URL = "../out/parking_state.json";
+
+let MAP=null, STATE=null, ROUTE=null, NODES={};
+let targetId=null;
+const drive = () => targetId != null;
+
+// ------------------------------------------------------------- geometry (pure)
+const Nav = {
+  centroid(poly){ let x=0,y=0; for(const [px,py] of poly){x+=px;y+=py;} return [x/poly.length,y/poly.length]; },
+  nodesIndex(mapDoc){ const o={}; for(const n of mapDoc?.road_network?.nodes??[]) o[n.id]=n; return o; },
+};
+
+// road chains: order edges into polylines (open runs) + closed loops
+function buildChains(nodes, edges){
+  const adj={};
+  for(const e of edges){
+    if(!nodes[e.a]||!nodes[e.b]) continue;
+    (adj[e.a]??(adj[e.a]=[])).push(e.b);
+    (adj[e.b]??(adj[e.b]=[])).push(e.a);
+  }
+  const degree=id=>(adj[id]||[]).length;
+  const used=new Set(), key=(a,b)=>a<b?a+"|b":b+"|"+a;
+  const chains=[];
+  const walk=(start,next)=>{
+    const ids=[start,next]; used.add(key(start,next));
+    let prev=start,cur=next;
+    for(;;){
+      const options=(adj[cur]||[]).filter(id=>id!==prev&&!used.has(key(cur,id)));
+      if(!options.length) break;
+      let onward;
+      if(degree(cur)===2) onward=options[0];
+      else onward=options[0];      // rectangular ring: any continuation is along the same edge
+      used.add(key(cur,onward)); ids.push(onward); prev=cur; cur=onward;
+    }
+    chains.push(ids.map(id=>[nodes[id].x,nodes[id].y]));
+  };
+  for(const id of Object.keys(adj)){
+    if(degree(id)===2) continue;
+    for(const o of adj[id]) if(!used.has(key(id,o))) walk(id,o);
+  }
+  for(const id of Object.keys(adj))
+    for(const o of adj[id]) if(!used.has(key(id,o))) walk(id,o);
+  return chains;
+}
+
+// 2-core leaf pruning -> closed loops (same logic proven in tests)
+function buildLoops(nodes, edges){
+  const adj={};
+  for(const e of edges){
+    if(!nodes[e.a]||!nodes[e.b]) continue;
+    (adj[e.a]??(adj[e.a]=[])).push(e.b);
+    (adj[e.b]??(adj[e.b]=[])).push(e.a);
+  }
+  const deg=Object.fromEntries(Object.keys(adj).map(k=>[k,adj[k].length]));
+  const removed=new Set(); const leaf=Object.keys(deg).filter(k=>deg[k]===1);
+  while(leaf.length){
+    const cur=leaf.pop();
+    if(removed.has(cur)||deg[cur]!==1) continue;
+    removed.add(cur);
+    for(const nb of adj[cur]){
+      if(removed.has(nb)) continue;
+      deg[nb]-=1; if(deg[nb]===1) leaf.push(nb);
+    }
+  }
+  const on=id=>!removed.has(id)&&deg[id]>=2;
+  const cAdj={}; for(const id of Object.keys(adj)) if(on(id)) cAdj[id]=adj[id].filter(on);
+  const loops=[]; const used=new Set(); const ek=(a,b)=>a<b?a+"|"+b:b+"|"+a;
+  for(const start of Object.keys(cAdj)){
+    if(cAdj[start].every(nb=>used.has(ek(start,nb)))) continue;
+    const ring=[start]; let prev=null,cur=start;
+    for(;;){
+      let nxt=null;
+      for(const nb of cAdj[cur]) if(nb!==prev&&!used.has(ek(cur,nb))){nxt=nb;break;}
+      if(nxt==null||nxt===start){ if(nxt===start){used.add(ek(cur,start));ring.push(start);} break; }
+      used.add(ek(cur,nxt)); ring.push(nxt); prev=cur; cur=nxt;
+    }
+    if(ring.length>=4) loops.push(ring);
+  }
+  return loops;
+}
+
+// ------------------------------------------------------------- canvas
+const cv=document.getElementById("map"), ctx=cv.getContext("2d");
+let viewW=0, viewH=0, zoom=1, CHAINS=[], LOOPS=[];
+function resize(){
+  const dpr=Math.min(devicePixelRatio||1,2);
+  viewW=innerWidth; viewH=innerHeight;
+  cv.width=Math.round(viewW*dpr); cv.height=Math.round(viewH*dpr);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  zoom=Math.min(viewW,viewH)/170;
+}
+addEventListener("resize",()=>{resize();draw();});
+
+const v=()=>STATE?.vehicle??null;
+
+function draw(){
+  const car=v();
+  ctx.fillStyle=getCss("--ground"); ctx.fillRect(0,0,viewW,viewH);
+  const h = car?.heading ?? 0;
+  ctx.save();
+  ctx.translate(viewW/2,viewH/2);
+  ctx.rotate(-Math.PI/2 - h);
+  ctx.scale(zoom,zoom);
+  if(car) ctx.translate(-car.x,-car.y);
+
+  // 1) road surface: white aisle, soft edge
+  ctx.lineJoin="round"; ctx.lineCap="round";
+  for(const cyc of LOOPS){
+    const pts=cyc.map(id=>[NODES[id].x,NODES[id].y]);
+    trace(pts,true); ctx.strokeStyle="#dde3e9"; ctx.lineWidth=62; ctx.stroke();
+    trace(pts,true); ctx.strokeStyle="#ffffff"; ctx.lineWidth=60; ctx.stroke();
+  }
+  // open runs (entrance stub)
+  for(const ch of CHAINS){
+    if(ch.length<2) continue;
+    trace(ch,false); ctx.strokeStyle="#dde3e9"; ctx.lineWidth=62; ctx.stroke();
+    trace(ch,false); ctx.strokeStyle="#ffffff"; ctx.lineWidth=60; ctx.stroke();
+  }
+
+  // 2) bays: paper, faint state tint, hairline; numbers are not drawn on the map
+  for(const s of MAP.spots){
+    const st=STATE?.spots?.[String(s.id)]?.state??"UNKNOWN";
+    ctx.beginPath();
+    s.polygon.forEach((p,i)=>i?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1]));
+    ctx.closePath();
+    ctx.fillStyle = st==="EMPTY"?"#e7ece6": st==="OCCUPIED"?"#e6e9ef":"#e8ebef";
+    ctx.fill();
+    ctx.strokeStyle= st==="EMPTY"?"#d2ddd5":"#d9dee5";
+    ctx.lineWidth=1.3; ctx.stroke();
+  }
+
+  // 3) route: white casing + blue hero line
+  if(ROUTE?.ok){
+    const pts=routePoints(ROUTE);
+    if(pts.length>=2){
+      trace(pts,false); ctx.strokeStyle="rgba(255,255,255,.92)"; ctx.lineWidth=11; ctx.stroke();
+      trace(pts,false); ctx.strokeStyle=getCss("--route");        ctx.lineWidth=7;  ctx.stroke();
+      // target pin at route end
+      pin(pts[pts.length-1][0], pts[pts.length-1]);
+    }
+  }
+
+  // 4) the vehicle: red top-down car silhouette
+  if(car?.visible) drawVehicle(car.x,car.y,car.heading);
+
+  ctx.restore();
+}
+
+function trace(pts,closed){
+  ctx.beginPath();
+  pts.forEach((p,i)=>i?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1]));
+  if(closed) ctx.closePath();
+}
+
+function routePoints(route){
+  return (route.nodes??[]).map(id=>{ const n=NOD[id]; return [n.x,n.y]; });
+}
+
+function pin(x,y){
+  ctx.save(); ctx.translate(x,y);
+  const r=12;
+  ctx.beginPath();
+  ctx.moveTo(0,r*1.5);
+  ctx.quadraticCurveTo(-r,r*0.4,-r,0);
+  ctx.arc(0,0,r,0,Math.PI*2);
+  ctx.quadraticCurveTo(r,r*0.4,0,r*1.5);
+  ctx.closePath();
+  ctx.fillStyle=getCss("--target");
+  ctx.shadowColor="rgba(0,0,0,.35)"; ctx.shadowBlur=8; ctx.shadowOffsetY=3;
+  ctx.fill(); ctx.shadowColor="transparent";
+  ctx.beginPath(); ctx.arc(0,0,4.2,0,Math.PI*2); ctx.fillStyle="#fff"; ctx.fill();
+  ctx.restore();
+}
+
+function drawVehicle(x,y,heading){
+  ctx.save(); ctx.translate(x,y);
+  ctx.scale(1/zoom,1/zoom);
+  ctx.rotate(heading);
+  ctx.shadowColor="rgba(0,0,0,.35)"; ctx.shadowBlur=9; ctx.shadowOffsetY=2;
+  const bw=16,bl=30,r=6;
+  roundRectPath(-bw/2,-bl/2,bw,bl,r);
+  const g=ctx.createLinearGradient(0,-bl/2,0,bl/2);
+  g.addColorStop(0,"#ff6a5e"); g.addColorStop(1,"#e0392f");
+  ctx.fillStyle=g; ctx.fill(); ctx.shadowColor="transparent";
+  ctx.fillStyle="rgba(255,255,255,.85)";
+  roundRectPath(-bw/2+3,-bl/2+7,bw-6,5,2); ctx.fill();
+  roundRectPath(-bw/2+3,bl/2-9,bw-6,4,2); ctx.fill();
+  ctx.restore();
+}
+function roundRectPath(x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);
+  ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);
+  ctx.arcTo(x,y,x+w,y,r);
+  ctx.closePath();
+}
+function getCss(n){ return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+
+// ------------------------------------------------------------- data + loop
+async function getJSON(url){
+  const r=await fetch(url+"?t="+Date.now());
+  if(!r.ok) return null;
+  return await r.json();
+}
+
+async function refreshRoute(){
+  if(targetId==null){ ROUTE=null; return; }
+  ROUTE=await getJSON(`/api/route?spot=${encodeURIComponent(targetId)}`);
+  // fallback: static route file
+  if(!ROUTE?.ok) ROUTE=await getJSON("../out/route.json");
+}
+
+function buildPickList(){
+  const list=document.getElementById("pickList");
+  list.innerHTML="";
+  for(const s of MAP.spots){
+    const st=STATE?.spots?.[String(s.id)]?.state??"UNKNOWN";
+    if(st!=="EMPTY") continue;
+    const row=document.createElement("button");
+    row.className="spotrow";
+    row.innerHTML=`<span class="num">${s.id}</span>
+      <span class="meta"><div>车位 ${s.id}</div><div class="st">空闲 · 可导航</div></span>
+      <span class="go">导航 →</span>`;
+    row.onclick=()=>{ targetId=String(s.id); showSheets(); refreshRoute(); };
+    list.appendChild(row);
+  }
+  if(!list.children.length) list.innerHTML=`<div style="color:var(--sub);padding:10px">暂无空闲车位</div>`;
+}
+
+function showSheets(){
+  const nav=document.getElementById("navSheet");
+  const pick=document.getElementById("pickSheet");
+  if(targetId==null){ nav.classList.add("hidden"); pick.classList.remove("hidden"); }
+  else { pick.classList.add("hidden"); nav.classList.remove("hidden"); }
+  updateHUD();
+}
+
+function updateHUD(){
+  if(targetId==null){
+    document.getElementById("chip").textContent="选择一个空车位开始导航";
+    return;
+  }
+  document.getElementById("destId").textContent=targetId;
+  const car=v();
+  let dist="–", eta="–", what="沿路线行驶", where="";
+  if(ROUTE?.ok){
+    const pts=routePoints(ROUTE);
+    // distance remaining = route total minus progress to nearest route point
+    let total=0; for(let i=1;i<pts.length;i++) total+=Math.hypot(pts[i][0]-pts[i-1][0],pts[i][1]-pts[i-1][1]);
+    let remain=total;
+    if(car){
+      let best=0,bd=Infinity;
+      for(let i=0;i<pts.length;i++){
+        const d=Math.hypot(pts[i][0]-car.x,pts[i][1]-car.y);
+        if(d<bd){bd=d;best=i;}
+      }
+      let rest=0; for(let i=best+1;i<pts.length;i++) rest+=Math.hypot(pts[i][0]-pts[i-1][0],pts[i][1]-pts[i-1][1]);
+      remain=rest;
+    }
+    dist=Math.round(remain/20)+" m";
+    eta=Math.max(1,Math.round(remain/20/1.0/60))+"";
+  }
+  document.getElementById("dist").innerHTML=dist.replace(" m","<small>m</small>");
+  document.getElementById("eta").innerHTML=eta+"<small>分钟</small>";
+  document.getElementById("what").textContent=what;
+
+  document.getElementById("where").textContent=ROUTE?.ok?"跟随蓝色路线":"";
+  document.getElementById("chip").innerHTML=`导航中 · 目标 <b>${targetId} 号</b>`;
+  // maneuver icon: straight
+  document.getElementById("arBox").innerHTML=arrowSVG("straight");
+}
+function arrowSVG(k){
+  const straight=`<svg viewBox="0 0 24 24" fill="none" stroke="#1f7aff" stroke-width="2.6"
+    stroke-linecap="round" stroke-linejoin="round">
+    <line x1="12" y1="20" x2="12" y2="5"/>
+    <line x1="5" y1="12" x2="12" y2="5"/>
+    <line x1="19" y1="12" x2="12" y2="5"/></svg>`;
+  return straight;
+}
+document.getElementById("endBtn").onclick=()=>{ targetId=null; ROUTE=null; showSheets(); };
+
+async function loop(){
+  MAP=await getJSON(MAP_URL);
+  STATE=await getJSON(STATE_URL);
+  if(MAP){
+    NODES=Nav.nodesIndex(MAP);
+    const edges=MAP.road_network?.edges??[];
+    CHAINS=buildChains(NODES,edges);
+    LOOPS=buildLoops(NODES,edges);
+    buildPickList();
+  }
+  await refreshRoute();
+  showSheets();
+  draw();
+  setTimeout(loop, 500);
+}
+resize();
+loop();
+</script>

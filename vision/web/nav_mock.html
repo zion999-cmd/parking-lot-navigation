@@ -1,0 +1,252 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>车载导航 · 静态视觉稿</title>
+<!--
+  STATIC VISUAL MOCK only — no network, sample world drawn in code. Purpose: agree the visual
+  language of the in-car navigation page before wiring it to parking_map/state/route.
+  Layout: full-bleed heading-up map centred on the car; route is the high-contrast hero;
+  bays recede; one bottom navigation sheet (no modal, no debug nodes/edges).
+-->
+<style>
+  :root { color-scheme: light;
+    --map-ground:#e9edf1; --sheet:#ffffff; --sheet-line:#e6e9ee;
+    --ink:#101418; --sub:#5b6572; --route:#1f7aff; --target:#ff3b30;
+    --safe-top:#ffffff; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body{ height:100%; }
+  body{ margin:0; overflow:hidden; background:var(--map-ground);
+        font:16px/1.4 system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; color:var(--ink); }
+  #map{ position:fixed; inset:0; width:100%; height:100%; display:block; }
+
+  /* very small top chip: current road / ETA — not a panel, just a hint */
+  .topbar{ position:fixed; top:14px; left:0; right:0; display:flex; justify-content:center;
+           pointer-events:none; z-index:2; }
+  .chip{ background:rgba(255,255,255:.82); border:1px solid rgba(0,0,0,.06); border-radius:999px;
+         padding:7px 16px; font-size:13.5px; color:var(--sub); backdrop-filter:blur(8px);
+         box-shadow:0 2px 10px rgba(20,30,50,.08); }
+  .chip b{ color:var(--ink); font-weight:600; }
+
+  /* the navigation sheet: docked bottom, rounded top, part of the screen — not a popup */
+  .sheet{ position:fixed; left:0; right:0; bottom:0; z-index:2; background:var(--sheet);
+          border-top:1px solid var(--sheet-line);
+          border-radius:22px 22px 0 0; padding:10px 20px calc(20px + env(safe-area-inset-bottom));
+          box-shadow:0 -10px 40px rgba(20,30,50,.14); }
+  .grab{ width:40px; height:4px; border-radius:2px; background:#e3e7ec; margin:2px auto 12px; }
+  .sheet .head{ display:flex; align-items:center; justify-content:space-between; }
+  .dest{ display:flex; align-items:center; gap:9px; font-size:16px; font-weight:600; }
+  .dest .pin{ width:22px; height:22px; border-radius:50% 50% 50% 0; transform:rotate(-45deg);
+              background:var(--target); display:inline-block; position:relative; }
+  .dest .pin::after{ content:""; position:absolute; inset:0; margin:auto; width:9px; height:9px;
+                     border-radius:50%; background:#fff; }
+  .end{ background:transparent; border:0; color:var(--sub); font-size:14px; font-weight:600;
+        padding:6px 4px; cursor:pointer; }
+
+  .maneuver{ display:flex; align-items:center; gap:14px; margin:10px 0 4px; }
+  .maneuver .ar{ width:52px; height:52px; flex:0 0 auto; border-radius:14px;
+                 background:color-mix(in srgb, var(--route) 12%, #fff);
+                 display:flex; align-items:center; justify-content:center; }
+  .maneuver .ar svg{ width:30px; height:30px; }
+  .maneuver .what{ font-size:21px; font-weight:700; letter-spacing:.3px; }
+  .maneuver .where{ font-size:13.5px; color:var(--sub); margin-top:1px; }
+
+  .stats{ display:flex; gap:28px; margin-top:12px; padding-top:12px; border-top:1px solid var(--sheet-line); }
+  .stats .k{ font-size:12px; color:var(--sub); }
+  .stats .v{ font-size:24px; font-weight:700; margin-top:1px; }
+  .stats .v small{ font-size:13px; font-weight:600; color:var(--sub); margin-left:2px; }
+</style>
+
+<canvas id="map"></canvas>
+
+<div class="topbar">
+  <div class="chip">环道 · 预计 <b>1 分钟</b> · 限速 15</div>
+</div>
+
+<div class="sheet">
+  <div class="grab"></div>
+  <div class="head">
+    <div class="dest"><span class="pin"></span>前往 <span id="destId">38</span> 号车位</div>
+    <button class="end">结束导航</button>
+  </div>
+
+  <div class="maneuver">
+    <div class="ar">
+      <!-- straight arrow -->
+      <svg viewBox="0 0 24 24" fill="none" stroke="#1f7aff" stroke-width="2.6"
+           stroke-linecap="round" stroke-linejoin="round">
+        <line x1="12" y1="20" x2="12" y2="5"/>
+        <line x1="5" y2="12" x2="12" y1="5"/>
+        <line x1="19" y2="12" x2="12" y1="5"/>
+      </svg>
+    </div>
+    <div>
+      <div class="what">沿环道直行</div>
+      <div class="where">80 m 后右转进入通道</div>
+    </div>
+  </div>
+
+  <div class="stats">
+    <div><div class="k">剩余距离</div><div class="v" id="dist">186<small>m</small></div></div>
+    <div><div class="k">预计到达</div><div class="v">2<small>分钟</small></div></div>
+    <div><div class="k">目标状态</div><div class="v" style="font-size:18px;line-height:1.6">已预留</div></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+// ------------------------------------------------------------- sample world
+// A small ring corridor with bay blocks, coordinates roughly proportional to the real lot.
+// Everything is in "world px". The camera is heading-up and centred on the hero car.
+const W = 800, H = 600;
+
+// Bay blocks (rows of small rectangles). Fills are deliberately near-paper; only a faint tint
+// carries free/occupied, so they read as texture, not as competing colours.
+const bayRows = [
+  { y0: 46,  y1: 142, x0: 48, x1: 760, n: 15 },
+  { y0: 211, y1: 306, x0: 98, x1: 700, n: 13 },
+  { y0: 322, y1: 418, x0: 98, x1: 700, n: 13 },
+  { y0: 462, y1: 548, x0: 48, x1: 760, n: 15 },
+];
+const SPOTS = [];
+for (const row of bayRows) {
+  const step = (row.x1 - row.x0) / row.n;
+  for (let i = 0; i < row.n; i++) {
+    const x = row.x0 + i * step;
+    SPOTS.push({
+      poly: [[x + 2, row.y0 + 2], [x + step - 2, row.y0 + 2],
+              [x + step - 2, row.y1 - 2], [x + 2, row.y1 - 2]],
+      free: (i + row.y0) % 3 !== 0,          // sample occupancy pattern
+    });
+  }
+}
+
+// The ring centreline (closed) and corridor half-width = the drivable surface.
+const RING = [[103,440],[733,440],[734,180],[52,180],[54,440]];
+const CORRIDOR = 30;        // half-width of the aisle in world px
+
+// Hero car: sitting on the bottom corridor, facing east (+x).
+const car = { x: 300, y: 440, heading: 0 };
+
+// ------------------------------------------------------------- render
+const cv = document.getElementById("map");
+const ctx = cv.getContext("2d");
+let viewW = 0, viewH = 0, scale = 1;
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  viewW = innerWidth; viewH = innerHeight;
+  cv.width = Math.round(viewW * dpr); cv.height = Math.round(viewH * dpr);
+  cv.style.width = viewW + "px"; cv.style.height = viewH + "px";
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  scale = Math.min(viewW, viewH) / 150;   // driving zoom: ~150 world px across short side
+}
+addEventListener("resize", () => { resize(); draw(); });
+
+function draw() {
+  // heading-up: rotate so the car's heading points up (-y), then centre on the car.
+  ctx.fillStyle = getCss("--map-ground");
+  ctx.fillRect(0, 0, viewW, viewH);
+
+  ctx.save();
+  ctx.translate(viewW / 2, viewH / 2);
+  ctx.rotate(-Math.PI / 2 - car.heading);   // car heading 0(+x) -> up
+  ctx.scale(scale, scale);
+  ctx.translate(-car.x, -car.y);
+
+  // 1) drivable surface: white aisle with a soft edge (not a grey slab).
+  ctx.lineJoin = "round"; ctx.lineCap = "round";
+  ctx.beginPath();
+  RING.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
+  ctx.closePath();
+  ctx.strokeStyle = "#dfe4ea"; ctx.lineWidth = CORRIDOR * 2 + 2; ctx.stroke();
+  ctx.strokeStyle = "#ffffff"; ctx.lineWidth = CORRIDOR * 2; ctx.stroke();
+
+  // 2) bay blocks: paper fill, faint outline, almost no saturation so they sit back.
+  for (const s of SPOTS) {
+    ctx.beginPath();
+    s.poly.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
+    ctx.closePath();
+    ctx.fillStyle = s.free ? "#f7faf8" : "#f3f5f8";
+    ctx.fill();
+    ctx.strokeStyle = s.free ? "#dfe9e4" : "#e6e9ee";
+    ctx.lineWidth = 1.2; ctx.stroke();
+  }
+
+  // 3) route: the high-contrast hero line (white casing + blue).
+  const route = [[300,440],[560,440],[733,440],[733,240],[640,240]];
+  function trace() {
+    ctx.beginPath();
+    route.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
+  }
+  trace(); ctx.strokeStyle = "rgba(255,255,255,.9)"; ctx.lineWidth = 11; ctx.stroke();
+  trace(); ctx.strokeStyle = getCss("--route");       ctx.lineWidth = 7;  ctx.stroke();
+
+  // 4) destination pin at the target spot.
+  const t = [640, 240];
+  drawPin(t[0], t[1]);
+
+  // 5) the vehicle: a red top-down car silhouette (not a chevron).
+  drawVehicle(car.x, car.y, car.heading);
+
+  ctx.restore();
+}
+
+function drawPin(x, y) {
+  ctx.save(); ctx.translate(x, y);
+  ctx.beginPath();
+  const r = 12;
+  ctx.moveTo(0, r * 1.5);
+  ctx.quadraticCurveTo(-r, r * 0.4, -r, 0);
+  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  ctx.quadraticCurveTo(r, r * 0.4, 0, r * 1.5);
+  ctx.closePath();
+  ctx.fillStyle = getCss("--target");
+  ctx.shadowColor = "rgba(0,0,0,.35)"; ctx.shadowBlur = 8; ctx.shadowOffsetY = 3;
+  ctx.fill();
+  ctx.shadowColor = "transparent";
+  ctx.beginPath(); ctx.arc(0, 0, 4.2, 0, Math.PI * 2);
+  ctx.fillStyle = "#fff"; ctx.fill();
+  ctx.restore();
+}
+
+// A top-down car: rounded red body, a darker bumpers, a light windscreen strip. Reads as
+// "my vehicle" rather than a generic arrow. Sized in screen-fixed px regardless of zoom.
+function drawVehicle(x, y, heading) {
+  ctx.save();
+  ctx.translate(x, y);
+  // the shape is authored in "unit car" space; counter-scale so it stays constant on screen
+  ctx.scale(1 / scale, 1 / scale);
+  ctx.rotate(heading);                  // outer heading-up already applied (matches live drawCar)
+  ctx.shadowColor = "rgba(0,0,0,.35)"; ctx.shadowBlur = 9; ctx.shadowOffsetY = 2;
+
+  const bw = 16, bl = 30, r = 6;
+  roundRectPath(-bw / 2, -bl / 2, bw, bl, r);
+  const g = ctx.createLinearGradient(0, -bl / 2, 0, bl / 2);
+  g.addColorStop(0, "#ff6a5e");
+  g.addColorStop(1, "#e0392f");
+  ctx.fillStyle = g; ctx.fill();
+  ctx.shadowColor = "transparent";
+
+  // windscreen + rear window
+  ctx.fillStyle = "rgba(255,255,255,.85)";
+  roundRectPath(-bw / 2 + 3, -bl / 2 + 7, bw - 6, 5, 2); ctx.fill();
+  roundRectPath(-bw / 2 + 3, bl / 2 - 9, bw - 6, 4, 2); ctx.fill();
+  ctx.restore();
+}
+
+function roundRectPath(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function getCss(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+resize();
+draw();
