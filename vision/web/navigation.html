@@ -382,10 +382,10 @@ const Nav = {
     // heading-up, so shifting the world focal point would move the view sideways instead.
     return { scale, cx: worldW / 2, cy: worldH / 2, inset: insetBottom };
   },
-  // Where the focal point is drawn on screen. Two compositions, and the driver's one is the point
-  // of this: the car is held at the middle horizontally and a third of the way down, the way a
-  // car navigator does, instead of in the middle of the screen.
-  navAnchor(viewW, viewH, insetBottom = 0, navigating = false, heightFrac = 1 / 3) {
+  // Where the focal point is drawn on screen. The driver's composition holds the car centred
+  // horizontally and two thirds of the way down, so most of the screen is the road ahead - which
+  // is the half of it a driver is about to drive into.
+  navAnchor(viewW, viewH, insetBottom = 0, navigating = false, heightFrac = 2 / 3) {
     if (navigating) return [viewW / 2, viewH * heightFrac];
     return [viewW / 2, (viewH - insetBottom) / 2];
   },
@@ -772,8 +772,12 @@ function updateCamera() {
     // for. Some ground outside the lot can show near the edges instead.
     const pts = ROUTE?.ok ? Nav.routePoints(ROUTE, NODES).points : [];
     const [ax, ay] = Nav.navAnchor(viewW0, viewH0, sheetInset, true);
+    // Zoomed in, not fitted: a route that does not fit is allowed to leave the screen, because a
+    // navigator shows the road ahead rather than the whole trip. The band keeps it a driving view
+    // (at least a bit past half the driving zoom) and lets the route fit when it is short enough.
+    const drive = driveScale();
     const scale = Nav.routeAroundScale(viewW0, viewH0, ax, ay, cam.rot, car, pts,
-                                       56, 0.3, driveScale(), viewH0 - sheetInset);
+                                       56, drive * 0.55, drive, viewH0 - sheetInset);
     targetCam = { scale, cx: car.x, cy: car.y, anchorX: ax, anchorY: ay, inset: sheetInset };
   } else {
     // Nothing selected: the whole parking lot, centred in the part above the sheet.

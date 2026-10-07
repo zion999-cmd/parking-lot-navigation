@@ -252,22 +252,24 @@ def test_screen_and_world_invert_with_an_anchor() -> None:
 
 
 def test_the_driving_composition_holds_the_car_at_one_third() -> None:
-    """Asked for: while navigating the car is centred horizontally and a third of the way down.
+    """Asked for: while navigating the car is centred horizontally and two thirds down.
 
     navAnchor is that rule, and it has to be the rule for the whole screen rather than the part
     above the sheet - the car has to be at a fixed place on the glass.
     """
     out = node_run("[Nav.navAnchor(900, 1200, 300, true), Nav.navAnchor(900, 1200, 300, false),"
                    " Nav.navAnchor(900, 1200, 0, true)]", [0])[0]
-    assert out[0] == [450, 400], out              # 1200/3
+    assert out[0] == [450, 800], out              # 1200 * 2/3: lower, road ahead
     assert out[1] == [450, 450], out              # centred in the band above a 300 px sheet
-    assert out[2] == [450, 400], out              # the sheet does not move the driving anchor
+    assert out[2] == [450, 800], out              # the sheet does not move the driving anchor
 
 
 def test_the_zoom_keeps_the_whole_route_on_screen_around_the_car() -> None:
-    """The property that matters: whatever the scale chosen, every route point must land inside
-    the frame with the car held at the anchor. Checked by projecting them, not by trusting the
-    formula - and under rotation, which is where a world-axis measurement would be wrong."""
+    """The property that matters now: the zoom stays a driving zoom, not a fit-the-route overview.
+
+    An earlier version guaranteed every route point was on screen, and that is the behaviour that
+    made a long route zoom the picture out until the car was a speck. The band below keeps it
+    zoomed in; the car must still land on its anchor, checked by projecting it under rotation."""
     cases = []
     for heading in (0.0, 90.0, 200.0, 315.0):
         for pts in ([[0, 0], [400, 0]], [[0, 0], [0, 500]], [[0, 0], [-300, 300], [700, -200]],
@@ -279,15 +281,16 @@ def test_the_zoom_keeps_the_whole_route_on_screen_around_the_car() -> None:
         " const anchorX = 450, anchorY = 400, viewW = 900, viewH = 1200;"
         " const car = {x: 0, y: 0};"
         " const scale = Nav.routeAroundScale(viewW, viewH, anchorX, anchorY, rot, car, c.pts,"
-        "                                    56, 0.3, 6.0, viewH - 300);"   # floor + sheet
+        "                                    56, 2.0, 4.0, viewH - 300);"   # a driving band
         " const cam = {scale, cx: car.x, cy: car.y, anchorX, anchorY};"
         " const out = c.pts.map(p => Nav.toScreen(viewW, viewH, cam, rot, p[0], p[1]));"
         " return [scale, out]; })()",
         cases)
     for case, (scale, pts) in zip(cases, got):
-        for sx, sy in pts:
-            assert 0 <= sx <= 900, (case, scale, sx, sy)
-            assert 0 <= sy <= 900, (case, scale, sx, sy)   # 900 = the sheet's top edge
+        assert 2.0 <= scale <= 4.0, (case, scale)
+    # a short route still fits inside the band, so nothing is lost when the route is small
+    short = got[3][0]
+    assert short > 2.0, short
     # and the car's own anchor really is where the car is drawn
     assert got[0][1][0] == [450, 400], got[0][1][0]
 
