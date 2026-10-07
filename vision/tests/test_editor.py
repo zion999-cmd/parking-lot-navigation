@@ -577,6 +577,169 @@ def test_leaving_the_editor_writes_the_change_even_if_q_was_not_the_last_key() -
         "and after the loop, not before it"
 
 
+# --------------------------------------------------------------------------- #
+# arrow keys: half a pixel at a time
+# --------------------------------------------------------------------------- #
+# A bay one pixel out cannot be fixed with a mouse. The arrow keys move the selected corner - or
+# the whole bay when no corner was clicked - by half a pixel, which is small enough to be
+# invisible, so the window answers with the coordinate instead.
+
+UP, DOWN, LEFT, RIGHT = 63232, 63233, 63234, 63235           # the family macOS reports
+X_LEFT, X_UP, X_RIGHT, X_DOWN = 65361, 65362, 65363, 65364   # the X11 / GTK / Qt family
+
+
+def app_with_one_bay():
+    ed = SpotEditor((H, W), start_id=38)
+    ed.add_at(400, 300)
+    app = CalibrationApp(ed, "/tmp/does-not-matter.json")
+    app._frame = lot_frame()
+    return app
+
+
+def test_the_arrow_keys_are_handled_and_ordinary_keys_are_not():
+    a = app_with_one_bay()
+    for code in (UP, DOWN, LEFT, RIGHT, X_LEFT, X_UP, X_RIGHT, X_DOWN):
+        assert a.act_code(code) is True, code
+    for code in (ord("a"), ord("q"), ord("s"), 13, 9, -1, 255):
+        assert a.act_code(code) is False, code
+
+
+def test_arrow_keys_move_the_selected_bay_by_half_a_pixel():
+    a = app_with_one_bay()
+    a.ed.select(0)
+    a.ed.selected_corner = None                 # a body selection, not a corner
+    before = a.ed.spots[0].polygon.copy()
+    a.act_code(UP)
+    assert np.allclose(a.ed.spots[0].polygon - before, [0, -0.5]), a.ed.spots[0].polygon - before
+    a.act_code(RIGHT)
+    assert np.allclose(a.ed.spots[0].polygon - before, [0.5, -0.5])
+    assert a.ed.dirty
+
+
+def test_arrow_keys_move_only_the_selected_corner():
+    a = app_with_one_bay()
+    corner = 2
+    x, y = a.ed.spots[0].polygon[corner]
+    assert a.ed.begin_drag(x + 1, y + 1)               # a click on the corner selects it
+    assert a.ed.selected_corner == corner
+    before = a.ed.spots[0].polygon.copy()
+    a.act_code(LEFT)
+    after = a.ed.spots[0].polygon
+    moved = [i for i in range(len(after)) if not np.allclose(after[i], before[i])]
+    assert moved == [corner], f"moved {moved}, wanted only corner {corner}"
+    assert np.allclose(after[corner] - before[corner], [-0.5, 0.0])
+
+
+def test_a_click_on_the_body_means_the_whole_bay():
+    """No new mode to learn: whatever was clicked last is what the arrows move."""
+    a = app_with_one_bay()
+    poly = a.ed.spots[0].polygon
+    centre = poly.mean(axis=0)
+    assert a.ed.begin_drag(float(centre[0]), float(centre[1]))
+    assert a.ed.selected_corner is None
+    before = poly.copy()
+    a.act_code(DOWN)
+    assert np.allclose(a.ed.spots[0].polygon - before, [0, 0.5])
+
+
+def test_twenty_presses_are_exactly_ten_pixels():
+    """Half a pixel is only useful if it does not drift."""
+    a = app_with_one_bay()
+    a.ed.begin_drag(a.ed.spots[0].polygon[0][0] + 1, a.ed.spots[0].polygon[0][1] + 1)
+    start = a.ed.spots[0].polygon[a.ed.selected_corner].copy()
+    for _ in range(20):
+        a.act_code(LEFT)
+    moved = a.ed.spots[0].polygon[a.ed.selected_corner] - start
+    assert np.allclose(moved, [-10.0, 0.0]), moved
+
+
+def test_a_run_of_presses_is_one_undo_step():
+    """Twenty presses in a row are one undo step; twenty separate corrections would be twenty.
+
+    The run's first press is the one that records the state to come back to - what matters is that
+    the other nineteen do not each add their own.
+    """
+    a = app_with_one_bay()
+    a.ed.begin_drag(a.ed.spots[0].polygon[0][0] + 1, a.ed.spots[0].polygon[0][1] + 1)
+    depth = len(a.ed._undo)
+    for _ in range(20):
+        a.act_code(LEFT)
+    assert len(a.ed._undo) == depth + 1, \
+        f"20 presses pushed {len(a.ed._undo) - depth} undo states, wanted 1"
+
+
+def test_presses_that_are_not_a_run_are_their_own_undo_steps():
+    """The contrast that shows the merging is real rather than the stack never growing."""
+    a = app_with_one_bay()
+    a.ed.begin_drag(a.ed.spots[0].polygon[0][0] + 1, a.ed.spots[0].polygon[0][1] + 1)
+    depth = len(a.ed._undo)
+    for _ in range(5):
+        a.act_code(LEFT)
+        a.act("i")                     # an ordinary key ends the run each time
+        a.act("i")
+    assert len(a.ed._undo) == depth + 5, len(a.ed._undo) - depth
+
+
+def test_an_ordinary_key_ends_the_run():
+    a = app_with_one_bay()
+    a.ed.begin_drag(a.ed.spots[0].polygon[0][0] + 1, a.ed.spots[0].polygon[0][1] + 1)
+    a.act_code(LEFT)
+    depth = len(a.ed._undo)
+    a.act("i")                                   # any ordinary key
+    a.act_code(LEFT)
+    assert len(a.ed._undo) == depth + 1, "the second run joined the first"
+
+
+def test_an_unknown_special_code_is_reported_rather_than_swallowed():
+    """If a backend reports the arrows as something else, the window has to say so.
+
+    That message is why this can be corrected in one line later instead of guessed at now: the
+    first press says which number to add.
+    """
+    a = app_with_one_bay()
+    a.ed.select(0)
+    assert a.act_code(70000) is False
+    assert "70000" in a.ed.message.text, a.ed.message.text
+    before = a.ed.spots[0].polygon.copy()
+    a.act_code(70000)
+    assert np.allclose(a.ed.spots[0].polygon, before), "an unknown code moved something"
+
+
+def test_the_roads_layer_moves_a_road_point():
+    a = app_with_one_bay()
+    a.layer = "roads"
+    a.road.net.add_node(300, 500)
+    a.road.select(0)
+    before = (a.road.net.nodes[0].x, a.road.net.nodes[0].y)
+    assert a.act_code(UP) is True
+    after = (a.road.net.nodes[0].x, a.road.net.nodes[0].y)
+    assert abs(after[0] - before[0]) < 1e-9, (before, after)
+    assert abs(after[1] - before[1] + 0.5) < 1e-9, (before, after)
+    assert a.road.dirty
+
+
+def test_nothing_selected_says_what_to_do_instead_of_moving_something():
+    a = app_with_one_bay()
+    a.ed.select(None)
+    before = a.ed.spots[0].polygon.copy()
+    assert a.act_code(UP) is True
+    assert np.allclose(a.ed.spots[0].polygon, before)
+    assert "select" in a.ed.message.text, a.ed.message.text
+
+
+def test_both_loops_offer_the_raw_code_before_truncating_it():
+    """The bug this would otherwise have been: `waitKey() & 0xFF` keeps 63232's low byte, zero.
+
+    Read out of the shipped source, because the failure is invisible in a unit test: either the
+    arrow works, or it silently becomes the character '\x00' and does nothing at all.
+    """
+    for name in ("calibration.py", "main.py"):
+        text = open(os.path.join(SRC, name), encoding="utf-8").read()
+        assert "raw = cv2.waitKey(" in text, name
+        assert text.index("act_code(raw)") < text.index("raw & 0xFF"), \
+            f"{name} truncates the key before the arrow codes are looked at"
+
+
 def main() -> int:
     tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith("test_") and callable(f)]

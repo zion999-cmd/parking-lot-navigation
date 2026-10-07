@@ -179,14 +179,21 @@ class RoadEditor:
         self._drag = None
         self.dirty = True
 
-    def nudge(self, dx: float, dy: float) -> None:
+    def nudge(self, dx: float, dy: float, coalesce: bool = False) -> bool:
+        """Move the selected road point. Returns whether anything moved.
+
+        `coalesce` is for a run of half-pixel arrow-key steps, where the caller has pushed one
+        undo state for the whole run instead of one per press.
+        """
         node = self.selected_node()
         if node is None:
             self._say("select a road point first (Tab, or click one)", "warn")
-            return
-        self._push_undo()
+            return False
+        if not coalesce:
+            self._push_undo()
         self.net.move_node(node.id, node.x + dx, node.y + dy)
         self.dirty = True
+        return True
 
     # -- drawing ------------------------------------------------------------
 

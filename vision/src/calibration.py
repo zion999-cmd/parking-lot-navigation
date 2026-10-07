@@ -37,6 +37,9 @@ Parking Spots layer (what the camera answers: is this bay free?)
     l  toggle the detected lines overlay      v  toggle inner detection polygons
     m  cycle what 2/4/6/8 move: this bay -> its row -> every bay
     Tab cycle selection      2/4/6/8 nudge by 5 px
+    arrow keys nudge by 0.5 px - the whole bay, or the corner you last clicked, which is the only
+    way to place a point that is one pixel out, and they say the new coordinate in the window
+    because half a pixel cannot be seen
 
 Where a car drives into a bay is worked out from the roads - the side facing the nearest
 one - which is right almost everywhere. At the end of a row or on a corner two roads are
@@ -177,6 +180,8 @@ class CalibrationApp:
             self.road.dirty = True
         self._buttons: List[Tuple[int, int, int, int, str, str]] = []
         self._pending_prompt: Optional[str] = None
+        # True while a run of arrow-key nudges is in progress, so the run is one undo step.
+        self._fine_run = False
 
     # -- drawing ------------------------------------------------------------
 
@@ -230,10 +235,11 @@ class CalibrationApp:
         if self.layer == "spots":
             hint = ("drag | A align | a auto | g row | n add | d del | "
                     f"{self.rename_hint} rename | i inner | "
-                    "j ent | s save | z undo | c reset | 2468 (m) | Tab | t roads | q")
+                    "j ent | s save | z undo | c reset | 2468 (m) | arrows 0.5px | Tab | t roads | q")
         else:
             hint = ("click = draw road | drag orange dot = fix a bay's way in | "
-                    "right-click = join roads | k = way in | d del | z undo | s save | q")
+                    "right-click = join roads | arrows 0.5px | k = way in | d del | z undo | "
+                    "s save | q")
         cv2.putText(canvas, hint[:135], (8, h - BAR_H - 28),
                     cv2.FONT_HERSHEY_PLAIN, 1.0, (0, 0, 0), 3)
         cv2.putText(canvas, hint[:135], (8, h - BAR_H - 28),
@@ -368,6 +374,8 @@ class CalibrationApp:
 
     def on_mouse(self, event, x, y, flags, param) -> None:
         self.cursor = (x, y)
+        # A click ends a run of arrow-key nudges: the next one starts a new undo step.
+        self._fine_run = False
 
         if self.layer == "roads":
             self._mouse_roads(event, x, y, flags)
@@ -536,9 +544,76 @@ class CalibrationApp:
         self.ed._say(f"snapped corner {c + 1} of spot {spot.id} to the nearest edge")
         return True
 
+    FINE_PX = 0.5
+
+    # Arrow keys are not characters. Which numbers a backend reports them as differs, so both
+    # families OpenCV is known to produce are accepted. A code that is not here but is clearly
+    # special is reported in the window rather than guessed at, which is how the number below
+    # would be corrected if a third family ever turns up.
+    ARROW_CODES = {
+        63232: (0.0, -1.0), 63233: (0.0, 1.0), 63234: (-1.0, 0.0), 63235: (1.0, 0.0),
+        65361: (-1.0, 0.0), 65362: (0.0, -1.0), 65363: (1.0, 0.0), 65364: (0.0, 1.0),
+    }
+    ARROW_NAMES = {(0.0, -1.0): "up", (0.0, 1.0): "down", (-1.0, 0.0): "left",
+                   (1.0, 0.0): "right"}
+
+    def act_code(self, code: int) -> bool:
+        """Handle a key that is not a plain character. True when it was handled.
+
+        Called before the caller slices the key with `& 0xFF`, which would keep the low byte of
+        63232 - zero - and throw the direction away.
+        """
+        step = self.ARROW_CODES.get(code)
+        if step is None:
+            if code not in (-1, 255) and (code > 255 or code == 0):
+                self.ed._say(f"unhandled key code {code} - add it to ARROW_CODES if it is an "
+                             f"arrow", "warn")
+            return False
+        self._fine_nudge(step[0], step[1])
+        return True
+
+    def _fine_nudge(self, sx: float, sy: float) -> None:
+        """Move the selected corner - or the whole bay - by half a pixel.
+
+        Half a pixel cannot be seen, so what moved is said out loud as a coordinate: that number
+        is the only feedback that tells twenty presses from nineteen.
+        """
+        ed = self.ed
+        if self.layer == "roads":
+            if self.road.nudge(sx * self.FINE_PX, sy * self.FINE_PX, coalesce=self._fine_run):
+                node = self.road.selected_node()
+                where = f"({node.x:.1f}, {node.y:.1f})" if node is not None else ""
+                ed._say(f"road point {self.ARROW_NAMES[(sx, sy)]} to {where}")
+                self._fine_run = True
+                return
+            ed._say("select a road point first - click one", "warn")
+            return
+
+        dx, dy = sx * self.FINE_PX, sy * self.FINE_PX
+        # One undo step for a whole run of presses, not one per press: a 10 px correction is
+        # twenty presses, and twenty entries would bury everything else in the stack.
+        if ed.nudge_corner(dx, dy, coalesce=self._fine_run):
+            spot = ed.selected_spot()
+            corner = ed.selected_corner
+            x, y = spot.polygon[corner]
+            ed._say(f"corner {corner + 1} of spot {spot.id} {self.ARROW_NAMES[(sx, sy)]} "
+                    f"to ({x:.1f}, {y:.1f})")
+            self._fine_run = True
+            return
+        if ed.nudge(dx, dy, coalesce=self._fine_run):
+            spot = ed.selected_spot()
+            cx, cy = spot.polygon.mean(axis=0)
+            ed._say(f"spot {spot.id} {self.ARROW_NAMES[(sx, sy)]} to ({cx:.1f}, {cy:.1f})")
+            self._fine_run = True
+            return
+        ed._say("select a bay first - click one, or Tab to cycle", "warn")
+
     def act(self, key: str) -> bool:
         """Run one action. Returns False when the app should quit."""
         ed = self.ed
+        # Any ordinary key ends a run of fine nudges, so the next arrow press starts a new undo
+        # step rather than joining the previous one. See _fine_nudge.
+        self._fine_run = False
         # The layer tabs arrive as @spots / @roads: they are buttons, not keys. Whichever
         # layer is active decides where every other key and click goes.
         if key in ("@spots", "@roads"):
@@ -775,7 +850,13 @@ class CalibrationApp:
             # asking for 20 ms spent 37 ms per frame while a drag waited to be serviced, and
             # asking for 5 ms spends 26 ms. The drawing is no longer the limit (6 ms) - the event
             # pump is, and a shorter wait is what makes a dragged corner follow the pointer.
-            key = cv2.waitKey(5) & 0xFF
+            raw = cv2.waitKey(5)
+            # Arrow keys arrive as numbers, not characters, and `& 0xFF` keeps only the low byte
+            # of them - 63232 becomes 0 and the direction is gone. So the raw code is offered to
+            # the window first, and only what it declines is treated as text.
+            if raw != -1 and self.act_code(raw):
+                continue
+            key = raw & 0xFF
             if key == 255:
                 continue
             if not self.act(chr(key)):

@@ -53,6 +53,9 @@ class SpotEditor:
         self.inner_scale = inner_scale
         self.spots: List[Spot] = []
         self.selected: Optional[int] = None
+        # Which corner of the selected bay the arrow keys move. None means the whole bay, so a
+        # click on the body and a click on a corner mean different things without a new mode.
+        self.selected_corner: Optional[int] = None
         self.message = EditMessage()
         self.detection: Optional[object] = None      # last DetectorResult
         self._undo: List[Tuple[List[Spot], Optional[int]]] = []
@@ -98,6 +101,9 @@ class SpotEditor:
 
     def select(self, index: Optional[int]) -> None:
         self.selected = index if index is not None and 0 <= index < len(self.spots) else None
+        # A corner belongs to one bay: selecting a different one cannot keep pointing at a
+        # corner of the old one.
+        self.selected_corner = None
 
     def selected_spot(self) -> Optional[Spot]:
         if self.selected is None or not (0 <= self.selected < len(self.spots)):
@@ -138,8 +144,12 @@ class SpotEditor:
         index, corner = self.hit_test(x, y)
         if index is None:
             self.selected = None
+            self.selected_corner = None
             return False
         self.selected = index
+        # Remember which corner is being worked on, so the arrow keys know whether they are
+        # moving a point or the whole bay. A click on the body clears it: body means bay.
+        self.selected_corner = corner
         self._push_undo()
         self._drag = {
             "index": index,
@@ -206,15 +216,41 @@ class SpotEditor:
         self._drag = None
         self.dirty = True
 
-    def nudge(self, dx: float, dy: float) -> None:
+    def nudge(self, dx: float, dy: float, coalesce: bool = False) -> bool:
+        """Move the selected bay. Returns whether anything moved.
+
+        `coalesce` is for a run of tiny steps: the caller has already pushed an undo state for
+        this run, and pushing another one per press would bury the stack.
+        """
         spot = self.selected_spot()
         if spot is None:
-            return
-        self._push_undo()
+            return False
+        if not coalesce:
+            self._push_undo()
         spot.polygon = spot.polygon + np.array([dx, dy], dtype=np.float64)
         self._clamp(spot)
         self._prepare(spot)
         self.dirty = True
+        return True
+
+    def nudge_corner(self, dx: float, dy: float, coalesce: bool = False) -> bool:
+        """Move the one selected corner. False when no corner is selected.
+
+        Half a pixel at a time cannot be done with a mouse, which is the point: a bay that is
+        one pixel out can be walked into place from the keyboard instead of dragged there.
+        """
+        spot = self.selected_spot()
+        corner = self.selected_corner
+        if spot is None or corner is None or not (0 <= corner < len(spot.polygon)):
+            return False
+        if not coalesce:
+            self._push_undo()
+        spot.polygon[corner] = np.asarray(spot.polygon, dtype=np.float64)[corner] \
+            + np.array([dx, dy], dtype=np.float64)
+        self._clamp(spot)
+        self._prepare(spot)
+        self.dirty = True
+        return True
 
     def nudge_many(self, spots, dx: float, dy: float) -> int:
         """Move several bays at once as a single undo step.

@@ -505,7 +505,13 @@ def run_edit_mode(get_frame, config_path: str, template_path: Optional[str],
         cv2.imshow(WINDOW, app.render(frame))
         # Same 5 ms as calibration.py's loop, and for the same measured reason: it is the event
         # pump, not the drawing, that decides how closely a dragged bay follows the pointer.
-        key = cv2.waitKey(5) & 0xFF
+        raw = cv2.waitKey(5)
+        # Arrow keys are numbers, not characters: the raw code is offered to the window before
+        # `& 0xFF` keeps only its low byte and throws the direction away. Same order as
+        # calibration.py's loop, so the two windows answer the arrow keys the same way.
+        if raw != -1 and app.act_code(raw):
+            continue
+        key = raw & 0xFF
         if key == 255:
             continue
         if key == ord('R'):
