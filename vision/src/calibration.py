@@ -182,6 +182,11 @@ class CalibrationApp:
         self._pending_prompt: Optional[str] = None
         # True while a run of arrow-key nudges is in progress, so the run is one undo step.
         self._fine_run = False
+        # PARKING_LOG_KEYS=1 prints every key code the window receives. The arrow keys are the
+        # only keys whose numbers differ between backends, and this is how they get measured on a
+        # machine nobody can press keys on: run with the variable set, press the four arrows, and
+        # the four numbers are in the terminal.
+        self.log_keys = bool(os.environ.get("PARKING_LOG_KEYS"))
 
     # -- drawing ------------------------------------------------------------
 
@@ -546,14 +551,25 @@ class CalibrationApp:
 
     FINE_PX = 0.5
 
-    # Arrow keys are not characters. Which numbers a backend reports them as differs, so both
-    # families OpenCV is known to produce are accepted. A code that is not here but is clearly
-    # special is reported in the window rather than guessed at, which is how the number below
-    # would be corrected if a third family ever turns up.
+    # Arrow keys are not characters. Which numbers a backend reports them as differs, so every
+    # family OpenCV is known to produce is accepted.
+    #
+    # The three low codes are the interesting case and are marked as such: printable characters
+    # arrive as their ASCII value ('2' is 50), so 0x00..0x03 cannot be a normal key and are free
+    # to use. The assignment below is a convention, not something measured on this machine - so
+    # when one arrives the window says which number it saw and what it decided it meant. A wrong
+    # guess then reads as "arrow code 2 read as left", which is one line to correct, instead of
+    # moving a bay the wrong way in silence.
     ARROW_CODES = {
         63232: (0.0, -1.0), 63233: (0.0, 1.0), 63234: (-1.0, 0.0), 63235: (1.0, 0.0),
         65361: (-1.0, 0.0), 65362: (0.0, -1.0), 65363: (1.0, 0.0), 65364: (0.0, 1.0),
+        0: (0.0, -1.0), 1: (0.0, 1.0), 2: (-1.0, 0.0), 3: (1.0, 0.0),
     }
+    LOW_ARROW_CODES = frozenset((0, 1, 2, 3))
+    # Codes that are not arrows and cannot be typed, but are still real keys the loops handle as
+    # characters: Tab cycles the selection, Enter is a stray, Esc quits, -1/255 mean no key at
+    # all. Reporting these would put a warning on screen every time somebody presses Tab.
+    QUIET_CODES = frozenset((-1, 255, 8, 9, 10, 13, 27))
     ARROW_NAMES = {(0.0, -1.0): "up", (0.0, 1.0): "down", (-1.0, 0.0): "left",
                    (1.0, 0.0): "right"}
 
@@ -562,28 +578,37 @@ class CalibrationApp:
 
         Called before the caller slices the key with `& 0xFF`, which would keep the low byte of
         63232 - zero - and throw the direction away.
+
+        Anything else that cannot be a printable character is reported, in the window and in the
+        terminal. That report is the only way this can be fixed for a backend nobody has seen yet,
+        and it is deliberately loud: the first arrow press either moves something or says its own
+        number.
         """
         step = self.ARROW_CODES.get(code)
         if step is None:
-            if code not in (-1, 255) and (code > 255 or code == 0):
-                self.ed._say(f"unhandled key code {code} - add it to ARROW_CODES if it is an "
-                             f"arrow", "warn")
+            if code not in self.QUIET_CODES and not (32 <= code < 127):
+                note = (f"key code {code} does nothing here - if that was an arrow key, "
+                        f"add it to ARROW_CODES")
+                self.ed._say(note, "warn")
+                print(f"  {note}", file=sys.stderr)
             return False
-        self._fine_nudge(step[0], step[1])
+        self._fine_nudge(step[0], step[1], code if code in self.LOW_ARROW_CODES else None)
         return True
 
-    def _fine_nudge(self, sx: float, sy: float) -> None:
+    def _fine_nudge(self, sx: float, sy: float, arrow_code: Optional[int] = None) -> None:
         """Move the selected corner - or the whole bay - by half a pixel.
 
         Half a pixel cannot be seen, so what moved is said out loud as a coordinate: that number
-        is the only feedback that tells twenty presses from nineteen.
+        is the only feedback that tells twenty presses from nineteen. When the key arrived as one
+        of the guessed low codes, the message says so too, so a wrong guess is visible at once.
         """
         ed = self.ed
+        guessed = f"  [arrow code {arrow_code}, guessed]" if arrow_code is not None else ""
         if self.layer == "roads":
             if self.road.nudge(sx * self.FINE_PX, sy * self.FINE_PX, coalesce=self._fine_run):
                 node = self.road.selected_node()
                 where = f"({node.x:.1f}, {node.y:.1f})" if node is not None else ""
-                ed._say(f"road point {self.ARROW_NAMES[(sx, sy)]} to {where}")
+                ed._say(f"road point {self.ARROW_NAMES[(sx, sy)]} to {where}{guessed}")
                 self._fine_run = True
                 return
             ed._say("select a road point first - click one", "warn")
@@ -597,13 +622,13 @@ class CalibrationApp:
             corner = ed.selected_corner
             x, y = spot.polygon[corner]
             ed._say(f"corner {corner + 1} of spot {spot.id} {self.ARROW_NAMES[(sx, sy)]} "
-                    f"to ({x:.1f}, {y:.1f})")
+                    f"to ({x:.1f}, {y:.1f}){guessed}")
             self._fine_run = True
             return
         if ed.nudge(dx, dy, coalesce=self._fine_run):
             spot = ed.selected_spot()
             cx, cy = spot.polygon.mean(axis=0)
-            ed._say(f"spot {spot.id} {self.ARROW_NAMES[(sx, sy)]} to ({cx:.1f}, {cy:.1f})")
+            ed._say(f"spot {spot.id} {self.ARROW_NAMES[(sx, sy)]} to ({cx:.1f}, {cy:.1f}){guessed}")
             self._fine_run = True
             return
         ed._say("select a bay first - click one, or Tab to cycle", "warn")
@@ -851,6 +876,10 @@ class CalibrationApp:
             # asking for 5 ms spends 26 ms. The drawing is no longer the limit (6 ms) - the event
             # pump is, and a shorter wait is what makes a dragged corner follow the pointer.
             raw = cv2.waitKey(5)
+            # PARKING_LOG_KEYS=1 names every code that arrives, which is how the arrows get
+            # measured on a machine nobody here can press keys on.
+            if raw != -1 and self.log_keys:
+                print(f"  key code {raw}", file=sys.stderr)
             # Arrow keys arrive as numbers, not characters, and `& 0xFF` keeps only the low byte
             # of them - 63232 becomes 0 and the direction is gone. So the raw code is offered to
             # the window first, and only what it declines is treated as text.

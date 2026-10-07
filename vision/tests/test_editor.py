@@ -727,6 +727,57 @@ def test_nothing_selected_says_what_to_do_instead_of_moving_something():
     assert "select" in a.ed.message.text, a.ed.message.text
 
 
+def test_a_guessed_low_code_says_that_it_was_a_guess():
+    """The low codes cannot collide with real keys, but they are a convention, not a measurement.
+
+    So the message names the code. If the direction turns out to be wrong, the window already
+    says which number to swap, instead of moving a bay the wrong way and saying nothing.
+    """
+    a = app_with_one_bay()
+    a.ed.select(0)
+    a.ed.selected_corner = None
+    before = a.ed.spots[0].polygon.copy()
+    assert a.act_code(3) is True                     # 3 is 'right' in the guessed table
+    assert np.allclose(a.ed.spots[0].polygon - before, [0.5, 0.0])
+    assert "arrow code 3" in a.ed.message.text, a.ed.message.text
+    # The high families are measured facts and carry no such note.
+    a.act_code(65363)
+    assert "arrow code" not in a.ed.message.text, a.ed.message.text
+
+
+def test_a_key_that_cannot_be_a_character_is_reported():
+    """The bug reported twice: an unhandled code was swallowed in silence.
+
+    Printable characters arrive as their ASCII value ('2' is 50), so anything outside 32..126
+    that is not an arrow is not a key anyone meant to press, and the window has to say so.
+    """
+    a = app_with_one_bay()
+    for code in (4, 7, 25, 200, 70000):
+        assert a.act_code(code) is False, code
+        assert str(code) in a.ed.message.text, (code, a.ed.message.text)
+    # And the codes that are not keys at all stay quiet: the message must not change. (Checked as
+    # "unchanged" rather than "does not contain", because the message from the loop above is
+    # still sitting there - the window is not cleared between keys.)
+    for code in (-1, 255, ord("a"), ord("q"), 13, 9):
+        before = a.ed.message.text
+        assert a.act_code(code) is False, code
+        assert a.ed.message.text == before, (code, a.ed.message.text)
+
+
+def test_working_keys_are_not_reported_as_unknown():
+    """Tab, Enter and Esc arrive as control codes too, and they are not unknown - they are keys.
+
+    The first version of the report included them, which would have put a warning on screen every
+    time somebody pressed Tab to cycle to the next bay.
+    """
+    a = app_with_one_bay()
+    a.ed.select(0)
+    a.ed._say("")
+    for code in (9, 13, 27, 8, 10, -1, 255):
+        assert a.act_code(code) is False, code
+        assert a.ed.message.text == "", (code, a.ed.message.text)
+
+
 def test_both_loops_offer_the_raw_code_before_truncating_it():
     """The bug this would otherwise have been: `waitKey() & 0xFF` keeps 63232's low byte, zero.
 
