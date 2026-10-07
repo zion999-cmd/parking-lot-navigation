@@ -277,23 +277,39 @@ def test_a_genuine_turn_is_followed() -> None:
     delta = (after.front_heading - before.front_heading + 540) % 360 - 180
     assert abs(delta - 0) < 15, (before.front_heading, after.front_heading, delta)
 
-def test_a_sign_flip_without_rotation_is_refused() -> None:
-    """The reported bug: car still / straight, visual sign flips 180.
+def test_a_short_sign_burst_is_debounced() -> None:
+    """The reported jitter: car still/straight, the visual sign flips for a few frames.
 
-    Strong contrary frames with the axis unmoved must not swap the front - that is a perception
-    error, and a car cannot reverse facing without turning.
+    Nothing physical swaps 180 in a few frames: a short contrary burst (fewer than the vote
+    window) must not change the sign, even though each frame alone is strong. A *sustained*
+    opposite run fills the vote window and is followed - that is a real pivot, which shows
+    almost no axis rotation and must not be refused forever.
     """
     tracker = vehicle.VehicleTracker()
     for _ in range(10):
         tracker.update(a_pose(-0.12, heading=5.0))
     held = tracker._front_is_plus
-    for _ in range(8):
-        out = tracker.update(a_pose(+0.12, heading=5.0))   # sign claims opposite; axis ~same
+    # 3 strong contrary frames, then back to normal: within a 7-frame majority they are minority
+    for _ in range(3):
+        out = tracker.update(a_pose(+0.9, heading=5.0))
+    out = tracker.update(a_pose(-0.12, heading=5.0))
     assert out.front_is_known
-    assert tracker._front_is_plus == held, "a flip with no real rotation was accepted"
+    assert tracker._front_is_plus == held, "a short burst flipped the sign"
     assert abs(out.observed_turn) < 30, out.observed_turn
     assert out.front_heading is not None and abs((out.front_heading - 5.0 + 180) % 360 - 0) < 10, \
         out.front_heading
+
+def test_a_sustained_opposite_sign_is_followed() -> None:
+    """A genuine pivot U-turn: little axis rotation, but the new sign persists for many frames."""
+    tracker = vehicle.VehicleTracker()
+    for _ in range(10):
+        before = tracker.update(a_pose(-0.12, heading=5.0))
+    for _ in range(vehicle.SIGN_VOTE_WINDOW):
+        after = tracker.update(a_pose(+0.9, heading=5.0))
+    assert after.front_is_known
+    assert tracker._front_is_plus is True, "a sustained pivot was blocked like a short burst"
+    turn = (after.front_heading - before.front_heading + 540) % 360 - 180
+    assert abs(abs(turn) - 180) < 15, (before.front_heading, after.front_heading, turn)
 
 def test_one_bad_frame_does_not_establish_the_sign() -> None:
     """Start-up has no motion history; the sign is committed only after agreeing frames."""

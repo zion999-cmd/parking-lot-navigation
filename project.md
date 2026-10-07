@@ -1590,6 +1590,19 @@ parking-lot-navigation/
 
 实测（车朝上、30 帧）：bbox h **68（67–70）**、heading **90.8°（86–95）**、evidence **−1.00、100% 同号**、front_heading 266–275（朝上 ✓）。
 
+**⑤ 简单防抖：sign 7 帧多数表决（已加 ✓）**
+
+修复边缘 flip 后出现权衡：上下朝向稳了，但**正常左右朝向偶发跳动**（按下葫芦浮起瓢）。
+依据你的判断 ——"现实里没有东西能高速切换 180°" —— 加最后一道简单防抖：
+- 保留最近 **7 帧**的 sign（`SIGN_VOTE_WINDOW=7`）；
+- 只有当其中 **≥5 帧**一致（`SIGN_VOTE_MIN=5`，容忍 2 帧抖动）才允许 sign 翻转；
+- **短突发（≤4 帧）⇒ 压住**；**持续 ≥7 帧 ⇒ 跟随**（这正是原地 pivot 掉头：轴几乎不转、但新 sign 持续，不能被当噪声永久拒绝）。
+
+实测（车朝左 30 帧）：24% 帧有扰动，但 front_heading 稳定 178–182、单帧 0° 不外翻 ⇒ 防抖生效 ✓。
+
+> **暂时如此**：等换完 hero 车后再整体校准（新颜色/新尺寸 → 重录模板 + 重定这些阈值）。
+> 这也验证了"换车"入口：改 `config/vehicle.json` + 重录模板即可，源码不动。
+
 **模板全部实测，不拍脑袋**（`tests/capture_vehicle_profile.py`）：
 - `--record --label right|left` —— 录一个朝向，标签是唯一朝向事实（不被旧 sign 污染）
 - `--finalize` —— 两份记录离线合成 rear→front 模板 ⇒ `config/vehicle_profile.json`（saturation + red_fraction，60+60 帧）

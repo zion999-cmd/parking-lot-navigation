@@ -357,7 +357,11 @@ MAX_MISSES = 5
 # Motion guard (phase 2). A sign flip is accepted only when the axis really rotated about half
 # a turn: a car cannot reverse its facing without turning. The raw axis is 0..180, so consecutive
 # changes are unwrapped and accumulated over a window covering a real turn.
-TURN_MIN_DEG = 120.0       # summed unwrapped axis rotation needed to accept a flip
+TURN_MIN_DEG = 120.0       # summed unwrapped axis (motion guard) needed to accept a flip
+# Simple anti-jitter: the physical car cannot swap ends in a few frames, so a sign change has
+# to be a clear majority of the recent frames, not just 3 strong ones.
+SIGN_VOTE_WINDOW = 7        # frames remembered
+SIGN_VOTE_MIN = 5           # ..of which must agree to flip (tolerates 2 jitter frames)
 TURN_WINDOW_FRAMES = 120
 TURN_WINDOW_SECONDS = 5.0
 # A flipped first frame cannot be motion-checked (no history): commit the sign only after this
@@ -414,6 +418,8 @@ class VehicleTracker:
         # Sign candidate while ESTABLISH_FRAMES votes accumulate, plus the vote count.
         self._establish_plus: Optional[bool] = None
         self._establish_votes = 0
+        # Recent frames' raw sign (True=plus) for the 180 anti-jitter majority.
+        self._sign_history: "deque[bool]" = deque()
 
     def reset(self) -> None:
         """Start again: the car has been out of sight long enough to be a new situation."""
@@ -425,6 +431,7 @@ class VehicleTracker:
         self._heading_history.clear()
         self._establish_plus = None
         self._establish_votes = 0
+        self._sign_history.clear()
 
     def update(self, pose: Optional[VehiclePose]) -> Optional[VehiclePose]:
         """One sighting in, a smoothed sighting out. None in, None out."""
@@ -481,6 +488,9 @@ class VehicleTracker:
         raw = pose.front_evidence
         if raw is not None:
             wants_plus = raw > 0
+            self._sign_history.append(wants_plus)
+            while len(self._sign_history) > SIGN_VOTE_WINDOW:
+                self._sign_history.popleft()
             # Establishing the front needs solid evidence; keeping it does not need to be
             # re-justified every frame. Which end is the front is a property of this car, not of
             # the last frame, so a frame with a weak cue - or the smoothed evidence dipping
@@ -509,6 +519,18 @@ class VehicleTracker:
                     # completes when the summed rotation crosses the gate.
             else:
                 self._opposite_streak = 0
+
+        # Simple anti-jitter, the last word on the sign. The motion guard can still pass a
+        # short burst (recent driving rotation left history), so do not let the committed sign
+        # disagree with a clear majority of recent frames. Three jitter frames in a 7-frame
+        # window cannot outvote; a real U-turn fills the window and flips (lag <= window).
+        votes = list(self._sign_history)
+        if self._front_is_plus is not None and len(votes) >= SIGN_VOTE_WINDOW:
+            plus_votes = sum(votes)
+            majority_plus = plus_votes > len(votes) - plus_votes
+            if majority_plus != self._front_is_plus:
+                if max(plus_votes, len(votes) - plus_votes) >= SIGN_VOTE_MIN:
+                    self._front_is_plus = majority_plus
 
         known = self._front_is_plus is not None and pose.elongation >= 1.6
         front = ((heading if self._front_is_plus else (heading + 180.0) % 360.0)
