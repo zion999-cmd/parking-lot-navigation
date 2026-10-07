@@ -70,6 +70,7 @@ class Handler(SimpleHTTPRequestHandler):
         body = (b"<!doctype html><meta charset=utf-8><title>parking lot</title>"
                 b"<body style=\"font:16px system-ui;margin:2em;background:#0f1115;color:#e6e9ef\">"
                 b"<h1>\xe5\x81\x9c\xe8\xbd\xa6\xe5\x9c\xba\xe8\xbd\xa6\xe4\xbd\x8d\xe5\xaf\xbc\xe8\x88\xaa</h1>"
+                b"<p><a style=color:#66d9ff href=\"/web/navigation.html\">navigation.html</a>" b" &nbsp;\xe2\x80\x94\xe8\xbd\xa6\xe8\xbd\xbd\xef\xbc\x9a\xe7\x82\xb9\xe7\xa9\xba\xe4\xbd\x8d\xe5\x87\xba\xe8\xb7\xaf\xe7\xba\xbf</p>"
                 b"<p><a style=color:#66d9ff href=\"/web/board.html\">board.html</a>"
                 b" &nbsp;\xe2\x80\x94\xe5\xb1\x95\xe7\xa4\xba\xe7\x94\xa8\xef\xbc\x9a\xe5\x88\x86\xe6\x9e\x90\xe7\x94\xbb\xe9\x9d\xa2 + \xe7\x82\xb9\xe8\xbd\xa6\xe4\xbd\x8d\xe8\xa7\x84\xe5\x88\x92</p>"
                 b"<p><a style=color:#66d9ff href=\"/web/index.html\">index.html</a>"
