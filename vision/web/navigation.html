@@ -43,9 +43,8 @@
               background:var(--target); position:relative; flex:0 0 auto; }
   .dest .pin::after{ content:""; position:absolute; inset:0; margin:auto; width:8px; height:8px;
                      border-radius:50%; background:#fff; }
-  #cancelBtn, #againBtn{ background:transparent; border:0; color:var(--sub); font:inherit;
-                         font-size:14px; font-weight:600; padding:6px 2px; cursor:pointer; }
-  #againBtn{ color:var(--route); }
+  #cancelBtn{ background:transparent; border:0; color:var(--sub); font:inherit; font-size:14px;
+              font-weight:600; padding:6px 2px; cursor:pointer; }
   .maneuver{ display:flex; align-items:center; gap:14px; margin:10px 0 2px; }
   #arrow{ width:52px; height:52px; flex:0 0 auto; border-radius:14px; font-size:26px;
           display:flex; align-items:center; justify-content:center;
@@ -59,17 +58,6 @@
 
   /* choose a bay: the same sheet, listing free bays (no map overlay, no modal) */
   .picklist{ max-height:38vh; overflow:auto; display:flex; flex-direction:column; gap:6px; }
-  .spotrow{ display:flex; align-items:center; gap:12px; width:100%; text-align:left; font:inherit;
-            color:var(--ink); background:#f6f8fa; border:1px solid #e8ebef; border-radius:12px;
-            padding:10px 14px; cursor:pointer; }
-  .spotrow:hover{ background:#eef4ff; border-color:#c7dcff; }
-  .spotrow .num{ width:34px; height:34px; border-radius:10px; background:#fff;
-                 border:1px solid #e2e6eb; display:flex; align-items:center;
-                 justify-content:center; font-weight:700; color:var(--route); flex:0 0 auto; }
-  .spotrow .meta{ flex:1; }
-  .spotrow .st{ font-size:13px; color:var(--sub); }
-  .spotrow .go{ color:var(--route); font-weight:700; font-size:14px; }
-
   #toast{ position:fixed; left:50%; top:38%; transform:translate(-50%,-50%) scale(.94); z-index:4;
           background:rgba(255,255,255,.96); border:1px solid rgba(0,0,0,.06); border-radius:18px;
           padding:18px 26px; text-align:center; font-size:19px; font-weight:600; opacity:0;
@@ -107,14 +95,12 @@
   </div>
 </div>
 
-<!-- choosing: the same sheet, listing free bays -->
+<!-- choosing: no list - the bays on the map are the list -->
 <div class="sheet" id="pickSheet">
   <div class="grab"></div>
-  <div class="head" style="margin-bottom:10px">
-    <div class="dest" style="font-size:17px">选择一个空车位</div>
-    <button id="againBtn" class="hidden">结束导航</button>
+  <div class="head">
+    <div class="dest" style="font-size:16px">点地图上的绿色空车位开始导航</div>
   </div>
-  <div class="picklist" id="pickList"></div>
 </div>
 
 <div id="toast"><div class="big">✅</div><div id="toastTxt"></div></div>
@@ -608,26 +594,26 @@ function eventWorld(evt) {
 }
 
 cv.addEventListener("click", evt => {
-  if (PHASE === "NAVIGATING" || PHASE === "ARRIVED") return;
   if (!MAP) return;
   const w = eventWorld(evt);
   const bay = Nav.bayAt(MAP, w.x, w.y);
   if (!bay) return;
   const st = STATE?.spots?.[String(bay.id)]?.state;
-  if (st === "EMPTY") startNavigation(bay.id);
-  else if (st === "OCCUPIED") transient("这个车位有车，选一个绿色空车位", "🚫");
+  if (st === "EMPTY") {
+    transient(`前往 ${bay.id} 号车位`, "🧭");
+    startNavigation(bay.id);
+  } else if (st === "OCCUPIED") transient("这个车位有车，选一个绿色空车位", "🚫");
   else transient("现在看不清这个车位，稍等一下", "•");
 });
 
 cv.addEventListener("mousemove", evt => {
-  if (PHASE !== "IDLE" || !MAP) { cv.style.cursor = ""; return; }
+  if (!MAP) { cv.style.cursor = ""; return; }
   const w = eventWorld(evt);
   const bay = Nav.bayAt(MAP, w.x, w.y);
   cv.style.cursor = bay ? "pointer" : "";
 });
 
 document.getElementById("cancelBtn").addEventListener("click", cancelNavigation);
-document.getElementById("againBtn").addEventListener("click", cancelNavigation);
 
 // ============================================================ transient note
 let toastTimer = null;
@@ -655,31 +641,12 @@ function routeSituation(v, routeDoc) {
   return { status: "重新规划中…", icon: "•", text: "正在重新规划路线…" };
 }
 
-// Which sheet is on screen, and the list of bays to choose from (rebuilt on every state change so
-// a bay that just filled disappears from it).
+// Which sheet is on screen. Choosing happens on the map - the bays are labelled and clickable -
+// so this only has to swap the hint for the navigation sheet.
 function refreshSheets() {
-  const list = el("pickList");
-  if (!list) return;
   if (PHASE === "IDLE") {
     document.body.classList.add("idle");
     document.body.classList.remove("navigating");
-    const free = (MAP?.spots ?? [])
-      .filter(s => (STATE?.spots?.[String(s.id)]?.state) === "EMPTY");
-    if (list.dataset.sig !== free.map(s => s.id).join(",")) {
-      list.dataset.sig = free.map(s => s.id).join(",");
-      list.innerHTML = "";
-      if (!free.length)
-        list.innerHTML = '<div style="color:var(--sub);padding:10px 2px">暂无空闲车位</div>';
-      for (const s of free) {
-        const row = document.createElement("button");
-        row.className = "spotrow";
-        row.innerHTML = `<span class="num">${s.id}</span>
-          <span class="meta"><div>车位 ${s.id}</div><div class="st">空闲 · 可导航</div></span>
-          <span class="go">开始 →</span>`;
-        row.onclick = () => startNavigation(s.id);
-        list.appendChild(row);
-      }
-    }
   } else {
     document.body.classList.remove("idle");
     if (PHASE === "NAVIGATING") document.body.classList.add("navigating");
@@ -839,7 +806,8 @@ const STYLE = {
   labelText: "#33404f",
   plate: "rgba(255,255,255,.85)",
   start: "#8aa0b4",
-  showBayNumbers: false,   // digits read as stray glyphs on a nav map; list shows them instead
+  showBayNumbers: true,    // every bay carries its number; clicking one picks the target
+  labelSize: 13,           // screen px - large enough to read as a number, not as a blob
 };
 
 function drawWorld() {
@@ -966,10 +934,12 @@ function drawBayShape(s) {
 function drawBayLabel(s) {
   if (STYLE.showBayNumbers === false) return;
   const state = STATE?.spots?.[String(s.id)]?.state ?? "UNKNOWN";
-  if (String(s.id) === targetId) return;
+  const isTarget = String(s.id) === targetId;
   const [cx, cy] = Nav.centroid(s.polygon);
-  label(cx, cy, String(s.id),
-        state === "EMPTY" ? "#2f7d54" : "#4a5568", 12);
+  const colour = isTarget ? "#8a6100"
+    : state === "EMPTY" ? "#1f6b45"
+    : state === "OCCUPIED" ? "#9b2c2c" : "#6b7686";
+  label(cx, cy, String(s.id), colour, STYLE.labelSize);
 }
 
 // The destination, as a map pin - the only place on the map that gets a marker.
