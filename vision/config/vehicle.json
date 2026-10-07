@@ -1,0 +1,32 @@
+{
+  "_about": "Hero vehicle parameters. Change these to swap in a different car - no code edit. hue_ranges are HSV [lo,hi] pairs (hue wraps red); open_kernel removes specks; close_kernel joins the body's red halves across the windscreen; min_area rejects smaller red things. Re-record the front/rear template afterwards: capture_vehicle_profile.py --record --label right|left then --finalize.",
+  "hue_ranges": [
+    [
+      [
+        0,
+        90,
+        60
+      ],
+      [
+        3,
+        255,
+        255
+      ]
+    ],
+    [
+      [
+        176,
+        90,
+        60
+      ],
+      [
+        180,
+        255,
+        255
+      ]
+    ]
+  ],
+  "open_kernel": 3,
+  "close_kernel": 30,
+  "min_area": 80
+}

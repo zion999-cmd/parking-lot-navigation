@@ -1575,6 +1575,21 @@ parking-lot-navigation/
 
 平坦/无对比的 profile ⇒ 模板**弃权**（margin 0），交回 silhouette taper，不用死 0 堵兜底 ✓。
 
+**④ 根治：车在地图左右边缘、朝向上下时的 180° 跳变（已修 ✓，30 帧实测稳定）**
+
+现象：静止不跳，但车停到地图左右两侧、车头/尾朝上下（axis≈90°）时 sign 反复翻转。
+根因（逐层量化后确认）：车的红漆被**贯通整个车身的前挡风玻璃**切成前、后两大块 —— 中间只有**稀疏的侧翼/立柱红点**：
+- OPEN 稍大（5×5）就把这些**细桥接条**吃掉 ⇒ 前后两半断开；
+- 普通 CLOSE 也接不住：膨胀虽连上、**腐蚀又把细桥重新打开**（kernel 30 仍留 16px 缝）；
+- `locate_all` 按"最大连通块"取车 ⇒ 只剩后半 ⇒ centroid/heading/sign 全错。
+
+修法（三步，全部参数实测/配置化）：
+1. **`open_kernel=3`**（`config/vehicle.json`）—— 保住细桥接条；
+2. **`merge_near_components` 改成"按几何分组并画出桥接线"**：横轴向重叠≥0.4、边距 ≤2×中位块大小的块归为一车，并在相邻块间画 3px 连接线 ⇒ mask 真正连通；
+3. **弱 profile score 交回 taper 兜底**：margin < `SCORE_USE_MIN=0.2` 视为模板弃权（均匀/无图案 blob），不让一个微小非零分堵死后路。
+
+实测（车朝上、30 帧）：bbox h **68（67–70）**、heading **90.8°（86–95）**、evidence **−1.00、100% 同号**、front_heading 266–275（朝上 ✓）。
+
 **模板全部实测，不拍脑袋**（`tests/capture_vehicle_profile.py`）：
 - `--record --label right|left` —— 录一个朝向，标签是唯一朝向事实（不被旧 sign 污染）
 - `--finalize` —— 两份记录离线合成 rear→front 模板 ⇒ `config/vehicle_profile.json`（saturation + red_fraction，60+60 帧）

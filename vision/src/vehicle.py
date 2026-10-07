@@ -44,6 +44,45 @@ import numpy as np
 PROFILE_TEMPLATE_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "config", "vehicle_profile.json")
+# Car-specific but data-driven, so the hero car can be swapped without editing source. The file
+# holds the HSV target colour plus the morphology sizes; built-in values below are the fallback.
+VEHICLE_CONFIG_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "config", "vehicle.json")
+_VEHICLE_CONFIG_CACHE: Optional[dict] = "unloaded"
+
+# Fallback if config/vehicle.json is absent: the values measured for the current red car.
+_DEFAULT_VEHICLE_CONFIG = {
+    "hue_ranges": [
+        [[0, 90, 60], [3, 255, 255]],
+        [[176, 90, 60], [180, 255, 255]],
+    ],
+    "open_kernel": 5,
+    "close_kernel": 21,      # CLOSE_KERNEL, the value measured for the red car
+    "min_area": 80,          # DEFAULT_MIN_AREA
+}
+
+
+def vehicle_config(path: str = VEHICLE_CONFIG_PATH) -> dict:
+    """HSV ranges and morphology for the current hero car, loaded once.
+
+    Missing or unreadable file: the measured red defaults. Kept as a config rather than source
+    so a different coloured / sized car is a data change and a re-recorded profile, not a code
+    change.
+    """
+    global _VEHICLE_CONFIG_CACHE
+    if _VEHICLE_CONFIG_CACHE == "unloaded":
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                raw = json.load(fh)
+            cfg = dict(_DEFAULT_VEHICLE_CONFIG)
+            for key in ("hue_ranges", "open_kernel", "close_kernel", "min_area"):
+                if key in raw:
+                    cfg[key] = raw[key]
+            _VEHICLE_CONFIG_CACHE = cfg
+        except (OSError, ValueError):
+            _VEHICLE_CONFIG_CACHE = dict(_DEFAULT_VEHICLE_CONFIG)
+    return _VEHICLE_CONFIG_CACHE
 
 # Red wraps around the hue circle, so it takes two ranges. Tight on purpose: see above.
 RED_HUE_RANGES: Tuple[Tuple[Tuple[int, int, int], Tuple[int, int, int]], ...] = (
@@ -137,26 +176,122 @@ class VehiclePose:
         return out
 
 
-def red_mask(hsv: np.ndarray, close_kernel: int = CLOSE_KERNEL) -> np.ndarray:
-    """The red regions, with the car's holes filled in.
+def _ellipse(radius: int):
+    size = max(1, 2 * radius + 1)
+    return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
 
-    Filling matters: windows, the shadowed side and dark trim drop out of a colour mask and
-    leave holes inside the blob, and PCA weighs every pixel, so holes that come and go make
-    the axis jump between two orientations. Flood filling from the border and inverting keeps
-    the outline and loses the holes.
+
+def _ellipse(radius: int):
+    size = max(1, 2 * radius + 1)
+    return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
+
+
+def merge_near_components(mask: np.ndarray, gap_fraction: float = 0.9,
+                         min_piece: int = 8) -> np.ndarray:
+    """Join red pieces that belong to one car, by measured distance rather than morphology.
+
+    A normal CLOSE is the wrong tool here: the car's front and rear red halves are separated by
+    the windscreen (~24 px), tenuously joined only by sparse edge pixels, so opening disconnects
+    them and closing's erosion reopens the bridge. Instead: connected components are unioned when
+    their centroid gap is less than `gap_fraction` of the largest piece's bbox diagonal - the two
+    halves of one car (gap ~0.5 diagonal) merge, a separate red object does not.
     """
+    count, labels, stats, cent = cv2.connectedComponentsWithStats(mask, 8)
+    pieces = []
+    for i in range(1, count):
+        if int(stats[i, cv2.CC_STAT_AREA]) >= min_piece:   # keep tiny pillar strips - the bridge
+            pieces.append((int(stats[i, 0]), int(stats[i, 1]),
+                           int(stats[i, 2]), int(stats[i, 3]),
+                           float(cent[i][0]), float(cent[i][1])))
+    if not pieces:
+        return mask
+    parent = list(range(len(pieces)))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    # Two pieces belong to one car when they read as stacked, aligned body halves rather than
+    # separate objects: their across-axis extents overlap, and the gap is within ~2x a typical
+    # piece. The threshold scales with the *median* piece (not the largest) and pairs chain
+    # transitively, so a thin pillar strip in the middle connects the two big halves - this is
+    # why the OPEN must be small enough to keep that strip. A red object off to the side does
+    # not overlap across-axis and stays its own component.
+    median_size = float(np.median([max(w, h) for _, _, w, h, _, _ in pieces]))
+    for a in range(len(pieces)):
+        for b in range(a + 1, len(pieces)):
+            xa, ya, wa, ha, _, _ = pieces[a]
+            xb, yb, wb, hb, _, _ = pieces[b]
+            ox = max(0, min(xa + wa, xb + wb) - max(xa, xb))
+            gap_x = max(0, max(xa, xb) - min(xa + wa, xb + wb))
+            gap_y = max(0, max(ya, yb) - min(ya + ha, yb + hb))
+            if (ox / min(wa, wb) >= 0.4
+                    and math.hypot(gap_x, gap_y) <= 2.0 * median_size):
+                union(a, b)
+
+    out = np.zeros(mask.shape, np.uint8)
+    groups = {}
+    for i in range(len(pieces)):
+        groups.setdefault(find(i), []).append(i)
+    for ids in groups.values():
+        for i in ids:
+            x, y, w, h, _, _ = pieces[i]
+            out[y:y + h, x:x + w] |= mask[y:y + h, x:x + w]
+        # The pieces of one group are spatially disjoint (the windscreen sits between them), so
+        # just painting them leaves several components. Connect consecutive pieces with a short
+        # thick segment: order by centroid position and join each to its nearest neighbour.
+        group_pieces = [pieces[i] for i in ids]
+        remaining = list(group_pieces)
+        _,_,_,_,x,y = remaining.pop(0)
+        chain=[(x,y)]
+        while remaining:
+            x,y=chain[-1]
+            nearest=min(remaining, key=lambda p: math.hypot(p[4]-x,p[5]-y))
+            remaining.remove(nearest)
+            chain.append((nearest[4],nearest[5]))
+        for (ax,ay),(bx,by) in zip(chain,chain[1:]):
+            cv2.line(out,(int(ax),int(ay)),(int(bx),int(by)),255,3,cv2.LINE_AA)
+    return out
+
+
+def red_mask(hsv: np.ndarray, close_kernel: Optional[int] = None,
+             open_kernel: Optional[int] = None) -> np.ndarray:
+    """The car-colour regions as one connected shape, with enclosed holes filled.
+
+    The car's red paint is two large halves separated by the full-width windscreen, so a colour
+    mask does not contain one connected car and a morphological close cannot hold the bridge.
+    merge_near_components joins the halves by their measured distance (they are ~half a body
+    diagonal apart along the axis), after which flood fill closes any genuinely enclosed hole -
+    a side window - but not the windscreen, which is correctly part of the silhouette.
+
+    Colours and kernel sizes come from config/vehicle.json, so swapping the hero car is a config
+    change plus a re-recorded profile, not a source edit.
+    """
+    cfg = vehicle_config()
+    if close_kernel is None:
+        close_kernel = int(cfg["close_kernel"])
+    if open_kernel is None:
+        open_kernel = int(cfg["open_kernel"])
+
     mask = np.zeros(hsv.shape[:2], np.uint8)
-    for lo, hi in RED_HUE_RANGES:
+    for lo, hi in cfg["hue_ranges"]:
         mask |= cv2.inRange(hsv, np.array(lo, np.uint8), np.array(hi, np.uint8))
-    small = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, small)
-    if close_kernel > 1:
-        mask = cv2.morphologyEx(
-            mask, cv2.MORPH_CLOSE,
-            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_kernel, close_kernel)))
+    if open_kernel > 1:
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, _ellipse(open_kernel // 2))
+
+    mask = merge_near_components(mask, gap_fraction=0.9)
+
     holes = mask.copy()
-    cv2.floodFill(holes, np.zeros((mask.shape[0] + 2, mask.shape[1] + 2), np.uint8),
-                  (0, 0), 255)
+    cv2.floodFill(holes,
+                   np.zeros((mask.shape[0] + 2, mask.shape[1] + 2), np.uint8),
+                   (0, 0), 255)
     return mask | cv2.bitwise_not(holes)
 
 
@@ -396,6 +531,11 @@ class VehicleTracker:
         return total
 
 
+# SCORE_USE_MIN: the profile score (forward-reverse margin) must clear this to be believed.
+# Below it the match is noise (a flat/uniform blob) and the silhouette taper is the fallback.
+# Real car frames measure ~0.9, flat synthetic blobs ~0.
+SCORE_USE_MIN = 0.2
+
 _TEMPLATE_CACHE = "unloaded"
 # Measured, not chosen: the correct-vs-reverse margin on 60 frames of the real car is 0.875, so a
 # confident frame maps to evidence near 1.0 and an uncertain one scales down. Re-measured any time
@@ -625,7 +765,7 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
                 score_sign(sat_profile, redfraction_profile, template)
             # Margin ~0 is the template abstaining - leave evidence None so the silhouette
             # taper below still gets used, instead of a dead 0 that disables the fallback.
-            if abs(score_margin) > 1e-9:
+            if abs(score_margin) >= SCORE_USE_MIN:
                 evidence = float(np.clip(score_margin / MARGIN_SCALE, -1.0, 1.0))
         if evidence is None and abs(taper) >= MIN_TAPER:
             signed = taper if FRONT_IS_THE_WIDER_END else -taper
