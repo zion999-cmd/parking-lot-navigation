@@ -15,97 +15,106 @@
   screen terms without changing it, and they are the pieces the tests run in node.
 -->
 <style>
-  :root { color-scheme: dark;
-    --bg: #0b0e14; --panel: rgba(15,19,28,.82); --line: rgba(255,255,255,.08);
-    --accent: #38bdf8; --green: #34d399; --red: #fb7185; --amber: #fbbf24; --muted: #8b96ab; }
-  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  html, body { height: 100%; }
-  body { margin: 0; overflow: hidden; background: var(--bg); color: #eef2f8;
-         font: 16px/1.45 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
-  #map { position: fixed; inset: 0; width: 100%; height: 100%; touch-action: none; display: block; }
+  :root { color-scheme: light; --ground:#e9edf1; --sheet:#ffffff; --sheet-line:#e7eaef;
+          --ink:#0f141a; --sub:#5b6572; --route:#1f7aff; --target:#ff3b30; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body{ height:100%; }
+  body{ margin:0; overflow:hidden; background:var(--ground); color:var(--ink);
+        font:16px/1.4 system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; }
+  #map{ position:fixed; inset:0; width:100%; height:100%; display:block; touch-action:none; }
 
-  .hud { position: fixed; left: 0; right: 0; z-index: 2; pointer-events: none;
-         display: flex; flex-direction: column; align-items: center; padding: 18px 16px; }
-  .hud.top { top: 0; gap: 8px; }
-  .hud.bottom { bottom: 0; }
-  .pill { pointer-events: auto; background: var(--panel); border: 1px solid var(--line);
-          border-radius: 999px; padding: 8px 18px; font-size: 15px; letter-spacing: .3px;
-          backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
-  .pill b { color: var(--accent); font-weight: 700; }
-  #statusPill { color: var(--muted); }
+  /* one small hint at the top: where you are / what is happening - not a panel */
+  .topbar{ position:fixed; top:14px; left:0; right:0; display:flex; justify-content:center;
+           z-index:2; pointer-events:none; }
+  #statusPill{ background:rgba(255,255,255,.85); border:1px solid rgba(0,0,0,.06);
+               border-radius:999px; padding:7px 16px; font-size:13.5px; color:var(--sub);
+               backdrop-filter:blur(8px); box-shadow:0 2px 12px rgba(20,30,50,.10); }
+  #statusPill b{ color:var(--ink); }
 
-  .card { pointer-events: auto; width: min(440px, calc(100vw - 32px));
-          background: var(--panel); border: 1px solid var(--line); border-radius: 18px;
-          padding: 16px 20px 18px; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
-          box-shadow: 0 12px 40px rgba(0,0,0,.45); }
-  .card h1 { margin: 0 0 2px; font-size: 26px; font-weight: 700; letter-spacing: .5px; }
-  .card .sub { color: var(--muted); font-size: 14px; margin-bottom: 12px; }
-  .maneuver { display: flex; align-items: center; gap: 12px; margin: 4px 0 2px; }
-  .arrow { font-size: 30px; width: 40px; text-align: center; line-height: 1; }
-  .maneuver .txt { font-size: 19px; font-weight: 600; }
-  .meta { display: flex; gap: 22px; margin-top: 10px; }
-  .meta div { display: flex; flex-direction: column; }
-  .meta .k { font-size: 12px; color: var(--muted); }
-  .meta .v { font-size: 22px; font-weight: 700; }
-  .meta .v small { font-size: 13px; font-weight: 500; color: var(--muted); margin-left: 2px; }
-  .btns { display: flex; gap: 10px; margin-top: 14px; }
-  button { font: inherit; border: 0; border-radius: 12px; padding: 11px 16px; cursor: pointer;
-           font-weight: 600; color: #06121d; }
-  #cancelBtn { background: rgba(255,255,255,.12); color: #eef2f8; flex: 0 0 auto; }
-  #againBtn { background: var(--accent); flex: 1; }
-  .again-wrap { display: none; }
-  body.arrived .again-wrap { display: block; }
-  body.arrived .driving-wrap { display: none; }
+  /* the navigation sheet: docked to the bottom, part of the screen (never a centred modal) */
+  .sheet{ position:fixed; left:0; right:0; bottom:0; z-index:3; background:var(--sheet);
+          border-top:1px solid var(--sheet-line); border-radius:22px 22px 0 0;
+          padding:8px 20px calc(18px + env(safe-area-inset-bottom));
+          box-shadow:0 -12px 40px rgba(20,30,50,.16); }
+  .grab{ width:42px; height:4px; border-radius:2px; background:#e4e8ed; margin:4px auto 12px; }
+  .head{ display:flex; align-items:center; justify-content:space-between; }
+  .dest{ display:flex; align-items:center; gap:10px; font-size:16px; font-weight:600; }
+  .dest .pin{ width:20px; height:20px; border-radius:50% 50% 50% 0; transform:rotate(-45deg);
+              background:var(--target); position:relative; flex:0 0 auto; }
+  .dest .pin::after{ content:""; position:absolute; inset:0; margin:auto; width:8px; height:8px;
+                     border-radius:50%; background:#fff; }
+  #cancelBtn, #againBtn{ background:transparent; border:0; color:var(--sub); font:inherit;
+                         font-size:14px; font-weight:600; padding:6px 2px; cursor:pointer; }
+  #againBtn{ color:var(--route); }
+  .maneuver{ display:flex; align-items:center; gap:14px; margin:10px 0 2px; }
+  #arrow{ width:52px; height:52px; flex:0 0 auto; border-radius:14px; font-size:26px;
+          display:flex; align-items:center; justify-content:center;
+          background:color-mix(in srgb, var(--route) 13%, #fff); }
+  #maneuverTxt{ font-size:21px; font-weight:700; }
+  .stats{ display:flex; gap:26px; margin-top:12px; padding-top:12px;
+          border-top:1px solid var(--sheet-line); }
+  .k{ font-size:12px; color:var(--sub); }
+  .v{ font-size:23px; font-weight:700; margin-top:1px; }
+  .v small{ font-size:12.5px; font-weight:600; color:var(--sub); margin-left:2px; }
 
-  #toast { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%) scale(.9);
-           z-index: 3; background: var(--panel); border: 1px solid var(--line); border-radius: 16px;
-           padding: 18px 26px; font-size: 19px; opacity: 0; transition: opacity .25s, transform .25s;
-           pointer-events: none; text-align: center; backdrop-filter: blur(12px); }
-  #toast.show { opacity: 1; transform: translate(-50%,-50%) scale(1); }
-  #toast .big { font-size: 30px; margin-bottom: 4px; }
+  /* choose a bay: the same sheet, listing free bays (no map overlay, no modal) */
+  .picklist{ max-height:38vh; overflow:auto; display:flex; flex-direction:column; gap:6px; }
+  .spotrow{ display:flex; align-items:center; gap:12px; width:100%; text-align:left; font:inherit;
+            color:var(--ink); background:#f6f8fa; border:1px solid #e8ebef; border-radius:12px;
+            padding:10px 14px; cursor:pointer; }
+  .spotrow:hover{ background:#eef4ff; border-color:#c7dcff; }
+  .spotrow .num{ width:34px; height:34px; border-radius:10px; background:#fff;
+                 border:1px solid #e2e6eb; display:flex; align-items:center;
+                 justify-content:center; font-weight:700; color:var(--route); flex:0 0 auto; }
+  .spotrow .meta{ flex:1; }
+  .spotrow .st{ font-size:13px; color:var(--sub); }
+  .spotrow .go{ color:var(--route); font-weight:700; font-size:14px; }
 
-  /* The chrome follows the map: a light map inside a dark frame looks like a mistake. The three
-     styles set the same variables the panels already use, so nothing else has to know. */
-  :root[data-style="real"], :root[data-style="day"] { --bg: #f1efe9; --panel: rgba(255,255,255,.88);
-    --line: rgba(0,0,0,.12); --muted: #5f6368; --accent: #1a73e8; --green: #137333;
-    color-scheme: light; }
-  :root[data-style="real"] body, :root[data-style="day"] body { color: #202124; }
-  :root[data-style="real"] #cancelBtn, :root[data-style="day"] #cancelBtn { background: rgba(0,0,0,.08); color: #202124; }
-  :root[data-style="day"] #againBtn { color: #ffffff; }
-  :root[data-style="indoor"] { --bg: #2b2e33; --panel: rgba(24,26,30,.88);
-    --line: rgba(255,255,255,.12); --accent: #ffd60a; --green: #ffd60a; }
-  :root[data-style="indoor"] #againBtn { background: #ffd60a; color: #21232a; }
+  #toast{ position:fixed; left:50%; top:38%; transform:translate(-50%,-50%) scale(.94); z-index:4;
+          background:rgba(255,255,255,.96); border:1px solid rgba(0,0,0,.06); border-radius:18px;
+          padding:18px 26px; text-align:center; font-size:19px; font-weight:600; opacity:0;
+          transition:opacity .25s, transform .25s; pointer-events:none;
+          box-shadow:0 12px 40px rgba(20,30,50,.20); }
+  #toast.show{ opacity:1; transform:translate(-50%,-50%) scale(1); }
+  #toast .big{ font-size:30px; margin-bottom:4px; }
+
+  .hidden{ display:none !important; }
+  body.navigating #pickSheet, body.arrived #pickSheet{ display:none; }
+  body.idle #navSheet{ display:none; }
 </style>
 
 <canvas id="map"></canvas>
 
-<div class="hud top">
-  <div class="pill" id="statusPill">正在连接…</div>
-</div>
+<div class="topbar"><div id="statusPill">正在连接…</div></div>
 
-<div class="hud bottom">
-  <div class="card" id="card">
-    <div class="driving-wrap">
-      <h1 id="title">停车场导航</h1>
-      <div class="sub" id="subtitle">点一个<b style="color:var(--green)">绿色空车位</b>，开始导航</div>
-      <div class="maneuver">
-        <div class="arrow" id="arrow">•</div>
-        <div class="txt" id="maneuverTxt">请选择目标车位</div>
-      </div>
-      <div class="meta">
-        <div><span class="k">剩余</span><span class="v" id="distV">–</span></div>
-        <div><span class="k">目标</span><span class="v" id="targetV">–</span></div>
-      </div>
-      <div class="btns">
-        <button id="cancelBtn">结束导航</button>
-      </div>
-    </div>
-    <div class="again-wrap">
-      <div class="btns" style="margin-top:0">
-        <button id="againBtn">再选一个车位</button>
-      </div>
+<!-- navigating: destination, next maneuver, distance -->
+<div class="sheet" id="navSheet">
+  <div class="grab"></div>
+  <div class="head">
+    <div class="dest"><span class="pin"></span>前往 <span id="targetV">–</span> 号车位</div>
+    <button id="cancelBtn">结束导航</button>
+  </div>
+  <div class="maneuver">
+    <div id="arrow">•</div>
+    <div>
+      <div id="maneuverTxt">请选择目标车位</div>
+      <div class="k" id="subtitle">–</div>
     </div>
   </div>
+  <div class="stats">
+    <div><div class="k">剩余距离</div><div class="v" id="distV">–</div></div>
+    <div><div class="k">当前状态</div><div class="v" id="title" style="font-size:17px;line-height:1.7">导航中</div></div>
+  </div>
+</div>
+
+<!-- choosing: the same sheet, listing free bays -->
+<div class="sheet" id="pickSheet">
+  <div class="grab"></div>
+  <div class="head" style="margin-bottom:10px">
+    <div class="dest" style="font-size:17px">选择一个空车位</div>
+    <button id="againBtn" class="hidden">结束导航</button>
+  </div>
+  <div class="picklist" id="pickList"></div>
 </div>
 
 <div id="toast"><div class="big">✅</div><div id="toastTxt"></div></div>
@@ -466,6 +475,7 @@ function resize() {
 }
 window.addEventListener("resize", resize);
 resize();
+document.body.classList.add("idle");   // start on the choose-a-bay sheet
 
 async function getJSON(url) {
   try {
@@ -604,41 +614,77 @@ function routeSituation(v, routeDoc) {
   return { status: "重新规划中…", icon: "•", text: "正在重新规划路线…" };
 }
 
+// Which sheet is on screen, and the list of bays to choose from (rebuilt on every state change so
+// a bay that just filled disappears from it).
+function refreshSheets() {
+  const list = el("pickList");
+  if (!list) return;
+  if (PHASE === "IDLE") {
+    document.body.classList.add("idle");
+    document.body.classList.remove("navigating");
+    const free = (MAP?.spots ?? [])
+      .filter(s => (STATE?.spots?.[String(s.id)]?.state) === "EMPTY");
+    if (list.dataset.sig !== free.map(s => s.id).join(",")) {
+      list.dataset.sig = free.map(s => s.id).join(",");
+      list.innerHTML = "";
+      if (!free.length)
+        list.innerHTML = '<div style="color:var(--sub);padding:10px 2px">暂无空闲车位</div>';
+      for (const s of free) {
+        const row = document.createElement("button");
+        row.className = "spotrow";
+        row.innerHTML = `<span class="num">${s.id}</span>
+          <span class="meta"><div>车位 ${s.id}</div><div class="st">空闲 · 可导航</div></span>
+          <span class="go">开始 →</span>`;
+        row.onclick = () => startNavigation(s.id);
+        list.appendChild(row);
+      }
+    }
+  } else {
+    document.body.classList.remove("idle");
+    if (PHASE === "NAVIGATING") document.body.classList.add("navigating");
+  }
+}
+
 function updateHud() {
   const v = vehicleOf();
+  refreshSheets();
 
   if (PHASE === "IDLE") {
-    el("statusPill").innerHTML = "停车场导航";
-    el("title").textContent = "选择一个空车位";
-    el("subtitle").innerHTML = '点一个<b style="color:var(--green)">绿色空车位</b>，开始导航';
+    el("statusPill").textContent = "选择一个空车位开始导航";
     el("arrow").textContent = "•";
     el("maneuverTxt").textContent = "请选择目标车位";
+    el("subtitle").textContent = "点下面列表里的空车位";
     el("distV").innerHTML = "–";
-    el("targetV").innerHTML = "–";
+    el("targetV").textContent = "–";
+    el("title").textContent = "待命";
     return;
   }
 
   if (PHASE === "ARRIVED") {
     el("statusPill").innerHTML = `已到达 <b>${targetId}</b> 号车位`;
+    el("arrow").textContent = "🏁";
+    el("maneuverTxt").textContent = "已到达";
+    el("subtitle").textContent = `${targetId} 号车位`;
+    el("distV").innerHTML = '0<small>m</small>';
+    el("targetV").textContent = targetId;
     el("title").textContent = "已到达";
-    el("arrow").textContent = "✅";
-    el("maneuverTxt").textContent = `${targetId} 号车位`;
-    el("distV").innerHTML = "0<small>m</small>";
-    el("targetV").innerHTML = `${targetId}<small>号</small>`;
     return;
   }
 
   // NAVIGATING. The planner may refuse on a given poll - the bay filled, the car left view, no
   // path right now - but none of that is a technical error to a driver: it is either "waiting for
-  // a fix" or "working out a new route". routeSituation maps the planner's codes to those two.
-  const hidden = !v || v.visible === false;
+  // a fix" or "working out a new route".
   const sit = routeSituation(v, ROUTE);
   el("statusPill").textContent = sit.status;
   el("arrow").textContent = sit.icon;
   el("maneuverTxt").textContent = sit.text;
+  const hidden = !v || v.visible === false;
   const rem = (hidden || !ROUTE?.ok) ? null : Nav.remainingPx(v, ROUTE, NODES);
-  el("distV").innerHTML = rem == null ? "–" : Nav.formatMetres(rem).replace(" m", "<small>m</small>");
-  el("targetV").innerHTML = `${targetId}<small>号</small>`;
+  el("distV").innerHTML = rem == null ? "–"
+    : Nav.formatMetres(rem).replace(" m", "<small>m</small>");
+  el("subtitle").textContent = ROUTE?.ok ? "跟随蓝色路线" : "正在重新规划路线…";
+  el("targetV").textContent = targetId;
+  el("title").textContent = sit.status.replace("…", "");
 }
 
 // ============================================================ render
@@ -693,144 +739,33 @@ function driveScale() {
 }
 
 // ============================================================ the map style
-// A navigation map rather than a diagram. The rules that make one read as the other, in the order
-// they matter: the ground is flat and quiet, roads are *lighter* than the ground and carry a
-// casing so they keep an edge at any angle, the route is the brightest thing on screen, bays
-// become texture instead of colour once you are driving, only your destination has a marker, and
-// every label sits on a rounded plate so it stays legible over whatever is under it.
-// Three of them, because "like a navigation app" is not one thing: the night view is what a
-// phone shows after dark, the day view is the beige-on-white that a map shows at noon, and the
-// indoor view is what an underground car park looks like - concrete, white markings, no beige.
-// Pick with ?style=day or ?style=indoor; the default is night.
-//
-// Every colour a drawing function needs is in here, including the label colours, so a style is
-// one object and nothing has to be changed in two places to try one.
-const STYLES = {
-  // Measured off ~/Desktop/nv.png (721x675), the style that was asked for: a white floor, the
-  // aisle as a wide grey surface (grey covers 23%, in large connected regions - not a thin road),
-  // the bays cyan when free (11.6%) and coral when taken (6.2%), and green POI markers (1.5%).
-  // Kept as exact samples rather than re-derived: these are measurements.
-  real: {
-    showBayNumbers: false,   // per-spot numbers are backend labels; digits read as 半圆 on the map
-    roadSurfaceWidth: 68,    // ring corridor: half-width ~34 between the bay rows
-    roadStubWidth: 44,       // entrance stub (short branch)
-    ground: "#ffffff",
-    lotEdge: "rgba(0,0,0,.10)",
-    roadCasing: "#e6e6e6",
-    roadFill: "#a7a7a7",
-    roadWidth: 20,
-    routeCasing: "#ffffff",
-    routeFill: "#2f7bf0",
-    routeWidth: 9,
-    faintEdge: "rgba(0,0,0,.10)",
-    bayEdge: "rgba(0,0,0,.22)",
-    freeEdge: "#1f9cb8",
-    freeFill: "rgba(58,197,226,.42)",
-    freeText: "#0b6c84",
-    takenEdge: "#c85a5d",
-    takenFill: "rgba(221,106,109,.38)",
-    takenText: "#a04347",
-    unknownText: "#777",
-    plate: "none",          // no white disc - it read as a semicircle per spot
-    textHalo: "rgba(255,255,255,.85)",
-    text: "#2a2d33",
-    muted: "#5f6368",
-    target: "#2f7bf0",
-    targetDot: "#ffffff",
-    entrance: "#34a853",
-    entranceText: "#137333",
-    car: "#ef4444",
-    carRing: "#ffffff",
-  },
-  night: {
-    ground: "#10151d",
-    lotEdge: "rgba(255,255,255,.07)",
-    roadCasing: "#39434f",
-    roadFill: "#2a3340",
-    roadWidth: 18,
-    routeCasing: "#0d2a4d",
-    routeFill: "#3fa9ff",
-    routeWidth: 10,
-    faintEdge: "rgba(255,255,255,.07)",
-    bayEdge: "rgba(255,255,255,.16)",
-    freeEdge: "rgba(74,222,128,.85)",
-    freeFill: "rgba(74,222,128,.12)",
-    freeText: "#b9f6d0",
-    takenEdge: "rgba(255,255,255,.16)",
-    takenFill: "rgba(255,255,255,.05)",
-    takenText: "#c8cedb",
-    unknownText: "#98a3b4",
-    plate: "rgba(9,13,19,.82)",
-    text: "#eaf0f8",
-    muted: "#98a3b4",
-    target: "#3fa9ff",
-    targetDot: "#0b1220",
-    entrance: "#8fd3ff",
-    entranceText: "#cfe6ff",
-    car: "#ef4444",
-    carRing: "#ffffff",
-  },
-  day: {
-    ground: "#f1efe9",
-    lotEdge: "rgba(0,0,0,.10)",
-    roadCasing: "#dedbd2",
-    roadFill: "#ffffff",
-    roadWidth: 18,
-    routeCasing: "#1a5fd0",
-    routeFill: "#4285f4",
-    routeWidth: 10,
-    faintEdge: "rgba(0,0,0,.07)",
-    bayEdge: "rgba(0,0,0,.16)",
-    freeEdge: "#137333",
-    freeFill: "rgba(19,115,51,.10)",
-    freeText: "#137333",
-    takenEdge: "rgba(0,0,0,.16)",
-    takenFill: "rgba(0,0,0,.05)",
-    takenText: "#5f6368",
-    unknownText: "#80868b",
-    plate: "rgba(255,255,255,.92)",
-    text: "#202124",
-    muted: "#5f6368",
-    target: "#1a73e8",
-    targetDot: "#ffffff",
-    entrance: "#1a73e8",
-    entranceText: "#1a73e8",
-    car: "#e8453c",
-    carRing: "#ffffff",
-  },
-  indoor: {
-    ground: "#33363b",
-    lotEdge: "rgba(255,255,255,.08)",
-    roadCasing: "#4b5057",
-    roadFill: "#3f444b",
-    roadWidth: 20,
-    routeCasing: "#12365e",
-    routeFill: "#4aa8ff",
-    routeWidth: 11,
-    faintEdge: "rgba(255,255,255,.10)",
-    bayEdge: "rgba(255,255,255,.32)",
-    freeEdge: "rgba(255,214,10,.85)",
-    freeFill: "rgba(255,214,10,.10)",
-    freeText: "#ffd60a",
-    takenEdge: "rgba(255,255,255,.18)",
-    takenFill: "rgba(255,255,255,.06)",
-    takenText: "#d7dbe2",
-    unknownText: "#a9aeb6",
-    plate: "rgba(18,20,24,.85)",
-    text: "#f2f4f8",
-    muted: "#a9aeb6",
-    target: "#ffd60a",
-    targetDot: "#2b2f34",
-    entrance: "#c9d1d9",
-    entranceText: "#e7ebf0",
-    car: "#ef4444",
-    carRing: "#ffffff",
-  },
+// A navigation map, not a diagram. The rules, in the order they matter: the ground is flat and
+// quiet; the aisle is the *drivable surface*, drawn as a laid-out corridor rather than a grey
+// slab (white fill, soft edge, bays sitting on the ground beside it); the route is the brightest
+// thing on screen; bay numbers are not drawn while driving - a number per bay is a data label,
+// not navigation - and only the destination carries a marker.
+const STYLE = {
+  ground: "#e9edf1",
+  lotEdge: "rgba(15,20,26,.10)",
+  aisleFill: "#ffffff",
+  aisleEdge: "#dfe4ea",
+  aisleWidth: 60,          // world px: the real corridor half-width x2, between the bay rows
+  stubWidth: 44,           // world px: the entrance branch
+  bayFree: "#e7ece6",
+  bayTaken: "#e6e9ef",
+  bayUnknown: "#e8ebef",
+  bayEdge: "#d3dce5",
+  routeCasing: "rgba(255,255,255,.92)",
+  routeFill: "#1f7aff",
+  routeWidth: 7,           // screen px
+  target: "#ff3b30",
+  carBody: ["#ff6a5e", "#e0392f"],
+  carGlass: "rgba(255,255,255,.85)",
+  labelText: "#33404f",
+  plate: "rgba(255,255,255,.85)",
+  start: "#8aa0b4",
+  showBayNumbers: false,   // digits read as stray glyphs on a nav map; list shows them instead
 };
-const styleName = new URLSearchParams(location.search).get("style") || "real";
-const STYLE = STYLES[styleName] ?? STYLES.night;
-// The page chrome follows the map, or a light map would sit inside a dark frame.
-document.documentElement.dataset.style = styleName;
 
 function drawWorld() {
   ctx.clearRect(0, 0, viewW0, viewH0);
@@ -838,17 +773,15 @@ function drawWorld() {
 
   ctx.save();
   Nav.applyCamera(ctx, viewW0, viewH0, cam, cam.rot);
-  ctx.lineCap = "round"; ctx.lineJoin = "round";
+  ctx.lineJoin = "round"; ctx.lineCap = "round";
 
   drawGround();
+  drawRoads();                       // the aisle is the surface; bays sit beside it
   for (const s of MAP.spots) drawBayShape(s);
-  // Road after the bays: its band is authoritative and covers the small case where a spot
-  // polygon intrudes into the corridor, so the aisle always reads as aisle.
-  drawRoads();
   drawRoute();
-  drawEntrances();
-  drawTarget();
   for (const s of MAP.spots) drawBayLabel(s);
+  drawTarget();
+  drawEntrances();
   if (car.visible && car.x != null) drawCar(car.x, car.y, car.h ?? 0);
 
   ctx.restore();
@@ -861,67 +794,47 @@ function drawGround() {
   const h = MAP.coordinate_system?.height ?? 600;
   ctx.fillStyle = STYLE.ground;
   ctx.fillRect(0, 0, w, h);
-  // The edge of the lot, so the map does not bleed into nothing at the boundary.
   ctx.strokeStyle = STYLE.lotEdge;
   ctx.lineWidth = 2 / cam.scale;
   ctx.strokeRect(1, 1, w - 2, h - 2);
 }
 
-// Roads: one casing and one fill per chain, both the full length of the road. No centre dashes -
-// they are the thing that made a lane look like a row of pieces, and a real map does not draw them
-// on an aisle either.
+// The aisle: one closed corridor per road loop, plus the entrance branch. Filled in world space
+// (it is real geography, so it must scale with the map), with a screen-constant rim so the edge
+// stays crisp at any zoom.
 function drawRoads() {
   const trace = (pts, closed) => {
     ctx.beginPath();
     pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
     if (closed) ctx.closePath();
   };
-  // Coordinates of every node that belongs to a loop, so open runs already covered by a loop
-  // (the ring edges) are not stroked a second time.
+  const rim = 1.6 / cam.scale;
+  const band = (pts, closed, half) => {
+    trace(pts, closed);
+    ctx.strokeStyle = STYLE.aisleEdge; ctx.lineWidth = half * 2 + rim; ctx.stroke();
+    trace(pts, closed);
+    ctx.strokeStyle = STYLE.aisleFill; ctx.lineWidth = half * 2; ctx.stroke();
+  };
   const loopPoints = new Set();
   for (const cyc of LOOPS)
     for (const id of cyc) {
       const n = NODES[id];
       loopPoints.add(Math.round(n.x) + "," + Math.round(n.y));
     }
-
-  // 1) The ring, one closed band per loop: no end caps, no per-edge seams.
   for (const cyc of LOOPS) {
     const pts = cyc.map(id => [NODES[id].x, NODES[id].y]);
-    if (pts.length < 3) continue;
-    if (STYLE.roadSurfaceWidth) {
-      // No light casing (it read as a white outline): one solid authoritative band.
-      trace(pts, true);
-      ctx.strokeStyle = STYLE.roadFill;
-      ctx.lineWidth = STYLE.roadSurfaceWidth; ctx.stroke();
-    } else {
-      trace(pts, true);
-      ctx.strokeStyle = STYLE.roadCasing;
-      ctx.lineWidth = (STYLE.roadWidth + 3) / cam.scale; ctx.stroke();
-      trace(pts, true);
-      ctx.strokeStyle = STYLE.roadFill;
-      ctx.lineWidth = STYLE.roadWidth / cam.scale; ctx.stroke();
-    }
+    if (pts.length >= 3) band(pts, true, STYLE.aisleWidth / 2);
   }
-
-  // 2) Open runs not on a loop (the entrance stub): solid, no light rim.
   for (const chain of CHAINS) {
     if (chain.length < 2) continue;
     const onLoop = chain.every(p => loopPoints.has(Math.round(p[0]) + "," + Math.round(p[1])));
     if (onLoop) continue;
-    trace(chain, false);
-    ctx.strokeStyle = STYLE.roadFill;
-    ctx.lineWidth = (STYLE.roadStubWidth ?? STYLE.roadWidth) /
-                    (STYLE.roadSurfaceWidth ? 1 : cam.scale);
-    ctx.stroke();
+    band(chain, false, STYLE.stubWidth / 2);
   }
 }
 
-
-
-// The route is drawn last of the lines so nothing crosses over it, with a dark casing under a
-// bright fill: that is what makes it readable where it passes a junction, and it is the one thing
-// on the map the driver has to be able to follow without looking for it.
+// The route is drawn last of the lines so nothing crosses over it: white casing under a bright
+// fill, screen-constant width, the one thing a driver must be able to follow without looking.
 function drawRoute() {
   if (!ROUTE?.ok) return;
   const { points } = Nav.routePoints(ROUTE, NODES);
@@ -930,12 +843,14 @@ function drawRoute() {
     ctx.beginPath();
     points.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
   };
-  path(); ctx.strokeStyle = STYLE.routeCasing; ctx.lineWidth = (STYLE.routeWidth + 5) / cam.scale; ctx.stroke();
-  path(); ctx.strokeStyle = STYLE.routeFill; ctx.lineWidth = STYLE.routeWidth / cam.scale; ctx.stroke();
+  path(); ctx.strokeStyle = STYLE.routeCasing;
+  ctx.lineWidth = (STYLE.routeWidth + 5) / cam.scale; ctx.stroke();
+  path(); ctx.strokeStyle = STYLE.routeFill;
+  ctx.lineWidth = STYLE.routeWidth / cam.scale; ctx.stroke();
 }
 
-// Bays. While driving they are texture - a hairline each - because the free ones are no longer the
-// question; choosing one, they carry their state, because that is the question.
+// Bays. Paper fills with a faint state tint: they are the background the route runs between, not
+// competing colours. While driving they are only a hairline.
 function drawBayShape(s) {
   const state = STATE?.spots?.[String(s.id)]?.state ?? "UNKNOWN";
   const isTarget = String(s.id) === targetId;
@@ -946,98 +861,74 @@ function drawBayShape(s) {
     ctx.closePath();
   };
   if (isTarget) {
-    poly(); ctx.fillStyle = "rgba(47,123,240,.16)"; ctx.fill();
-    poly(); ctx.strokeStyle = STYLE.target; ctx.lineWidth = 3 / cam.scale; ctx.stroke();
+    poly(); ctx.fillStyle = "rgba(31,122,255,.10)"; ctx.fill();
+    poly(); ctx.strokeStyle = STYLE.routeFill; ctx.lineWidth = 2.2 / cam.scale; ctx.stroke();
     return;
   }
   if (drive()) {
-    poly(); ctx.strokeStyle = STYLE.faintEdge; ctx.lineWidth = 1.5 / cam.scale; ctx.stroke();
+    poly(); ctx.strokeStyle = "rgba(15,20,26,.10)"; ctx.lineWidth = 1.2 / cam.scale; ctx.stroke();
     return;
   }
-  if (state === "EMPTY") {
-    poly(); ctx.fillStyle = STYLE.freeFill; ctx.fill();
-    poly(); ctx.strokeStyle = STYLE.freeEdge; ctx.lineWidth = 2.2 / cam.scale; ctx.stroke();
-  } else if (state === "OCCUPIED") {
-    poly(); ctx.fillStyle = STYLE.takenFill; ctx.fill();
-    poly(); ctx.strokeStyle = STYLE.takenEdge; ctx.lineWidth = 1.6 / cam.scale; ctx.stroke();
-  } else {
-    poly(); ctx.strokeStyle = STYLE.faintEdge; ctx.lineWidth = 1.5 / cam.scale; ctx.stroke();
-  }
+  poly();
+  ctx.fillStyle = state === "EMPTY" ? STYLE.bayFree
+    : state === "OCCUPIED" ? STYLE.bayTaken : STYLE.bayUnknown;
+  ctx.fill();
+  poly(); ctx.strokeStyle = STYLE.bayEdge; ctx.lineWidth = 1.3 / cam.scale; ctx.stroke();
 }
 
+// Numbers are for choosing a bay, not for driving. The pick list carries them; the map does not.
 function drawBayLabel(s) {
+  if (STYLE.showBayNumbers === false) return;
   const state = STATE?.spots?.[String(s.id)]?.state ?? "UNKNOWN";
-  const isTarget = String(s.id) === targetId;
+  if (String(s.id) === targetId) return;
   const [cx, cy] = Nav.centroid(s.polygon);
-  if (STYLE.showBayNumbers === false) return;  // navigation style: no per-bay number
-  if (isTarget) return;                       // the marker above carries the number
-  if (drive()) {
-    // Nothing but the road you are on and where you are going: that is the whole point of a
-    // navigation view, and forty numbers competing with the route is how it stops being one.
-    return;
-  }
-  const colour = state === "EMPTY" ? STYLE.freeText
-    : state === "OCCUPIED" ? STYLE.takenText : STYLE.unknownText;
-  label(cx, cy, String(s.id), colour, 12);
+  label(cx, cy, String(s.id),
+        state === "EMPTY" ? "#2f7d54" : "#4a5568", 12);
 }
 
-// A destination pin, the way a map marks where you are going - not another outlined polygon for
-// the driver to find among forty of them.
+// The destination, as a map pin - the only place on the map that gets a marker.
 function drawTarget() {
   if (targetId == null) return;
   const s = (MAP.spots ?? []).find(sp => String(sp.id) === targetId);
   if (!s) return;
   const [x, y] = Nav.centroid(s.polygon);
-  const r = 10 / cam.scale;            // screen px, undone by the zoom like every other marker
+  const r = 10 / cam.scale;
   ctx.save();
   ctx.translate(x, y);
-  ctx.shadowColor = "rgba(0,0,0,.5)"; ctx.shadowBlur = 6; ctx.shadowOffsetY = 2;
-  ctx.beginPath();                            // teardrop: a circle with a point at the bottom
-  ctx.moveTo(0, r * 1.9);
-  ctx.quadraticCurveTo(-r, r * 0.5, -r, 0);
+  ctx.shadowColor = "rgba(0,0,0,.30)"; ctx.shadowBlur = 8; ctx.shadowOffsetY = 3;
+  ctx.beginPath();
+  ctx.moveTo(0, r * 1.6);
+  ctx.quadraticCurveTo(-r, r * 0.4, -r, 0);
   ctx.arc(0, 0, r, Math.PI, 0);
-  ctx.quadraticCurveTo(r, r * 0.5, 0, r * 1.9);
+  ctx.quadraticCurveTo(r, r * 0.4, 0, r * 1.6);
   ctx.closePath();
   ctx.fillStyle = STYLE.target; ctx.fill();
-  ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
-  ctx.strokeStyle = STYLE.carRing; ctx.lineWidth = 2; ctx.stroke();
-  ctx.beginPath(); ctx.arc(0, 0, 3.6 / cam.scale, 0, Math.PI * 2);
-  ctx.fillStyle = STYLE.targetDot; ctx.fill();
+  ctx.shadowColor = "transparent";
+  ctx.beginPath(); ctx.arc(0, 0, r * 0.36, 0, Math.PI * 2);
+  ctx.fillStyle = "#fff"; ctx.fill();
   ctx.restore();
-  label(x, y - r * 3.4, String(targetId), STYLE.text, 13);
 }
 
+// The way in, as a neutral start dot - not a green sign with a caption.
 function drawEntrances() {
   for (const g of MAP.entrances ?? []) {
     const n = NODES[g.node];
     if (!n) continue;
     ctx.beginPath(); ctx.arc(n.x, n.y, 7 / cam.scale, 0, Math.PI * 2);
-    ctx.fillStyle = STYLE.entrance; ctx.fill();
-    ctx.strokeStyle = STYLE.plate; ctx.lineWidth = 2 / cam.scale; ctx.stroke();
-    label(n.x, n.y - 18 / cam.scale, "入口", STYLE.entranceText, 12);
+    ctx.fillStyle = STYLE.start; ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,.9)"; ctx.lineWidth = 2 / cam.scale; ctx.stroke();
   }
 }
 
 function label(x, y, text, color, size) {
-  // Bay numbers stay level while the map turns: a rotated label is unreadable, and a bay number
-  // nobody can read is worse than no bay number. On a rounded plate, the way a map draws a name
-  // over ground that could be anything.
+  // Bay numbers stay level while the map turns: a rotated label is unreadable. Screen-sized, on a
+  // rounded plate so it stays legible over whatever is under it.
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(-(cam.rot || 0));
   const fsPx = (size || 12) / cam.scale;
   ctx.font = `600 ${fsPx}px system-ui, sans-serif`;
   ctx.textAlign = "center"; ctx.textBaseline = "middle";
-  if (STYLE.plate === "none") {
-    // Just the number with a thin halo - no white plate (it read as a semicircle on each spot).
-    ctx.lineWidth = 2.4 / cam.scale
-    ctx.strokeStyle = STYLE.textHalo ?? "rgba(255,255,255,.8)"
-    ctx.strokeText(text, 0, 0)
-    ctx.fillStyle = color
-    ctx.fillText(text, 0, 0)
-    ctx.restore()
-    return
-  }
   const w = ctx.measureText(text).width + 12 / cam.scale, h = fsPx + 8 / cam.scale;
   ctx.beginPath();
   if (ctx.roundRect) ctx.roundRect(-w / 2, -h / 2, w, h, 5 / cam.scale);
@@ -1047,35 +938,35 @@ function label(x, y, text, color, size) {
   ctx.restore();
 }
 
-// The car, as a navigation arrow: a rounded chevron with a white ring and a soft shadow, which is
-// what a driver's eye is trained to follow. Kept red, because on this lot the red car is the hero
-// and a blue arrow would be a different car.
+// The vehicle: a red top-down car, the visual centre of the screen. Screen-constant size (a
+// counter-scale undoes the zoom), nose on the heading, so it reads as "my car" not as an arrow.
 function drawCar(x, y, heading) {
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(heading * Math.PI / 180);
-  // The whole marker is screen px, not the 15 world units it was drawn in - at driving zoom that
-  // came out at 56 px. Scaling the shape by the inverse zoom keeps the arrow the same size and
-  // every width inside it (ring, windscreen) reads on screen as written.
   ctx.scale(1 / cam.scale, 1 / cam.scale);
-  ctx.shadowColor = "rgba(0,0,0,.35)"; ctx.shadowBlur = 6; ctx.shadowOffsetY = 2;
-
-  ctx.beginPath();                            // chevron, nose up the local -y axis
-  ctx.moveTo(0, -15);
-  ctx.quadraticCurveTo(8, -8, 9, 2);
-  ctx.quadraticCurveTo(9, 11, 5, 13);
-  ctx.lineTo(0, 10);
-  ctx.lineTo(-5, 13);
-  ctx.quadraticCurveTo(-9, 11, -9, 2);
-  ctx.quadraticCurveTo(-8, -8, 0, -15);
-  ctx.closePath();
-  ctx.fillStyle = STYLE.car; ctx.fill();
-  ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
-  ctx.strokeStyle = STYLE.carRing; ctx.lineWidth = 2.6; ctx.stroke();
-  // a windscreen line near the nose, so the front reads even in silhouette
-  ctx.beginPath(); ctx.moveTo(-4, -5); ctx.lineTo(0, -9); ctx.lineTo(4, -5);
-  ctx.strokeStyle = "rgba(255,255,255,.9)"; ctx.lineWidth = 1.6; ctx.stroke();
+  ctx.shadowColor = "rgba(0,0,0,.35)"; ctx.shadowBlur = 9; ctx.shadowOffsetY = 2;
+  const bw = 17, bl = 32, r = 7;
+  roundRectPath(-bw / 2, -bl / 2, bw, bl, r);
+  const g = ctx.createLinearGradient(0, -bl / 2, 0, bl / 2);
+  g.addColorStop(0, STYLE.carBody[0]);
+  g.addColorStop(1, STYLE.carBody[1]);
+  ctx.fillStyle = g; ctx.fill();
+  ctx.shadowColor = "transparent";
+  ctx.fillStyle = STYLE.carGlass;
+  roundRectPath(-bw / 2 + 3, -bl / 2 + 8, bw - 6, 5, 2); ctx.fill();
+  roundRectPath(-bw / 2 + 3, bl / 2 - 10, bw - 6, 4, 2); ctx.fill();
   ctx.restore();
+}
+
+function roundRectPath(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
 }
 
 // ============================================================ animation
