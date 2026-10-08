@@ -79,6 +79,24 @@ def describe(route: Route) -> str:
             f"{len(route.nodes)} node(s), {route.distance:.0f}px")
 
 
+NAVIGATION_ENDED = "navigation-ended"
+
+
+def navigation_ended(reason: str = "nothing is being navigated to") -> Route:
+    """The document to write when a navigation stops, so that "no target" is stated rather than
+    implied by a document that is simply old.
+
+    Why this exists: a route document is otherwise only ever written, never removed, so
+    out/route.json keeps naming the last target forever. The bay lights read it to decide which
+    pixel is yellow, so without this a finished navigation leaves one pixel yellow until someone
+    plans the next route - a state the page has already left, being visible only on the strip.
+
+    ok=False is the same shape a refusal already uses, so a consumer that understands the contract
+    needs no new case; it only has to check ok before reading target_spot.
+    """
+    return Route("", False, NAVIGATION_ENDED, reason)
+
+
 # ---------------------------------------------------------------------------
 # Reading the two documents
 # ---------------------------------------------------------------------------

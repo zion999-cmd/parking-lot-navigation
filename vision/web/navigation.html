@@ -598,6 +598,15 @@ function cancelNavigation() {
   PHASE = "IDLE"; targetId = null; ROUTE = null;
   document.body.classList.remove("arrived");
   updateHud();
+  clearServerTarget();
+}
+
+// The server writes out/route.json on every plan and never removes it, so the bay lights - which
+// read it to decide which pixel is yellow - would keep showing this target after the page has
+// moved on. Saying "no target" is the only way they can know. Fire and forget: a failed clear
+// costs one stale yellow pixel, not a broken page.
+function clearServerTarget() {
+  fetch(`/api/route?clear=1&t=${Date.now()}`).catch(() => {});
 }
 
 // ============================================================ arrival
@@ -609,6 +618,9 @@ function checkArrival() {
     PHASE = "ARRIVED";
     document.body.classList.add("arrived");
     showArrived(targetId);
+    // The car is at the bay, so the light stops being "come here": the occupancy detector takes
+    // over from here and will show it red once the car is parked in it.
+    clearServerTarget();
   }
 }
 

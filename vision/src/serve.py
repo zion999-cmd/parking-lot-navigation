@@ -6,10 +6,15 @@
 It serves the static files - the page and the contract documents - and exactly one endpoint:
 
     GET /api/route?spot=38      ->  the route document, as src/plan.py writes it
+    GET /api/route?clear=1      ->  the same document, saying there is no target any more
 
 That is the whole of it. The handler reads the two contract documents, calls route.plan() and
 writes out/route.json, the same call src/plan.py makes. No vision, no bay selection, no state
 logic: the refusals come from the planner with its own codes, unchanged.
+
+The clear form exists because a route document is only ever written, never removed: the bay
+lights read out/route.json to decide which pixel is yellow, so a navigation that simply stops
+would otherwise leave a target lit forever. The page calls it when it cancels or arrives.
 
 The HTTP status stays 200 when the route is refused, deliberately. The document says whether
 there is a route, through ok/code/reason; wrapping that in a status code would give two places to
@@ -75,7 +80,8 @@ class Handler(SimpleHTTPRequestHandler):
                 b" &nbsp;\xe2\x80\x94\xe5\xb1\x95\xe7\xa4\xba\xe7\x94\xa8\xef\xbc\x9a\xe5\x88\x86\xe6\x9e\x90\xe7\x94\xbb\xe9\x9d\xa2 + \xe7\x82\xb9\xe8\xbd\xa6\xe4\xbd\x8d\xe8\xa7\x84\xe5\x88\x92</p>"
                 b"<p><a style=color:#66d9ff href=\"/web/index.html\">index.html</a>"
                 b" &nbsp;\xe2\x80\x94\xe5\xb7\xa5\xe7\xa8\x8b\xe7\x94\xa8\xef\xbc\x9a\xe5\x9c\xb0\xe5\x9b\xbe\xe8\xb7\xaf\xe7\xba\xbf\xe8\xb0\x83\xe8\xaf\x95</p>"
-                b"<p style=color:#93a0b4>GET /api/route?spot=&lt;bay id&gt;</p></body>")
+                b"<p style=color:#93a0b4>GET /api/route?spot=&lt;bay id&gt;</p>"
+        b"<p style=color:#93a0b4>GET /api/route?clear=1 &nbsp;\xe2\x80\x94\xe5\x81\x9c\xe6\xad\xa2\xe5\xaf\xbc\xe8\x88\xaa\xef\xbc\x8c\xe9\xbb\x84\xe7\x81\xaf\xe8\xb7\x9f\xe7\x9d\x80\xe7\x81\xad</p></body>")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -83,6 +89,16 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def _api_route(self, query: dict) -> None:
+        # "No target" has to be sayable. out/route.json is otherwise write-only, and the bay
+        # lights would show the last target forever after a navigation ends.
+        if (query.get("clear") or [""])[0] in ("1", "true", "yes"):
+            document = route.navigation_ended().as_document()
+            try:
+                contract.write_json(self.route_path, document)
+            except OSError as exc:
+                sys.stderr.write(f"  could not write {self.route_path}: {exc}\n")
+            return self._json(200, document)
+
         spot = (query.get("spot") or [""])[0].strip()
         if not spot:
             return self._json(400, {"error": "no spot named",
@@ -117,20 +133,25 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 def serve(port: int = 8010, root: str = ROOT, map_path: str = None,
-          state_path: str = None, route_path: str = None) -> ThreadingHTTPServer:
+          state_path: str = None, route_path: str = None,
+          host: str = "127.0.0.1") -> ThreadingHTTPServer:
     """Build the server without starting it, so a test can drive it on a random port."""
     handler = type("BoundHandler", (Handler,), {
         "map_path": map_path or Handler.map_path,
         "state_path": state_path or Handler.state_path,
         "route_path": route_path or Handler.route_path,
     })
-    return ThreadingHTTPServer(("127.0.0.1", port),
+    return ThreadingHTTPServer((host, port),
                                lambda *a, **kw: handler(*a, directory=root, **kw))
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Serve the page and the route endpoint")
     ap.add_argument("--port", type=int, default=8010)
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="interface to bind; 0.0.0.0 is needed for the camera node's bay "
+                         "lights to read out/parking_state.json, and it exposes the whole "
+                         "--root directory to the LAN, so it is not the default")
     ap.add_argument("--root", default=ROOT, help="static files are served from here")
     ap.add_argument("--map", dest="map_path", default=os.path.join(ROOT, "out", "parking_map.json"))
     ap.add_argument("--state", dest="state_path",
@@ -139,11 +160,18 @@ def main() -> int:
                     default=os.path.join(ROOT, "out", "route.json"))
     args = ap.parse_args()
 
-    server = serve(args.port, args.root, args.map_path, args.state_path, args.route_path)
+    server = serve(args.port, args.root, args.map_path, args.state_path, args.route_path,
+                   args.host)
     print(f"page     http://localhost:{args.port}/web/index.html")
     print(f"endpoint GET http://localhost:{args.port}{API_PATH}?spot=<bay id>")
     print(f"map      {args.map_path}")
     print(f"state    {args.state_path}")
+    if args.host in ("127.0.0.1", "localhost"):
+        print("bound    loopback only - the camera node cannot reach this;"
+              " use --host 0.0.0.0 to let the bay lights read the state")
+    else:
+        print(f"bound    {args.host}:{args.port} - reachable from the LAN,"
+              f" which means all of {args.root} is too")
     print("ctrl-c to stop")
     try:
         server.serve_forever()

@@ -337,8 +337,8 @@ $P tests/fit_threshold.py --cases 'data/cases/*.csv' --write-template data/cases
 ### 5.4 设备诊断行（每 10 秒一行，排障看这个）
 
 ```
-uptime=240s fw=0.2.11 fps=28.3 frames=842 clients=1 rssi=-33 dBm net=CONNECTED
-ip=192.168.3.118 ps=none tx=10.00dBm link="ch6+0 11n/HT20 -33 dBm" disp=6
+uptime=240s fw=0.2.12 fps=28.3 frames=842 clients=1 rssi=-33 dBm net=CONNECTED
+ip=192.168.3.118 ps=none tx=10.00dBm link="ch6+0 11n/HT20 -33 dBm" disp=6 led=ok
 heap_internal=123211 dma_free=115423 heap_psram=7775328 heap_min=7843980
 ```
 
@@ -348,6 +348,7 @@ heap_internal=123211 dma_free=115423 heap_psram=7775328 heap_min=7843980
 | `tx=` | 应是 `10.00dBm`。被别的值占用了说明组件从 NVS 恢复了旧设置 |
 | `link=` | 若是 `802.11b` → 链路被限在 1~11 Mbps |
 | `disp=` | 面板刷屏次数。**帧率掉的时候它不动 = 屏清白了** |
+| `led=` | 灯带状态（P0008）。`ok` 正常；`no-data` 还没读过；`stale` 刚拉失败、**灯已全灭**；`absent`/`disabled` 没启用或 `LED_ORDER` 为空 |
 | `dma_free=` | 内部 DMA 内存。与 SPI bounce buffer、Wi-Fi 发射抢同一块 |
 | `frames=` | **真实帧数增量**。别信 `fps=`（瞬时 EMA，卡顿后会飙到 200+） |
 
@@ -1764,6 +1765,7 @@ $P tests/capture_vehicle_profile.py --finalize
 | 12 | ~~改名的两个 bug~~ | ✅ **已完成**（§6）：编辑模式 `r` = 改名 / `R` = 抓参考帧（两边说法终于一致 ✓）；保存时**顺手重发 `parking_map.json`** ✓，改名后页面自己就更新 ✓ |
 | 12b | ~~P0007 车载导航页~~ | ✅ **已完成**（§11.2）：`web/navigation.html`，**三个跟随**（车头/地图/路线）已用像素与接口实证 ✓，`board.html` 一行未改 ✓。⏳ **还需你现场走一遍 13 步验收**（第 ⑦⑧ 步必须用真车）|
 | 13 | **下一阶段（待你定）** | 候选：① **Route 下发给小车循迹**（真正让它开起来 —— **最有比赛看点** ✓）② **自动选车位策略**（最近 / 最优 / 保留车位）③ 把「车头朝向」用于路径（例如要求车尾朝内）④ 录 5 个验收案例，把占用阈值 0.15 从经验值变成测量值 |
+| 14 | **P0008 车位状态灯** | ✅ **已实现并在真机上跑通**（`led.c/.h`，0.2.11 → **0.2.14 已 publish**）：绿=空位 / 红=占用 / **黄=导航目标** / 灭=`UNKNOWN`。`LED_ORDER` 已按实测贴好（48 颗 = 48 个车位），上电有 `LED_SELFTEST` 自检（逐颗走灯 + 三色 + 亮度扫动）。设备每 500 ms 出站读 `parking_state.json` 与 `route.json`，不入站、不落盘。**黄只覆盖绿**：目标车位被占 → 红胜。⚙️ **PC 侧同步改了**：新增 `?clear=1`（`route.py` + `serve.py`），页面取消导航/到达时调用，否则黄灯永远不灭。✅ **你确认「效果很好」**；⏳ 待办：把 `LED_SELFTEST` 关掉（现在每次上电多亮 10 秒） |
 
 > **P0002.5 的依赖已经就绪**：`cv2.aruco` 在当前的 `opencv-python 4.13.0` 里自带（**不需要**装 `opencv-contrib-python`，已实测）。
 >

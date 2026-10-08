@@ -4,6 +4,7 @@ idf_component_register(
         "camera.c"
         "stream.c"
         "ota.c"
+        "led.c"
         "version.c"
         "display.c"
         "wifi.cpp"
@@ -18,6 +19,7 @@ idf_component_register(
         esp_lcd
         esp_driver_spi
         esp_driver_ledc
+        esp_driver_rmt
         nvs_flash
         app_update
         json

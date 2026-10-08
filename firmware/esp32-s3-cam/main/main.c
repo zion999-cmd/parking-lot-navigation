@@ -13,6 +13,7 @@
 
 #include "camera.h"
 #include "display.h"
+#include "led.h"
 #include "ota.h"
 #include "provisioning.h"
 #include "stream.h"
@@ -74,6 +75,9 @@ static void network_task(void *arg)
 {
     (void)arg;
     bool camera_up = false;
+#if CONFIG_LED_ENABLE
+    bool led_started = false;
+#endif
 
     while (true) {
         xSemaphoreTake(s_connected_sem, portMAX_DELAY);
@@ -96,6 +100,18 @@ static void network_task(void *arg)
         if (stream_server_start() != ESP_OK) {
             restart_after_failure("HTTP stream server");
         }
+
+#if CONFIG_LED_ENABLE
+        /*
+         * Started here rather than at boot because it polls the PC over HTTP:
+         * with no network there is nothing to read and the strip stays dark
+         * anyway. Best effort - a missing strip never stops the camera node.
+         */
+        if (!led_started) {
+            led_start();
+            led_started = true;
+        }
+#endif
 
         ESP_LOGI(TAG, "Status page : http://%s/", wifi_ip_string());
         ESP_LOGI(TAG, "MJPEG stream: http://%s%s", wifi_ip_string(), STREAM_PATH);
@@ -152,7 +168,7 @@ static void diagnostics_task(void *arg)
         wifi_link_summary(link, sizeof(link));
 
         ESP_LOGI(TAG, "uptime=%us fw=%s fps=%.1f frames=%u clients=%d rssi=%d dBm net=%s ip=%s "
-                      "ps=%s tx=%.2fdBm link=\"%s\" disp=%u heap_internal=%u dma_free=%u "
+                      "ps=%s tx=%.2fdBm link=\"%s\" disp=%u led=%s heap_internal=%u dma_free=%u "
                       "heap_psram=%u heap_min=%u",
                  (unsigned)(esp_timer_get_time() / 1000000),
                  ota_running_version(),
@@ -166,6 +182,11 @@ static void diagnostics_task(void *arg)
                  wifi_max_tx_power() / 4.0,
                  link,
                  (unsigned)display_flush_count(),
+#if CONFIG_LED_ENABLE
+                 led_status(),
+#else
+                 "absent",
+#endif
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),

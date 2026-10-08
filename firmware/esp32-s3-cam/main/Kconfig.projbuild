@@ -78,3 +78,175 @@ menu "Parking Lot Camera"
             works and is validated against the ESP x509 root bundle.
 
 endmenu
+
+menu "Parking Lot Bay Lights (WS2812B)"
+
+    config LED_ENABLE
+        bool "Drive the bay status lights"
+        default y
+        help
+            One WS2812B ("2812") pixel per parking bay, on the strip wired to
+            LED_GPIO. This is the 车位状态灯: green = EMPTY, red = OCCUPIED,
+            yellow = reserved for navigation, dark = UNKNOWN or no data.
+
+            See led.h for the two rules this module will not break (UNKNOWN is
+            dark, never green; a failed poll blanks the strip instead of holding
+            the last frame).
+
+            This is the only module in the firmware that reads a business
+            document from the PC. It only reads: the device pulls the state
+            document over HTTP and never accepts an inbound business request,
+            so the camera node still speaks first and still has no listening
+            business interface.
+
+    config LED_SELFTEST
+        bool "Light the strip up on boot to prove it works"
+        default y
+        help
+            Runs a bring-up pattern once, in the led task, before the module does
+            anything else:
+
+              walk     one pixel at a time from DIN outwards - count them, and see
+                       whether pixel 0 is the one nearest the plug (if nothing
+                       lights, the strip is being fed from its OUTPUT end)
+              colours  green, red, yellow - the three semantics this module uses
+              ramp     brightness up and down, the phase that fails electrically
+
+            Everything needed to judge this is on the strip, so no second firmware
+            project is needed to test the hardware.
+
+            Turn it off once the strip is confirmed: it costs about 10 seconds of
+            churn at every boot, and it lights the whole strip (about 0.7 A for 48
+            pixels) which is not what a finished installation should do on power
+            up.
+
+            The ramp stops at 64/255 on purpose. 255 would be ~2.9 A and is how a
+            marginal supply gets browned out in the middle of a demo - raise it
+            only when reproducing a rail problem deliberately.
+
+    config LED_GPIO
+        int "Data pin (DIN)"
+        default 14
+        help
+            GPIO driving the strip's DIN. GPIO14 is the only free pin on this
+            board that is also broken out on the P1 header (camera 4-13/15-18,
+            TFT 19/20/21/38/45/47, console UART 43/44, flash + octal PSRAM
+            26-37, audio 1/2/39-42).
+
+            RMT drives it, and RMT is free: the camera XCLK owns LEDC timer and
+            channel 0, the TFT backlight owns timer and channel 1.
+
+    config LED_COUNT
+        int "Number of pixels on the strip"
+        default 48
+        help
+            How many pixels are actually soldered to the strip. Frames are always
+            sent for the whole strip, so a value larger than the real count costs
+            nothing but a few milliseconds of shifting, and a smaller one shifts
+            every bay by however many pixels were left out.
+
+            The default is the number of bays in this lot (48). Do not trust it:
+            count the pixels with LED_SELFTEST, which lights them one at a time
+            and prints the index of each.
+
+    config LED_ORDER
+        string "Bay id per pixel, in strip order"
+        default "9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,37,36,35,34,33,32,31,30,29,28,27,26,25,38,39,40,41,42,43,44,45,46,47,48,49,50,B1,B2,B3,B4,B5,B6"
+        help
+            Comma separated bay ids, position = pixel index, starting at the
+            pixel nearest DIN. Empty means the lights are disabled and the reason
+            is logged at boot.
+
+            The value above is the real installation on this sandbox (measured by
+            watching LED_SELFTEST's walk and writing down which bay each pixel
+            sits next to). It is the default here, not in sdkconfig.defaults, for
+            the same reason the OTA URL is: exactly one source of truth, and a
+            clone that builds and works.
+
+            It is deliberately NOT inferred from parking_map.json: which pixel
+            sits next to which bay is a fact about where the strip was glued
+            down, and the map does not know it. The map's own order is only a
+            starting point:
+
+                python3 -c "import json;print(','.join(\
+                  s['id'] for s in json.load(\
+                    open('vision/out/parking_map.json'))['spots']))"
+
+            Bay ids the state document does not contain are left dark, so a typo
+            shows up as one unlit pixel instead of an invented free bay. That is
+            how a '3' that should have been a '9' was caught.
+
+            Re-measure after moving the strip, adding bays, or re-gluing pixels.
+
+    config LED_STATE_URL
+        string "State document URL (parking_state.json)"
+        default "http://192.168.3.102:8010/out/parking_state.json"
+        help
+            Full URL of the live parking_state/1 document. src/serve.py serves it
+            next to the web pages.
+
+            This is the second baked-in PC address in the firmware, and it is a
+            separate setting from CONFIG_OTA_MANIFEST_URL on purpose: the OTA
+            server and the vision server are different processes and may live on
+            different machines. Keep each address in exactly one place - no
+            README snippet is the source of truth for either.
+
+            NOTE: src/serve.py binds 127.0.0.1 by default, so it is not reachable
+            from the device until it is started with --host 0.0.0.0. Do that
+            deliberately: that handler serves the whole vision/ directory, not
+            just this document.
+
+    config LED_ROUTE_URL
+        string "Route document URL (route.json)"
+        default "http://192.168.3.102:8010/out/route.json"
+        help
+            Full URL of the route/1 document that src/serve.py writes when the page
+            plans a route. The firmware reads exactly two fields from it, in this
+            order: "ok", then "target_spot". The bay at target_spot turns yellow.
+
+            "ok" is checked first and it is not a formality: a refused plan names the
+            bay that was asked for with ok == false, and so does the "navigation
+            ended" document (GET /api/route?clear=1) the page sends when a navigation
+            is cancelled or the car arrives. Reading target_spot without checking ok
+            would light up a bay you were told you cannot drive to, and would leave
+            the last target lit forever after a navigation ends.
+
+            A bay that is both the target and OCCUPIED shows red, not yellow: yellow
+            means "come here", and the two states correcting each other is the point.
+
+            This is the same host as LED_STATE_URL. Both are listed separately
+            because both are served by src/serve.py and that is what has to be
+            reachable - see LED_STATE_URL for the --host 0.0.0.0 note.
+
+    config LED_POLL_MS
+        int "Poll period (ms)"
+        default 500
+        range 100 10000
+        help
+            How often the state document is fetched. 500 ms matches what the web
+            pages already poll at, so the lights and the page never disagree by
+            more than one poll.
+
+            Faster buys nothing: PC Vision's own cadence sets how fresh the
+            document can be. Slower makes a bay change visible later than it is.
+
+    config LED_BRIGHTNESS
+        int "Pixel brightness"
+        default 32
+        range 1 255
+        help
+            Duty limit applied to every pixel, 32/255 (about 12%) by default.
+
+            This is a power budget, not a taste setting. 48 pixels at full white
+            would draw ~2.9 A, and this board is fed from USB or a small Li-ion
+            cell. At 32/255 a single colour per pixel totals roughly 120 mA for
+            all 48 - small enough to sit next to Wi-Fi and the camera on the same
+            5 V rail.
+
+            Raising this also shrinks the electrical margin on the data line:
+            a strip powered at 5 V wants 3.5 V for a logic high and the ESP32
+            drives 3.3 V. If pixels start showing the wrong colour, or the first
+            pixel glitches, that is the margin - power the strip at 4.3-4.5 V or
+            add a 74AHCT125, and see README 13.
+
+endmenu

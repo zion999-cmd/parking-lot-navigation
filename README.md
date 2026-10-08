@@ -6,7 +6,11 @@ ESP32-S3-CAM 网络摄像头节点 —— **P0001 + P0001.1**
 **Wi-Fi 配网**（手机网页配置，凭据存 NVS）和**极薄 OTA**（带 A/B 分区、SHA256 校验、
 原生回滚）。PC / 浏览器可以通过 HTTP 持续拿到实时画面，给后续 Python + OpenCV 消费。
 
-**固件职责只有：拍摄 + 网络传输 + 配网 + 自升级。** 不含 OpenCV、导航、预约、LED、AI。
+**固件职责只有：拍摄 + 网络传输 + 配网 + 自升级 + 车位状态灯。** 不含 OpenCV、导航、预约、AI。
+
+> **改过一处边界（P0008）**：前面写的「不含 LED」在加车位状态灯时被推翻了。相机节点
+> 现在会**主动 GET** PC 侧的 `parking_state.json` 去点灯。这是**出站只读**，设备仍然
+> 没有任何业务监听接口、不持久化业务状态——见 `docs/architecture.md` 3.6。
 
 ---
 
@@ -18,7 +22,8 @@ ESP32-S3-CAM
    ├─ Wi-Fi  (STA + SoftAP 配网)
    ├─ HTTP MJPEG
    ├─ Provisioning   ← P0001.1 新增
-   └─ OTA            ← P0001.1 新增
+   ├─ OTA            ← P0001.1 新增
+   └─ Bay lights     ← P0008 新增（出站读状态，不是业务接口）
 ```
 
 | 做 | 不做 |
@@ -26,10 +31,11 @@ ESP32-S3-CAM
 | Wi-Fi 配网（SoftAP + 网页 + NVS） | 配网 App / BLE 配网 |
 | A/B OTA + SHA256 + 原生回滚 | 云平台 / 设备管理 / 用户系统 |
 | 板载 TFT 作**状态面板**（IP / 配网 / OTA / 错误） | 屏幕上的复杂 UI、动画、地图、视频预览、触摸、菜单 |
+| 车位状态灯（绿空/红占/黄导航目标，见 §17） | 接收入站业务指令（PC 推状态给设备） |
 | 摄像头被碰歪后**自动对齐 ROI**（不改车位列表） | 自动增删车位 |
 | 摄像头初始化（沿用已验证配置） | 视觉算法 / AI 推理 |
 | HTTP MJPEG 视频流 | 私有视频协议 / 云端视频 |
-| 状态页 + 串口健康日志 | 停车场业务逻辑 |
+| 状态页 + 串口健康日志 | 停车场业务逻辑（预约 / 计费 / 用户） |
 
 ---
 
@@ -46,9 +52,10 @@ ESP32-S3-CAM
 | 摄像头 | **OV3660**，SCCB 地址 0x3c | 运行日志 `camera: Detected OV3660 camera` |
 | USB-UART | CH340（VID 0x1a86 / PID 0x7523） | USB 描述符 |
 | 串口 | UART0，GPIO43(TX)/GPIO44(RX)，115200 | 运行日志 `cpu_start: GPIO 44 and 43 are used as console UART I/O pins` |
+| 车位状态灯 | **WS2812B 灯带，DIN = GPIO14**（P1 排针引出） | 见 §17 |
 
-本项目**只使用 ESP32-S3 + Camera + Wi-Fi**。底板上的 TFT、麦克风、扬声器、电池、
-按键、音频均未初始化，代码里也不存在相关引用。
+本项目使用 ESP32-S3 + Camera + Wi-Fi + 状态屏 + 状态灯带。底板上的麦克风、扬声器、
+电池、音频均未初始化，代码里也不存在相关引用；按键只用到 BOOT（手动下载模式）。
 
 ### 2.1 ⚠️ 这块底板没有自动下载电路 —— 首次烧录必须手动
 
@@ -546,6 +553,11 @@ curl -o /dev/null --max-time 3600 http://<device-ip>/stream
 | 校验失败 | `./publish.sh --sha256 000...0 9.9.9` → 日志 `SHA256 mismatch` → 旧固件继续跑 |
 | 回滚 | 推一个启动即崩的固件 → 下次启动应回到旧槽位 |
 
+### 10.3 P0008（车位状态灯）
+
+见 §17.6：6 条断言，其中 SC-2（`UNKNOWN` 不得显示为绿）与 SC-3（断链整条熄灭）
+是必须用“停掉 `src/main.py` / 拔网线”去证的。
+
 ---
 
 ## 11. 已知限制
@@ -559,6 +571,8 @@ curl -o /dev/null --max-time 3600 http://<device-ip>/stream
    攻击者控制的镜像（摘要也会被一起改）。局域网内可接受；生产要上 HTTPS + 签名镜像。
 6. **未启用 anti-rollback**（不阻止降级）—— 沙盘需要能回退到旧版本。
 7. **只有一个手动 OTA 触发方式**（HTTP + 状态页按钮），没有定时轮询。
+8. **车位状态灯依赖 PC 侧的 `--host 0.0.0.0`**，而且那个 HTTP handler 没有鉴权
+   （见 §17.2）。另外 5V 供电时数据线只有 0.2 V 余量（见 §17.4）。
 8. FPS 统计跨客户端累计；接 N 个客户端时数值约为单客户端的 N 倍，验收测试只用 1 个客户端。
 9. 麦克风 / 扬声器 / 电池 / 按键未使用，底板这些外设在本固件下不工作。
 10. **状态屏会占用内部 RAM**：帧缓冲在 PSRAM，而 SPI DMA 读不了 PSRAM，驱动必须用内部
@@ -791,9 +805,10 @@ parking-lot-navigation/
 │           ├── provisioning.cpp/.h    ← 配网状态机 + 串口 clearwifi
 │           ├── wifi.cpp/.h            ← 配网组件的 C 适配层
 │           ├── ota.c/.h               ← 薄 OTA 客户端（manifest/SHA256/回滚确认）
+│           ├── led.c/.h               ← 车位状态灯（唯一碰 RMT 的文件，见 §17）
 │           ├── version.c/.h           ← 版本比较（不依赖 IDF，可跑宿主机测试）
 │           ├── idf_component.yml      ← 锁定 esp32-camera 2.1.5 + esp-wifi-connect 3.1.x
-│           ├── Kconfig.projbuild      ← OTA_MANIFEST_URL
+│           ├── Kconfig.projbuild      ← OTA_MANIFEST_URL + 全部 LED_* 选项
 │           └── wifi_credentials.h.example  ← 仅 NVS 格式说明，不参与编译
 ├── vision/                            ← P0002：PC 端 OpenCV 车位占用 PoC
 │   ├── README.md
@@ -813,3 +828,132 @@ parking-lot-navigation/
 
 `sdkconfig` 与 `managed_components/` 不提交，`sdkconfig.defaults` 和
 `dependencies.lock` 提交 —— 保证克隆下来就能得到同样的配置和同样的依赖版本。
+
+---
+
+## 17. 车位状态灯（P0008）
+
+一个车位一颗 WS2812B（“2812”）像素。颜色就是全部接口，而且它是**三态语义**，
+不是装饰：
+
+| 颜色 | 状态 | 含义 |
+|---|---|---|
+| 🟢 绿 | `EMPTY` | 可以停 |
+| 🔴 红 | `OCCUPIED` | 已占 |
+| 🟡 黄 | 导航目标 | 你正在导航去的那个空车位 |
+| ⚫ 灭 | `UNKNOWN` / 无数据 | 没看到，不等于空 |
+
+### 17.1 三条不肯破的规则
+
+1. **`UNKNOWN` 是灭的，绝不是绿的。** `parking_state/1` 就是为丢帧定义 `UNKNOWN` 的，
+   `contract.py` 写得很清楚：没有新帧的车位**不得**报成 EMPTY。灯带在视觉端停止说话时
+   变绿，比变暗坏得多——它在招你做一件没被确认过的事。
+2. **拿不到新状态就整条熄灭。** 留上一帧的颜色是同一种谎，只是慢一点。
+3. **黄灯只覆盖空位，绝不覆盖占用。** 黄的意思是“来这里”，所以
+   `route.json` 里说 ok=true 但那个车位已经被占了 → **显示红**。这条不只是防御：它让两个
+   状态自己互相纠正（目标被抢，黄自己变红）。
+
+对应实现：`led.c` 的 `build_frame()`（两趟：先占位色，再用目标覆盖绿）与失败分支，
+串口日志里会明说 `no fresh state - strip blanked`。
+
+### 17.2 数据流向（新增的是两条出站只读通道）
+
+```
+车位状态  out/parking_state.json ──GET──▶ camera   绿=空位 红=占用 灭=UNKNOWN
+导航目标  out/route.json         ──GET──▶ camera   黄=目标（仅当该车位为空）
+          (两者都由 vision/src/serve.py 提供服务，每 500 ms)
+```
+
+设备**不接受**任何入站业务请求，也不持久化业务状态——它每 500 ms 出去看一眼，
+所以 `docs/architecture.md` 3.1/3.2 的那条「单向」变成「视频出、状态入」，
+而不是新开一个业务端口。
+
+**只读两个字段，顺序不能反**：先 `ok` 再 `target_spot`。`ok=false` 也可能带着一个车位号
+（`spot-not-free`、`hero-not-visible` 这些拒绝就是这样），跳过 `ok` 会让一个"你不能去"的
+拒结灯成黄灯。
+
+#### 导航结束要有人明说
+
+`out/route.json` 原本只被写、从未被删。页面停止导航后它仍然指着最后一个目标，
+于是黄灯永远不灭——一个只有灯带上看得见的、页面上早已不存在的状态。
+
+所以有了 `GET /api/route?clear=1`（写一份 `ok=false, code=navigation-ended` 的文档），
+页面在**取消导航**和**到达车位**时各调一次。到达也清，是因为车已经在那个车位上了：
+黄灯的任务结束，接下来由占用检测接管（车停进去就变红）。
+
+⚠️ **`src/serve.py` 默认只绑 127.0.0.1，设备根本拉不到。** 要让它能被拉到：
+
+```zsh
+cd vision && python3 src/serve.py --host 0.0.0.0     # 注意这个代价！
+```
+
+`--host 0.0.0.0` 会把 `--root`（整个 `vision/`，包括标定文件与 data/）暴露给局域网，
+而且这个 handler **没有任何鉴权**。沙盘局域网可以接受，但要知道自己在做什么。
+
+### 17.3 配置（全在 `idf.py menuconfig` → Parking Lot Bay Lights）
+
+| 选项 | 默认 | 说明 |
+|---|---|---|
+| `LED_ENABLE` | `y` | 关掉后 `led.c` 完全不参与，`led_status()` 显示 `absent` |
+| `LED_SELFTEST` | `y` | 上电自检：逐颗走灯 + 三色 + 亮度扫动。**确认后关掉** |
+| `LED_GPIO` | `14` | DIN。GPIO14 是这块板上**唯一既空闲又在 P1 排针上**的脚 |
+| `LED_COUNT` | `48` | 默认当车位总数。**以走灯数出来的真值为准** |
+| `LED_ORDER` | `""` | 车位 id 按像素顺序，如 `9,37,B1`。**空 = 灯不工作**（会报错） |
+| `LED_STATE_URL` | `http://192.168.3.102:8010/out/parking_state.json` | 车位状态（绿/红） |
+| `LED_ROUTE_URL` | `http://192.168.3.102:8010/out/route.json` | 导航目标（黄） |
+| `LED_POLL_MS` | `500` | 与网页的轮询节奏一致 |
+| `LED_BRIGHTNESS` | `32` | 亮度**是功耗预算**，不是口味：48 颗满白 ≈ 2.9 A |
+
+**为什么 `LED_ORDER` 不自动从 `parking_map.json` 推**：哪颗像素贴在哪条车道旁是
+**安装事实**，地图不知道。想以地图顺序为起点（然后自己改）：
+
+```zsh
+python3 -c "import json;print(','.join(s['id'] for s in json.load(open('vision/out/parking_map.json'))['spots']))"
+```
+
+### 17.4 接线与电气（这一步的坑不在代码）
+
+```
+ESP32 GPIO14 ──[470Ω]── DIN（灯带的**输入**端，接错=全黑）
+ESP32 GND ────────────── GND ─── 5V 电源 GND（必须共地）
+5V ──[1000µF 电解，就近]── 灯带 5V
+```
+
+**已知余量不足**：灯带 5V 供电时 VIH = 0.7×5 = 3.5 V，ESP32 只能给 3.3 V，只有
+0.2 V 余量。症状是第一颗像素闪/随机彩、或整条中途暗掉并伴随板子重启。
+解法（不焊也能做）：把灯带供电降到 **4.3~4.5 V**；或上 74AHCT125。
+
+这条不是纸上推导：`LED_SELFTEST` 的第三段就是亮度扫动，让这个失效模式自己暴露出来。
+扫到 64/255 就停（48 颗约 0.7 A）；想故意复现掉电就把它调高，但那就是在演示中途把板子
+搞重启的同一件事。
+
+### 17.5 上机步骤
+
+1. `python3 src/serve.py --host 0.0.0.0`，浏览器能打开
+   `http://<pc>:8010/out/parking_state.json` 才继续；
+2. **先只验灯带**：`LED_SELFTEST=y`（默认）已经开着，别的什么都不用配。
+   `./publish.sh 0.2.12` + `POST /api/ota/check`，重启后应看到：
+
+   ```
+   led: bring-up test: count the pixels that light up, then watch for flicker
+   led:   pixel 0 lit          ← 逐颗走到 LED_COUNT-1，数一下真实几颗
+   led:   brightness ramp ...   ← 这一段闪/变色/板子重启 = 电平或供电不够
+   led: bring-up test done
+   led: LED_ORDER is empty: 48 pixels have no bay, strip stays dark
+   ```
+
+   看到逐颗走灯 = **线对、输入输出端对、供电够**。这一步最多把 `LED_COUNT` 改成
+   数出来的真值；`LED_ORDER` 留空，所以测完就自己熄灭，不会冒充车位状态。
+3. 填 `LED_ORDER`（车位 id 按像素顺序），再推一个版本，就开始显示真实车位状态。
+4. 确认后把 `LED_SELFTEST` 关掉 —— 否则每次上电都会整条亮 10 秒。
+
+### 17.6 验收（尚未跑）
+
+| # | 断言 | 怎么证 |
+|---|---|---|
+| SC-1 | 空车位 = 绿，占用 = 红 | 手动遮一颗车位，对应像素一个轮询内变色 |
+| SC-2 | `UNKNOWN` 不显示成绿 | 停掉 `src/main.py` 后重启设备：灯带**全灭**，不是全绿 |
+| SC-3 | 断链不留残色 | 运行中拔 PC 网线：灯带在若干次失败后整条熄灭，日志有 `strip blanked` |
+| SC-4 | 黄灯只给空位目标 | 点一个**已占**车位：应被服务端拒结（`spot-not-free`）且**不亮黄**；再手改 `route.json` 成 `ok=true,target=已占车位` → 仍显示红 |
+| SC-5 | 不拖慢相机 | 健康行 `fps` 与加灯前一致，`heap_min` 不下降超过几 KB |
+| SC-6 | OTA 可回滚 | 推一个坏版本（改错 `LED_GPIO`）→ 仍能从 A/B 回滚启动 |
