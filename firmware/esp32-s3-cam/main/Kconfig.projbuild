@@ -361,18 +361,21 @@ menu "Barrier Gate (servo + contact switch)"
     config GATE_QR_LINGER_MS
         int "Keep the QR code up this long after the arm lands (ms)"
         depends on GATE_QR_ON_TRIGGER
-        range 0 60000
-        default 10000
+        range 0 300000
+        default 30000
         help
-            10 s by default, counted from the arm reaching home - so with the
-            default GATE_HOLD_MS the code is on screen from the trigger for
-            roughly 17 s in total.
+            30 s by default, counted from the arm reaching home - so with the
+            default GATE_HOLD_MS the code is on screen from the trigger for about
+            36 s in total.
 
-            That is the number to raise when someone says they could not get their
-            phone out in time. It costs nothing: the arm is already down and the
-            gate is already ready for the next car while the code is still up.
+            This is the number to raise when someone says they could not get their
+            phone out in time, and it is the only one that needs raising: the arm
+            lands on its own schedule and the gate is already free for the next car
+            while the code is still up. Raising GATE_HOLD_MS instead would hold
+            traffic to give the phone more time, which is the wrong trade.
 
-            0 takes the code down the moment the arm lands.
+            0 takes the code down the moment the arm lands. The range allows up to
+            5 minutes for a demo where nobody is in a hurry.
 
     config GATE_START_PULSE_US
         int "First position commanded at boot (us)"

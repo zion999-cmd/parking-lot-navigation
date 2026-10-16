@@ -84,7 +84,13 @@ static int64_t s_hold_since_us = -1;
  * stays up is a mechanical question (the car has to clear the gate), while how
  * long the code stays up is a human one (pick up the phone, open the camera, aim
  * it, focus - 5 to 15 seconds with a car in the other hand). Tying them together
- * means one of the two is always wrong.
+ * means one of the two is always wrong - and the first complaint from the bench
+ * was exactly this, the code leaving before the phone was ready while the arm had
+ * done its job correctly.
+ *
+ * So the arm is up for GATE_HOLD_MS and the code is up for that plus two ramps
+ * plus GATE_QR_LINGER_MS. Raising the linger costs nothing; raising the hold
+ * holds traffic.
  */
 #if CONFIG_GATE_QR_ON_TRIGGER
 static int64_t s_qr_off_at_us;
