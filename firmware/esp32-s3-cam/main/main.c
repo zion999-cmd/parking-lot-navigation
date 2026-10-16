@@ -13,6 +13,7 @@
 
 #include "camera.h"
 #include "display.h"
+#include "gate.h"
 #include "led.h"
 #include "ota.h"
 #include "provisioning.h"
@@ -168,7 +169,7 @@ static void diagnostics_task(void *arg)
         wifi_link_summary(link, sizeof(link));
 
         ESP_LOGI(TAG, "uptime=%us fw=%s fps=%.1f frames=%u clients=%d rssi=%d dBm net=%s ip=%s "
-                      "ps=%s tx=%.2fdBm link=\"%s\" disp=%u led=%s heap_internal=%u dma_free=%u "
+                      "ps=%s tx=%.2fdBm link=\"%s\" disp=%u led=%s gate=%s heap_internal=%u dma_free=%u "
                       "heap_psram=%u heap_min=%u",
                  (unsigned)(esp_timer_get_time() / 1000000),
                  ota_running_version(),
@@ -184,6 +185,11 @@ static void diagnostics_task(void *arg)
                  (unsigned)display_flush_count(),
 #if CONFIG_LED_ENABLE
                  led_status(),
+#else
+                 "absent",
+#endif
+#if CONFIG_GATE_ENABLE
+                 gate_status(),
 #else
                  "absent",
 #endif
@@ -234,6 +240,15 @@ void app_main(void)
     }
 
     ota_start();
+
+#if CONFIG_GATE_ENABLE
+    /*
+     * Deliberately here and not in network_task(): the gate is local automation,
+     * so it must work with no network at all. It never reads the parking state
+     * and it publishes nothing.
+     */
+    gate_start();
+#endif
 
     if (xTaskCreate(network_task, "network_app", 6144, NULL, 5, NULL) != pdPASS) {
         ESP_LOGE(TAG, "could not start the network task");

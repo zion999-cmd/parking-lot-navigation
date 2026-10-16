@@ -5,6 +5,7 @@ idf_component_register(
         "stream.c"
         "ota.c"
         "led.c"
+        "gate.c"
         "version.c"
         "display.c"
         "wifi.cpp"
@@ -20,6 +21,7 @@ idf_component_register(
         esp_driver_spi
         esp_driver_ledc
         esp_driver_rmt
+        esp_driver_gpio
         nvs_flash
         app_update
         json
