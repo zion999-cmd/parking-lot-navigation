@@ -70,6 +70,15 @@ _DEFAULT_VEHICLE_CONFIG = {
     # side of a 180 turn). The yellow-nosed car measures the opposite way round, and with the
     # wrong value the taper fallback reports the front backwards - confidently (evidence 0.79).
     "front_is_the_wider_end": True,
+    # The paint is one end of the car and the cabin the other, so look for the dark side of the
+    # paint rather than for dark pixels in general.
+    "attach_paint_side": False,
+    "paint_side_gap": 6,
+    "paint_side_reach": 0,   # 0 = as far as the car could be: 2.2x the paint
+    "paint_side_min_drop": 40,
+    # And the end that is painted is the front. A fact about this car from the person who owns it,
+    # not something the pixels can know - same category as front_is_the_wider_end.
+    "front_is_the_painted_end": False,
     "attach_dark_margin_v": 0,
     "attach_dark_max_s": 160,
     "attach_dark_max_px": 60,
@@ -94,7 +103,9 @@ def vehicle_config(path: str = VEHICLE_CONFIG_PATH) -> dict:
             cfg = dict(_DEFAULT_VEHICLE_CONFIG)
             for key in ("hue_ranges", "open_kernel", "close_kernel", "min_area",
                         "attach_dark_margin_v", "attach_dark_max_s",
-                        "attach_dark_max_px", "front_is_the_wider_end"):
+                        "attach_dark_max_px", "front_is_the_wider_end",
+                        "attach_paint_side", "paint_side_gap", "paint_side_reach",
+                        "paint_side_min_drop", "front_is_the_painted_end"):
                 if key in raw:
                     cfg[key] = raw[key]
             _VEHICLE_CONFIG_CACHE = cfg
@@ -305,6 +316,131 @@ def merge_near_components(mask: np.ndarray, gap_fraction: float = 0.9,
 ATTACH_MAX_GROWTH = 8.0
 
 
+# The four sides of the paint's bounding box, as (name, sign along x, sign along y).
+_SIDES = (("right", 1, 0), ("left", -1, 0), ("below", 0, 1), ("above", 0, -1))
+
+
+def _reach_for(reach: int, w: int, h: int) -> int:
+    """How far past the paint to look, in pixels. 0 means "as far as the car could be".
+
+    A fixed 45 px was the first value and it cut the cabin in half: the paint is 41 px long and
+    the cabin reaches 90 px past it, so the mask stopped mid-cabin and the reading came out at the
+    nose's centre plus a bit. The car is one paint plus roughly one cabin, so 2.2x the paint's
+    longer side covers it with room.
+    """
+    return reach if reach > 0 else int(2.2 * max(w, h)) + 1
+
+
+def _largest_component(mask: np.ndarray) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
+    """The biggest blob in a mask and its bounding box.
+
+    Not np.nonzero(mask) over the whole thing: a mask can hold more than one yellow object - a
+    bay marking, a reflection - and the bounding box of their union is not the car's. Measured on
+    a live frame: the paint's own bbox is 29x31, the union's was x0..460 y144..442, which put
+    every one of the four sample boxes somewhere else entirely.
+    """
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    if count <= 1:
+        return np.zeros_like(mask), (0, 0, 0, 0)
+    i = 1 + int(np.argmax(stats[1:, 4]))
+    x, y, w, h = (int(stats[i, 0]), int(stats[i, 1]), int(stats[i, 2]), int(stats[i, 3]))
+    return (np.where(labels == i, 255, 0).astype(mask.dtype), (x, y, x + w - 1, y + h - 1))
+
+
+def paint_side(mask: np.ndarray, value: np.ndarray, gap: int = 6, reach: int = 45,
+               min_drop: int = 40) -> Optional[str]:
+    """Which side of the paint is dark - the cabin - or None if none of them is.
+
+    Four attempts to find this car's black cabin failed by asking a global question: where is
+    everything dark (the road is full of dark patches), or how dark is the cabin relative to the
+    road (the answer moved between frames). This asks a local one instead: **the paint is one end
+    of the car, so which side of the paint is dark?**
+
+    Measured on the real car, sampling a box beside each edge of the paint that is the paint's own
+    width:
+
+        right  V=78     the cabin, 108 levels below the road
+        above  V=181    5 levels below it
+        left   V=178    8
+        below  V=173   13
+
+    A 20:1 separation, and the answer did not change with the threshold (20, 30 and 40 levels all
+    gave the same box). That is the property the earlier attempts lacked.
+
+    Why a box beside the edge and not a ring: an earlier attempt measured the ring around the
+    paint, which contains the cabin itself on the side where the car extends, so the reference was
+    pulled towards the thing being searched for. Four separate boxes cannot be contaminated that
+    way, and comparing them against each other needs no reference at all.
+    """
+    blob, _ = _largest_component(mask)
+    ys, xs = np.nonzero(blob)
+    if ys.size == 0:
+        return None
+    x0, x1, y0, y1 = int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())
+    reach = _reach_for(reach, x1 - x0, y1 - y0)
+
+    levels = {}
+    for name, sx, sy in _SIDES:
+        if sx:
+            bx0 = x1 + gap if sx > 0 else max(0, x0 - gap - reach)
+            bx1 = min(value.shape[1], x1 + gap + reach) if sx > 0 else max(0, x0 - gap)
+            by0, by1 = y0, y1 + 1
+        else:
+            by0 = y1 + gap if sy > 0 else max(0, y0 - gap - reach)
+            by1 = min(value.shape[0], y1 + gap + reach) if sy > 0 else max(0, y0 - gap)
+            bx0, bx1 = x0, x1 + 1
+        box = value[by0:by1, bx0:bx1]
+        if box.size >= 50:
+            levels[name] = float(np.median(box))
+
+    if len(levels) < 3:
+        return None
+
+    best = min(levels, key=lambda k: levels[k])
+    others = float(np.median([v for k, v in levels.items() if k != best]))
+    if others - levels[best] < min_drop:
+        return None                          # no side is dark enough: this is just the paint
+    return best
+
+
+def attach_paint_side(mask: np.ndarray, value: np.ndarray, side: str, gap: int = 6,
+                      reach: int = 45, min_drop: int = 40) -> np.ndarray:
+    """The paint plus the dark region on `side` of it, kept to the paint's own width.
+
+    Keeping to the paint's width is what stops the car's own shadow being absorbed: the shadow
+    lies along the car, not across it. Measured with the corridor: the cabin side yields 1,850 px
+    against a paint of 693 (a car of 2,543 against an expected 2,980), and without it the region
+    ran 81 px across a car that is 31 px wide.
+    """
+    blob, _ = _largest_component(mask)
+    ys, xs = np.nonzero(blob)
+    if ys.size == 0:
+        return mask
+    x0, x1, y0, y1 = int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())
+    reach = _reach_for(reach, x1 - x0, y1 - y0)
+    sx, sy = dict((n, (a, b)) for n, a, b in _SIDES)[side]
+
+    if sx:
+        bx0 = x1 + gap if sx > 0 else max(0, x0 - gap - reach)
+        bx1 = min(value.shape[1], x1 + gap + reach) if sx > 0 else max(0, x0 - gap)
+        by0, by1 = y0, y1 + 1
+    else:
+        by0 = y1 + gap if sy > 0 else max(0, y0 - gap - reach)
+        by1 = min(value.shape[0], y1 + gap + reach) if sy > 0 else max(0, y0 - gap)
+        bx0, bx1 = x0, x1 + 1
+
+    box = value[by0:by1, bx0:bx1]
+    if box.size == 0:
+        return mask
+    paint_v = float(np.median(value[blob > 0]))
+    # Halfway between the paint and that side's own level: the cabin is far below both, the road
+    # is at the side's level, so the cut has a wide margin either way.
+    cut = (paint_v + float(np.median(box))) / 2.0
+    dark = np.zeros_like(value)
+    dark[by0:by1, bx0:bx1] = np.where(box <= cut, 255, 0).astype(value.dtype)
+    return cv2.bitwise_or(mask, dark)
+
+
 def attach_dark(mask: np.ndarray, hsv: np.ndarray, margin_v: int, max_s: int,
                 max_px: int = 60, ring_px: int = 25) -> np.ndarray:
     """Grow `mask` into the dark part of the car that its paint colour does not cover.
@@ -387,6 +523,19 @@ def red_mask(hsv: np.ndarray, close_kernel: Optional[int] = None,
     # test at the end of this function.
     paint_area = float(mask.sum())
     paint_only = mask.copy()
+
+    # The car's other half, when the paint is only one end of it: which side of the paint is
+    # dark. See paint_side() for why this works where four earlier attempts did not.
+    if cfg.get("attach_paint_side"):
+        side = paint_side(mask, hsv[:, :, 2],
+                          int(cfg.get("paint_side_gap", 6)),
+                          int(cfg.get("paint_side_reach", 45)),
+                          int(cfg.get("paint_side_min_drop", 40)))
+        if side is not None:
+            mask = attach_paint_side(mask, hsv[:, :, 2], side,
+                                     int(cfg.get("paint_side_gap", 6)),
+                                     int(cfg.get("paint_side_reach", 45)),
+                                     int(cfg.get("paint_side_min_drop", 40)))
 
     # The car's dark part, if this car has one that the paint does not cover (see the config).
     mask = attach_dark(mask, hsv,
@@ -900,16 +1049,31 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
             redfraction_profile = binned(axis_index, is_raw_paint)
 
         # Which end the front is on, as signed evidence along the axis: +1 means the +axis end.
-        # The car's pattern is the first choice - the brighter end is the front - and the taper
-        # of the silhouette is the fallback for a car with no usable pattern.
+        #
+        # The order of the cues is the order of their authority. First a stated fact: if the car is
+        # painted at one end, the painted end is the front - the same category as
+        # front_is_the_wider_end, something a person told us about this car and not something the
+        # pixels can work out. Then the sampled pattern, and last the silhouette's taper.
         evidence: Optional[float] = None
+        if vehicle_config().get("front_is_the_painted_end") and axis_index is not None:
+            painted = is_raw_paint > 0
+            if painted.any():
+                # Only when the paint covers one END of the car rather than all of it. A car
+                # painted along its whole length - which the previous one was, red at both ends -
+                # has no painted end to point at, and this rule would have handed it an arbitrary
+                # front. Two tests caught exactly that.
+                span_total = float(along.max() - along.min())
+                span_paint = float(along[painted].max() - along[painted].min())
+                if span_total > 0 and span_paint / span_total < 0.8:
+                    # Where the paint sits along the axis, relative to the whole blob.
+                    evidence = 1.0 if along[painted].mean() > along.mean() else -1.0
         ends_grey = 0.0
         forward_score = reverse_score = score_margin = None
         if profile is not None:
             difference, _ = ends_of(profile)
             ends_grey = difference                  # kept for the HUD, no longer the sign
         template = vehicle_template()
-        if template is not None and sat_profile is not None:
+        if evidence is None and template is not None and sat_profile is not None:
             forward_score, reverse_score, score_margin, _plus = \
                 score_sign(sat_profile, redfraction_profile, template)
             # Margin ~0 is the template abstaining - leave evidence None so the silhouette

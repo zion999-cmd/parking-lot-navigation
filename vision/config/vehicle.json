@@ -17,7 +17,7 @@
   "close_kernel": 30,
   "min_area": 80,
   "_about": "Hero vehicle parameters. hue_ranges are HSV [lo,hi] pairs of the PAINT; attach_dark_max_v/_s attach the car's dark part to it (0 = the paint covers the whole car, which is the case for a car painted at both ends). open_kernel removes specks; close_kernel joins the body's halves; min_area rejects smaller things. Re-record the front/rear template afterwards and CHECK corr(right,left) is negative.",
-  "_measured": "2026-10-17, yellow nose + black cabin, 800x600. THE PAINT (the nose) is all a colour mask can see: H 24..33, S 93..138, V 115..211, stable 460..500 px, position jitter +-0.14 px. The cabin cannot be added reliably: (1) brightness - the cabin reads V 98 on one frame and 147 on another while the road beside it reads 150 and 183, so the mask flipped between whole car and nose six times in fourteen frames; (2) OUTLINE - both halves are ~36 grey levels from the road and the car's silhouette is a real closed curve, but the cabin is fragmented by its own specular reflections, so the pocket the outline seals off contains the nose plus 2.1x its area - not the car. That partial mask also flickers (1.0x..2.1x), so it is off: a stable nose with no heading beats a wandering almost-car. attach_to_outline stays in the code, off, for a car whose dark half is one clean piece. TO GET THE WHOLE CAR: paint the rear as well, so the colour mask covers both ends - which is exactly why the previous red car worked, being painted at both ends.",
+  "_measured": "Measured on the real car. The paint (yellow nose) is all a colour mask can see: H 24..33, S 93..138, V 115..211, 693 px, position jitter +-0.14 px. The cabin is found by asking WHICH SIDE of the paint is dark, not by looking for dark pixels: measured on one frame, beside the paint's own bounding box, right=78 (the cabin), above=181, left=178, below=173, against a road at 186. A 20:1 separation that did not move with the threshold (20, 30, 40 levels all gave the same box). The union is kept to the paint's width so the car's shadow is not absorbed: 79x31, area 2101, elongation 2.69, centre (472.6,427.4) instead of the nose's (443,427), heading 0.0 and front_heading 180.0 - the front being the painted end, a fact about this car, applied only when the paint covers less than 80% of the car's length.",
   "attach_dark_max_s": 160,
   "attach_dark_margin_v": 0,
   "attach_dark_max_px": 60,
@@ -25,5 +25,10 @@
   "attach_edges": false,
   "canny_low": 15,
   "canny_high": 35,
-  "attach_edges_max_px": 200
+  "attach_edges_max_px": 200,
+  "attach_paint_side": true,
+  "front_is_the_painted_end": true,
+  "paint_side_gap": 6,
+  "paint_side_reach": 0,
+  "paint_side_min_drop": 40
 }
