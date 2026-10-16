@@ -66,6 +66,7 @@ static int s_candidate_ms;
  * Release it once and the gate is armed.
  */
 static bool s_armed;
+static bool s_debounced_reported;   /* last level already logged */
 
 /* Servo position, in microseconds of pulse width. */
 static int s_pulse_us;
@@ -184,6 +185,22 @@ static void gate_step(void)
         }
     } else {
         s_candidate_ms = 0;
+    }
+
+    /*
+     * Log the input's own edges, not just the state machine's transitions.
+     *
+     * Without this the switch is invisible until it causes something: the state only
+     * moves when the input is pressed *and* the gate is armed, and the gate only arms
+     * after it has seen the input released. So a switch that is stuck closed - a stray
+     * wire to ground, a normally-closed contact, a re-wiring mistake - produces a gate
+     * that looks perfectly idle and a log that says nothing at all.
+     *
+     * One line per edge, so it cannot flood.
+     */
+    if (s_debounced != s_debounced_reported) {
+        s_debounced_reported = s_debounced;
+        ESP_LOGI(TAG, "sensor %s", s_debounced ? "pressed" : "released");
     }
 
     /* --- transitions ---------------------------------------------------- */

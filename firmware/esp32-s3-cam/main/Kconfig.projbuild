@@ -445,7 +445,9 @@ menu "Barrier Gate (servo + contact switch)"
 
             With this on, the servo sweeps FROM..TO in STEP steps, holding each
             for DWELL ms and printing the width, then parks closed and the gate
-            runs normally. Write the two widths you want into
+            runs normally. That sweep doubles as the "is this servo alive at all"
+            test: it is slow, it covers the whole usable range, and it starts 300 us
+            clear of the usual end so it cannot drive an unmeasured arm into a stop. Write the two widths you want into
             GATE_PULSE_CLOSED_US / GATE_PULSE_OPEN_US and turn this off.
 
             The window starts at 800 us, far from the ends, on purpose: the first
