@@ -367,6 +367,21 @@ cmd_status() {
     local v_age
     v_age="$(seconds_since_started vision)"
 
+    # Code or calibration edited after the process started: the change is not running. This has
+    # already fooled us twice - a restart at 06:44 with an edit at 06:53 - and a stale process
+    # looks exactly like a logic fault, which is the expensive kind of wrong. One line of output
+    # is cheaper than remembering.
+    if [ -n "${v_age:-}" ]; then
+        local newest started
+        newest="$(find "$ROOT/vision/src" "$ROOT/vision/config" \( -name '*.py' -o -name '*.json' \) -print 2>/dev/null \
+                 | xargs stat -f %m 2>/dev/null | sort -rn | head -1)"
+        started="$(( $(date +%s) - v_age ))"
+        if [ -n "$newest" ] && [ "$newest" -gt "$started" ]; then
+            warn "vision code or calibration is newer than the running vision process"
+            say "     → the fix is not running:  ./start.sh restart"
+        fi
+    fi
+
     if ! port_answers "$VISION_PORT"; then
         warn "serve.py is not answering on :$VISION_PORT - the strip has no state source"
     else
