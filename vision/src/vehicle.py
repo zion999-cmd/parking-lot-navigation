@@ -448,11 +448,20 @@ def _ray_gap(a: float, b: float) -> float:
 
 def attach_paint_side(mask: np.ndarray, value: np.ndarray, angle: float, gap: int = 6,
                       reach: int = 0, min_drop: int = 40) -> np.ndarray:
-    """The paint plus the dark region beyond it in direction `angle`.
+    """The paint plus the dark region beyond it in direction `angle`, kept to the car's own width.
 
-    Kept to a corridor a little wider than the paint: the car's shadow lies along the car, not
-    across it, and without that limit an earlier version absorbed the shadow and came out square
-    (81 px across a car 31 px wide) with no axis at all.
+    Two passes, because one is not enough and the measurements say so:
+
+    Pass one looks in a generous probe, wide enough that the 22.5-degree quantisation of the rays
+    cannot miss the cabin even if the car is diagonal and the cabin drifts sideways over the
+    length of the probe. That probe is deliberately too wide to use as the answer: on the saved
+    frame it came out 36.6 px across on a car 31 px tall, swallowed the road above and below the
+    car, and the box went from 91x31 to 84x38 - shorter and stubbier, elongation 2.99 down to
+    1.94. That is the regression this function exists to undo.
+
+    Pass two measures the car's own axis - the direction from the paint to the centroid of what
+    pass one found - and re-cuts the region to a band of the paint's own width along that axis.
+    The shadow lies along the car, not across it, so this is what removes it.
     """
     blob, _ = _largest_component(mask)
     ys, xs = np.nonzero(blob)
@@ -461,17 +470,46 @@ def attach_paint_side(mask: np.ndarray, value: np.ndarray, angle: float, gap: in
     cx, cy = float(xs.mean()), float(ys.mean())
     half = _paint_half_width(blob)
     reach = _reach_for(reach, int(xs.max() - xs.min()), int(ys.max() - ys.min()))
+    paint_v = float(np.median(value[blob > 0]))
 
-    corridor = _ray_mask(value.shape, cx, cy, angle, gap, reach, half * 1.4)
-    here = (corridor > 0) & (blob == 0)
+    # Pass one: the direction says where to look, this probe is only for finding the dark region.
+    probe = _ray_mask(value.shape, cx, cy, angle, gap, reach, half * 1.5)
+    here = (probe > 0) & (blob == 0)
     if not here.any():
         return mask
-    # Halfway between the paint and what that direction reads: the cabin is far below both, the
-    # road sits at that direction's own level, so the cut has a wide margin either way.
-    cut = 0.5 * (float(np.median(value[blob > 0])) + float(np.median(value[here])))
-    dark = np.zeros_like(value)
-    dark[here & (value <= cut)] = 255
-    return cv2.bitwise_or(mask, dark)
+    cut = 0.5 * (paint_v + float(np.median(value[here])))
+    dark = here & (value <= cut)
+    if not dark.any():
+        return mask
+
+    # The car's own axis: paint's centroid to the dark region's centroid.
+    dark_ys, dark_xs = np.nonzero(dark)
+    axis = math.degrees(math.atan2(float(dark_ys.mean()) - cy, float(dark_xs.mean()) - cx))
+
+    # Pass two: a band of the paint's width along that axis. A little slack, because the car is a
+    # hand-held toy and the paint is not perfectly square.
+    band = _ray_mask(value.shape, cx, cy, axis, gap, reach, half * 1.15)
+    keep = dark & (band > 0)
+    if not keep.any():
+        return mask
+
+    # Only what touches the paint. Scattered dark patches on the road do not, the cabin does -
+    # this is the constraint that the four earlier attempts never used.
+    near = cv2.dilate(blob, np.ones((7, 7), np.uint8))
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(keep.astype(np.uint8) * 255, 8)
+    touching = None
+    for i in range(1, count):
+        component = labels == i
+        if (component & (near > 0)).any():
+            if touching is None or stats[i, 4] > stats[touching, 4]:
+                touching = i
+    if touching is None:
+        return mask                       # nothing touching: do not invent a car body
+
+    grown = np.zeros_like(value)
+    grown[labels == touching] = 255
+    return cv2.bitwise_or(mask, grown)
+
 
 def attach_dark(mask: np.ndarray, hsv: np.ndarray, margin_v: int, max_s: int,
                 max_px: int = 60, ring_px: int = 25) -> np.ndarray:
