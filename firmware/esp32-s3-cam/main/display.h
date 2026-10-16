@@ -72,6 +72,19 @@ void display_restore(void);
 /** Escape hatch for anything not covered above. */
 void display_show_error(const char *title, const char *hint);
 
+/**
+ * Show the fixed test QR code, full screen.
+ *
+ * A transient overlay, like the OTA screens: display_restore() puts the previous
+ * base screen back. The modules are a baked constant (qr_test.h) scaled to fill
+ * the panel with a full four module quiet zone, so this allocates nothing and
+ * encodes nothing - it is 441 filled squares in the existing frame buffer.
+ *
+ * 'payload' is only logged (pass NULL for the compiled-in test payload); the modules
+ * themselves live in qr_test.h, which tools/make-qr-test.py generates.
+ */
+void display_show_qr(const char *payload);
+
 #ifdef __cplusplus
 }
 #endif

@@ -262,10 +262,18 @@ static void gate_task(void *arg)
 {
     (void)arg;
 
-    /* Closed is the safe position: it is the position the arm is in when nothing
-     * is happening, so there is no boot-time swing for a bystander to be hit by. */
+    /*
+     * Park at the closed position, as a ramp rather than a step. With
+     * GATE_CALIBRATE on this is skipped: the sweep below is the measurement, and
+     * it starts at the low end of its own window.
+     */
+#if !CONFIG_GATE_CALIBRATE
     servo_ramp_to(CONFIG_GATE_PULSE_CLOSED_US);
-    servo_ramp_step();
+    while (s_ramping) {
+        vTaskDelay(pdMS_TO_TICKS(GATE_TICK_MS));
+        servo_ramp_step();
+    }
+#endif
 
 #if CONFIG_GATE_CALIBRATE
     gate_calibrate();
@@ -332,12 +340,29 @@ bool gate_start(void)
         return false;
     }
 
+    /*
+     * The first PWM the servo sees is GATE_START_PULSE_US, not the closed
+     * position, and that is deliberate. There is no position feedback: whatever
+     * pulse arrives first is a command, and the servo travels to it. Until the
+     * arm has been calibrated, the middle of the electrical range is the one
+     * place least likely to be a mechanical stop, so that is where it goes first;
+     * the move to the closed position is then a ramp, like every other move.
+     *
+     * Calibration overrides this and starts at the low end of its own window
+     * instead - see gate_calibrate().
+     */
+#if CONFIG_GATE_CALIBRATE
+    const int start_us = CONFIG_GATE_CALIBRATE_FROM_US;
+#else
+    const int start_us = CONFIG_GATE_START_PULSE_US;
+#endif
+
     ledc_channel_config_t ch = {};
     ch.gpio_num = CONFIG_GATE_SERVO_GPIO;
     ch.speed_mode = LEDC_LOW_SPEED_MODE;
     ch.channel = LEDC_CHANNEL_2;
     ch.timer_sel = LEDC_TIMER_2;
-    ch.duty = pulse_to_duty(CONFIG_GATE_PULSE_CLOSED_US);
+    ch.duty = pulse_to_duty(start_us);
     ch.hpoint = 0;
     if (ledc_channel_config(&ch) != ESP_OK) {
         ESP_LOGE(TAG, "could not configure servo channel");
@@ -345,9 +370,9 @@ bool gate_start(void)
         return false;
     }
 
-    /* Start from the closed position, so the first ramp has a defined origin. */
-    servo_write(CONFIG_GATE_PULSE_CLOSED_US);
-    s_ramp_from_us = s_pulse_us;
+    /* Start from the position just commanded, so the first ramp has a defined
+     * origin rather than a guess. */
+    servo_write(start_us);
 
     if (xTaskCreate(gate_task, "gate", 4096, NULL, 4, NULL) != pdPASS) {
         ESP_LOGE(TAG, "could not start the gate task");

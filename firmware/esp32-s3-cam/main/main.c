@@ -44,6 +44,37 @@ static const char *TAG = "app";
  *   WiFi connected / IP address / Camera initialized / Stream server started
  */
 
+#if CONFIG_QR_SHOW_ON_BOOT
+/*
+ * One-shot timer that takes the QR overlay down. A timer rather than a task
+ * because there is nothing to wait for: display_restore() only posts to the
+ * display queue, which is safe from the esp_timer task.
+ */
+static esp_timer_handle_t s_qr_timer = NULL;
+
+static void qr_overlay_off(void *arg)
+{
+    (void)arg;
+    display_restore();
+}
+
+static void qr_overlay_start(void)
+{
+    if (s_qr_timer == NULL) {
+        const esp_timer_create_args_t args = {
+            .callback = qr_overlay_off,
+            .name = "qr_test",
+        };
+        if (esp_timer_create(&args, &s_qr_timer) != ESP_OK) {
+            ESP_LOGW(TAG, "could not create the QR timer - the code stays on screen");
+            return;
+        }
+    }
+    esp_timer_start_once(s_qr_timer, (uint64_t)CONFIG_QR_BOOT_SECONDS * 1000000ULL);
+    ESP_LOGI(TAG, "test QR shown for %d s", CONFIG_QR_BOOT_SECONDS);
+}
+#endif
+
 static SemaphoreHandle_t s_connected_sem = NULL;
 static SemaphoreHandle_t s_disconnected_sem = NULL;
 
@@ -215,6 +246,23 @@ void app_main(void)
      */
     display_init();
     display_show_boot(ota_running_version());
+
+#if CONFIG_QR_SHOW_ON_BOOT
+    /*
+     * The test QR is shown at every boot for CONFIG_QR_BOOT_SECONDS, then the panel
+     * goes back to whatever it was showing. Two reasons for a timed overlay rather
+     * than a permanent screen: the panel's original job is still the device IP (see
+     * README 12), and someone standing in front of a sandbox with a phone needs a
+     * window they can rely on rather than one that ends when Wi-Fi happens to
+     * connect.
+     *
+     * Displayed before Wi-Fi is up on purpose: a QR code that only works on a
+     * healthy network is the one thing you cannot check when the network is what
+     * you are debugging.
+     */
+    display_show_qr(NULL);      /* NULL = the payload baked into qr_test.h */
+    qr_overlay_start();
+#endif
 
     s_connected_sem = xSemaphoreCreateBinary();
     s_disconnected_sem = xSemaphoreCreateBinary();

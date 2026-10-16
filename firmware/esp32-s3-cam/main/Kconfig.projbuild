@@ -340,6 +340,24 @@ menu "Barrier Gate (servo + contact switch)"
             rail that sags takes the camera and the panel with it, or resets the
             board (rst:0x1 POWERON). Slower costs nothing on a barrier arm.
 
+    config GATE_START_PULSE_US
+        int "First position commanded at boot (us)"
+        range 500 2600
+        default 1500
+        help
+            There is no position feedback on a servo: whatever pulse arrives first
+            is a command, and the arm travels to it. Until the arm has been
+            calibrated, the middle of the electrical range (1500 us) is the one
+            place least likely to be a mechanical stop, so that is where it is sent
+            first, and the move to the closed position is then a ramp.
+
+            A servo driven into a stop stalls at 1.5-2.5 A. Set this to
+            GATE_PULSE_CLOSED_US once the arm has been calibrated and there is
+            nothing left to discover.
+
+            Ignored while GATE_CALIBRATE is on: the sweep starts at
+            GATE_CALIBRATE_FROM_US instead.
+
     config GATE_PULSE_CLOSED_US
         int "Closed position, pulse width (us)"
         range 500 2600
@@ -402,5 +420,37 @@ menu "Barrier Gate (servo + contact switch)"
         depends on GATE_CALIBRATE
         range 100 5000
         default 700
+
+endmenu
+
+menu "QR code on the status panel"
+
+    config QR_SHOW_ON_BOOT
+        bool "Show the test QR code at boot"
+        default y
+        help
+            Displays the fixed test QR (main/qr_test.h) full screen for
+            QR_BOOT_SECONDS at every boot, then puts the status screen back.
+
+            It is shown before Wi-Fi comes up on purpose: a QR code that only
+            appears on a healthy network cannot be checked when the network is
+            what is being debugged.
+
+            Turn this off once the code has been scanned and the real trigger
+            (the gate) is what should bring it up.
+
+    config QR_BOOT_SECONDS
+        int "How long to show it (s)"
+        depends on QR_SHOW_ON_BOOT
+        range 5 600
+        default 45
+        help
+            45 s because that is how long "pick up the phone, open the camera,
+            aim it, focus" actually takes when someone is also holding a car.
+
+            The code is 8 px per module with a 4 module quiet zone, which is the
+            largest a version 1 code gets on a 240 px panel - see display.c
+            draw_qr(). Change the payload and the header is regenerated with
+            tools/make-qr-test.py; the scale follows the new version automatically.
 
 endmenu

@@ -18,6 +18,7 @@
 #include <esp_log.h>
 
 #include "font8x16.h"
+#include "qr_test.h"
 #include <sdkconfig.h>
 
 /*
@@ -84,6 +85,11 @@ static const char *TAG = "display";
 #define COL_ACCENT  0x07FF  /* cyan   */
 #define COL_WARN    0xFD20  /* orange */
 
+/* Pure black on pure white: a QR code read by a phone camera is one of the few
+ * places where "use the exact values" matters more than "match the theme". */
+#define COL_QR_DARK  0x0000
+#define COL_QR_LIGHT 0xFFFF
+
 #define TEXT_X      8
 #define TEXT_Y      16
 #define LINE_H      20
@@ -112,22 +118,28 @@ typedef enum {
     MSG_OTA_OK,
     MSG_OTA_FAIL,
     MSG_ERROR,
+    MSG_QR,
 } msg_kind_t;
 
 /*
- * OTA screens are *transient overlays*: they cover whatever the device was
- * showing and are expected to be undone. Everything else is a "base" screen -
- * the steady state a human should see.
+ * OTA screens *and the QR screen* are transient overlays: they cover whatever the
+ * device was showing and are expected to be undone. Everything else is a "base"
+ * screen - the steady state a human should see.
  *
  * This exists because every way an OTA check can end (fetch failure, invalid
  * manifest, already up to date, download or SHA256 failure) has to put the base
  * screen back. Otherwise the panel stays stuck on "Checking update..." forever
  * and the one thing it must always show - the device IP - disappears.
+ *
+ * The QR is in the same category for the same reason: it is shown because
+ * something is happening (a car at the gate, or the boot self test), and when
+ * that stops the panel has to go back to the IP without anyone having to
+ * remember what it was.
  */
 static bool msg_is_transient(msg_kind_t kind)
 {
     return kind == MSG_OTA_CHECKING || kind == MSG_OTA_PROGRESS ||
-           kind == MSG_OTA_OK || kind == MSG_OTA_FAIL;
+           kind == MSG_OTA_OK || kind == MSG_OTA_FAIL || kind == MSG_QR;
 }
 
 typedef struct {
@@ -287,6 +299,52 @@ static void flush(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/* QR screen                                                                  */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * The quiet zone is part of the code, not decoration: a scanner uses the white
+ * border to find where the code starts. Four modules is the spec's minimum, and
+ * the scale is chosen so a full four module border fits - which is also what
+ * makes the modules as large as they can be:
+ *
+ *   (21 + 2*4) modules * 8 px = 232 px of 240, leaving 36 px each side.
+ *
+ * Anything bigger than 8 px per module would eat into the quiet zone, and a code
+ * that is 12% larger but unreadable is not larger at all. The scale is computed
+ * rather than written down so that a different payload (a real URL, later) with a
+ * different version still comes out scaled to the screen.
+ */
+#define QR_QUIET_MODULES 4
+
+static void draw_qr(void)
+{
+    const int total_modules = QR_TEST_SIZE + 2 * QR_QUIET_MODULES;
+    int scale = LCD_W / total_modules;
+    if (scale < 1) {
+        scale = 1;                  /* pathological payload: draw it anyway */
+    }
+    const int side = QR_TEST_SIZE * scale;
+    const int origin_x = (LCD_W - side) / 2;
+    const int origin_y = (LCD_H - side) / 2;
+
+    /* White first: this is the quiet zone as well as the light modules, and
+     * drawing dark-on-dark would be the one thing a scanner cannot fix. */
+    fill(COL_QR_LIGHT);
+
+    for (int row = 0; row < QR_TEST_SIZE; row++) {
+        for (int col = 0; col < QR_TEST_SIZE; col++) {
+            if ((qr_test_rows[row][col / 8] >> (col % 8)) & 1) {
+                /* Integer-aligned squares at the module size: no scaling, no
+                 * interpolation, sharp edges. */
+                fill_rect(origin_x + col * scale, origin_y + row * scale,
+                          scale, scale, COL_QR_DARK);
+            }
+        }
+    }
+}
+
+/* ------------------------------------------------------------------------- */
 /* Screens                                                                    */
 /* ------------------------------------------------------------------------- */
 
@@ -412,6 +470,13 @@ static void render(const disp_msg_t *m)
         draw_block(all, cols, 3);
         break;
     }
+
+    case MSG_QR:
+        /* Nothing but the code: at 240 px there is no room for a code that can be
+         * scanned and a label that can be read, and the code is the one that has
+         * a job to do. m->a carries the payload for the log, not for the panel. */
+        draw_qr();
+        break;
     }
 
     flush();
@@ -645,5 +710,20 @@ void display_show_error(const char *title, const char *hint)
     disp_msg_t m = make_msg(MSG_ERROR);
     snprintf(m.a, sizeof(m.a), "%s", title ? title : "ERROR");
     snprintf(m.b, sizeof(m.b), "%s", hint ? hint : "");
+    post(&m);
+}
+
+void display_show_qr(const char *payload)
+{
+    disp_msg_t m = make_msg(MSG_QR);
+    /*
+     * The payload does not reach the panel - the modules are a baked constant, so
+     * there is nothing to encode at runtime and nothing to allocate. It is carried
+     * in the message anyway so that the log says which code is on the glass, which
+     * is the thing that a "cannot scan it" report needs to be checked against.
+     */
+    snprintf(m.a, sizeof(m.a), "%s", payload ? payload : QR_TEST_PAYLOAD);
+    ESP_LOGI(TAG, "showing QR code: \"%s\" (%d x %d modules)",
+             m.a, QR_TEST_SIZE, QR_TEST_SIZE);
     post(&m);
 }
