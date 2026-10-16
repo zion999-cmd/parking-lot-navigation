@@ -151,7 +151,7 @@ menu "Parking Lot Bay Lights (WS2812B)"
 
     config LED_ORDER
         string "Bay id per pixel, in strip order"
-        default "9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,37,36,35,34,33,32,31,30,29,28,27,26,25,38,39,40,41,42,43,44,45,46,47,48,49,50,B1,B2,B3,B4,B5,B6"
+        default "9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,B6,B5,B4,B3,B2,B1"
         help
             Comma separated bay ids, position = pixel index, starting at the
             pixel nearest DIN. Empty means the lights are disabled and the reason

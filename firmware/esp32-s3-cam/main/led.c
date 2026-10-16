@@ -338,9 +338,14 @@ static bool fetch_target(char *route_buf, char *out, size_t out_len)
  * Only "state" is read. "changed_ratio" is deliberately ignored: the contract
  * says it is diagnostic information and must not be used to make a decision, and
  * this is a decision.
+ *
+ * Returns how many of the mapped bays the document actually contained, which the
+ * caller uses to say so when the answer is "none of them".
  */
-static void build_frame(const cJSON *spots, const char *target)
+static int build_frame(const cJSON *spots, const char *target)
 {
+    int found = 0;
+
     for (int i = 0; i < CONFIG_LED_COUNT; i++) {
         bay_state_t state = BAY_UNKNOWN;
 
@@ -348,6 +353,9 @@ static void build_frame(const cJSON *spots, const char *target)
             const cJSON *spot = cJSON_GetObjectItemCaseSensitive(spots, s_bay[i]);
             const cJSON *js = spot ? cJSON_GetObjectItemCaseSensitive(spot, "state") : NULL;
 
+            if (js != NULL) {
+                found++;
+            }
             if (cJSON_IsString(js)) {
                 if (strcmp(js->valuestring, "EMPTY") == 0) {
                     state = BAY_EMPTY;
@@ -368,7 +376,7 @@ static void build_frame(const cJSON *spots, const char *target)
 
     /* Second pass: the navigation target paints over green, never over red. */
     if (target == NULL || target[0] == '\0') {
-        return;
+        return found;
     }
 
     for (int i = 0; i < CONFIG_LED_COUNT; i++) {
@@ -388,6 +396,8 @@ static void build_frame(const cJSON *spots, const char *target)
         }
         break;
     }
+
+    return found;
 }
 
 /* Log the pixels whose colour changed, so a transition can be traced to a bay. */
@@ -421,6 +431,37 @@ static void log_changes(void)
 
     if (used > 0) {
         ESP_LOGI(TAG, "%d lit, %d dark | %s", drawn, dark, line);
+    }
+}
+
+/*
+ * Say so when the state document and LED_ORDER do not describe the same bays.
+ *
+ * Without this the mismatch is silent: every pixel is dark, and a transition log
+ * has nothing to report because "dark" is what it started as. Seen in practice -
+ * a vision process still running against an older calibration published bay ids of
+ * 105..207 while the strip was mapped to 9..50, and the strip simply sat there
+ * dark with a clean log. The count is reported when it changes, so a pipeline that
+ * comes back with the right ids says that too.
+ */
+static void log_bays_found(int found)
+{
+    static int last = -1;
+
+    if (found == last) {
+        return;
+    }
+    last = found;
+
+    if (found == 0) {
+        ESP_LOGE(TAG, "none of the %d bays in LED_ORDER are in the state document - "
+                      "the ids do not match the running calibration (check that the vision "
+                      "process was restarted after the map was edited)", CONFIG_LED_COUNT);
+    } else if (found < CONFIG_LED_COUNT) {
+        ESP_LOGW(TAG, "only %d of %d bays in LED_ORDER are in the state document - "
+                      "the rest stay dark", found, CONFIG_LED_COUNT);
+    } else {
+        ESP_LOGI(TAG, "all %d bays matched", found);
     }
 }
 
@@ -629,10 +670,11 @@ static void led_task(void *arg)
             char target[BAY_ID_MAX] = "";
             bool have_target = (route != NULL) && fetch_target(route, target, sizeof(target));
 
-            build_frame(spots, have_target ? target : NULL);
+            int found = build_frame(spots, have_target ? target : NULL);
             led_show();
             is_dark = false;
             log_changes();
+            log_bays_found(found);
             s_status = LED_OK;
         }
 
