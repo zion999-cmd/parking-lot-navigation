@@ -17,9 +17,13 @@
   "close_kernel": 30,
   "min_area": 80,
   "_about": "Hero vehicle parameters. hue_ranges are HSV [lo,hi] pairs of the PAINT; attach_dark_max_v/_s attach the car's dark part to it (0 = the paint covers the whole car, which is the case for a car painted at both ends). open_kernel removes specks; close_kernel joins the body's halves; min_area rejects smaller things. Re-record the front/rear template afterwards and CHECK corr(right,left) is negative.",
-  "_measured": "2026-10-17, yellow nose + black cabin. Paint: H 24..33, S 93..138, V 115..211, stable at 460..500 px every frame. PROBLEM: attaching the black cabin is NOT reliable - the cabin is only ~36 grey levels darker than the road beside it (147 vs 183) while the road itself varies more than that across the frame, so a threshold that catches the cabin on one frame misses it on the next. Measured over 14 frames: the mask flipped between the whole car (3,175 px, axis 0 deg) and the nose alone (460 px) six times, and the reported position moved +/-17 px with it. attach_dark_margin_v is therefore 0: a stable nose with no heading beats a flickering whole car. To get the heading back, either give the car paint at BOTH ends (the previous car was red at both ends, which is exactly why a colour mask covered it), or take the cabin from edges rather than brightness.",
+  "_measured": "2026-10-17, yellow nose + black cabin, 800x600. THE PAINT (the nose) is all a colour mask can see: H 24..33, S 93..138, V 115..211, stable 460..500 px, position jitter +-0.14 px. The cabin cannot be added reliably: (1) brightness - the cabin reads V 98 on one frame and 147 on another while the road beside it reads 150 and 183, so the mask flipped between whole car and nose six times in fourteen frames; (2) OUTLINE - both halves are ~36 grey levels from the road and the car's silhouette is a real closed curve, but the cabin is fragmented by its own specular reflections, so the pocket the outline seals off contains the nose plus 2.1x its area - not the car. That partial mask also flickers (1.0x..2.1x), so it is off: a stable nose with no heading beats a wandering almost-car. attach_to_outline stays in the code, off, for a car whose dark half is one clean piece. TO GET THE WHOLE CAR: paint the rear as well, so the colour mask covers both ends - which is exactly why the previous red car worked, being painted at both ends.",
   "attach_dark_max_s": 160,
   "attach_dark_margin_v": 0,
   "attach_dark_max_px": 60,
-  "front_is_the_wider_end": false
+  "front_is_the_wider_end": false,
+  "attach_edges": false,
+  "canny_low": 15,
+  "canny_high": 35,
+  "attach_edges_max_px": 200
 }

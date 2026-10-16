@@ -73,6 +73,9 @@ _DEFAULT_VEHICLE_CONFIG = {
     "attach_dark_margin_v": 0,
     "attach_dark_max_s": 160,
     "attach_dark_max_px": 60,
+    # An outline-based attachment for a car painted at one end was tried and removed - see
+    # ATTACH_MAX_GROWTH below for the measurements. Nothing here is a substitute for painting
+    # both ends, which is the only thing measured to work on the real car.
 }
 
 
@@ -340,7 +343,10 @@ def attach_dark(mask: np.ndarray, hsv: np.ndarray, margin_v: int, max_s: int,
     # nothing. The road is the brighter part of the ring, so take that end of it.
     ref_v = float(np.percentile(hsv[:, :, 2][ring > 0], 80))
 
-    allowed = ((hsv[:, :, 2] <= ref_v - margin_v) & (hsv[:, :, 1] <= max_s)).astype(np.uint8)
+    # 255, not 1: the mask this is combined with holds 0/255, and bitwise_and of 255 with 1
+    # gives 1 - so a grown region came back in a different unit from the one it started in, and
+    # every area comparison afterwards was between two different scales.
+    allowed = (((hsv[:, :, 2] <= ref_v - margin_v) & (hsv[:, :, 1] <= max_s)) * 255).astype(np.uint8)
     kernel = np.ones((3, 3), np.uint8)
     grown = mask.copy()
     for _ in range(max_px):
