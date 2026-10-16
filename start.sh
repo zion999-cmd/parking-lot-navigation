@@ -62,6 +62,16 @@ info() { printf '  %s\n' "$*"; }
 warn() { printf '  ! %s\n' "$*"; }
 
 pidfile() { printf '%s/%s.pid' "$RUN" "$1"; }
+startedfile() { printf '%s/%s.started' "$RUN" "$1"; }
+seconds_since_started() {                   # "" if unknown
+    local f
+    f="$(startedfile "$1")"
+    [ -f "$f" ] || return 0
+    local t
+    t="$(cat "$f" 2>/dev/null || true)"
+    [ -n "$t" ] || return 0
+    printf '%s' "$(( $(date +%s) - t ))"
+}
 logfile() { printf '%s/%s.log' "$RUN" "$1"; }
 
 pid_of() {                                  # read a pid file, "" if absent/dead
@@ -140,10 +150,11 @@ start_one() {
     # shellcheck disable=SC2086
     nohup "$@" >>"$log" 2>&1 &
     printf '%s' "$!" > "$(pidfile "$name")"
+    date +%s > "$(startedfile "$name")"
 
     if [ -n "$ready" ]; then
         local i=0
-        while [ "$i" -lt 40 ]; do
+        while [ "$i" -lt 160 ]; do   # up to 40 s: main.py has to open the stream and write once
             if eval "$ready" >/dev/null 2>&1; then
                 info "$name: up (pid $(pid_of "$name"))"
                 return 0
@@ -163,6 +174,21 @@ start_one() {
     info "$name: started (pid $(pid_of "$name"))"
 }
 
+# Is the state document being written right now? This is the only honest readiness
+# signal the vision loop has: it has no port of its own, and "the process started" is
+# not the same as "the strip has data" - that difference is what made a freshly
+# started stack look broken.
+state_fresh() {
+    local r
+    r="$("$PY_SYS" -c 'import json, time, urllib.request
+try:
+    d = json.load(urllib.request.urlopen("http://127.0.0.1:8010/out/parking_state.json", timeout=3))
+    print("yes" if time.time() - int(d.get("timestamp", 0)) < 5 else "no")
+except Exception:
+    print("no")' 2>/dev/null || true)"
+    [ "$r" = "yes" ]
+}
+
 port_answers() {                            # ready-check for the HTTP services
     # Silent, and never a failure: this is a question, and "no" is a valid answer.
     curl -s --max-time 2 -o /dev/null "http://127.0.0.1:$1/" 2>/dev/null || true
@@ -174,9 +200,19 @@ port_answers() {                            # ready-check for the HTTP services
 
 camera_base() { printf '%s' "${1%/stream}"; }
 
-camera_ok() {                               # does this URL answer as our camera
-    [ -n "${1:-}" ] || return 1
-    curl -s --max-time 2 "$(camera_base "$1")/" 2>/dev/null | grep -q "Parking Lot Camera"
+# Does this URL answer as our camera?
+#
+# The timeout is a parameter, and generous by default, because of what happens when
+# the camera is already streaming: the MJPEG stream saturates the link (a ping to the
+# board measures 70-95 ms instead of the 2-5 ms it measures when idle), and a status
+# request that normally takes 80 ms can occasionally need seconds. Reporting "does not
+# answer" for a camera that is streaming perfectly is worse than reporting nothing,
+# because it sends someone to debug a camera that is working.
+camera_ok() {
+    local url="${1:-}" timeout="${2:-4}"
+    [ -n "$url" ] || return 1
+    curl -s --max-time "$timeout" "$(camera_base "$url")/" 2>/dev/null \
+        | grep -q "Parking Lot Camera"
 }
 
 find_camera() {
@@ -185,10 +221,13 @@ find_camera() {
     if [ -f "$RUN/camera.txt" ]; then
         local cached
         cached="$(cat "$RUN/camera.txt" 2>/dev/null || true)"
-        if camera_ok "$cached"; then
+        # Short timeout first because this is the common path, then a long one: a
+        # streaming camera can miss the short one and still be perfectly fine.
+        if camera_ok "$cached" 3 || camera_ok "$cached" 8; then
             printf '%s' "$cached"
             return 0
         fi
+        warn "cached camera $cached did not answer; looking again"
         rm -f "$RUN/camera.txt"
     fi
 
@@ -202,7 +241,7 @@ find_camera() {
     tmp="$(mktemp -d)"
     for i in $(seq 1 254); do
         (
-            if curl -s --max-time 1 "http://$prefix.$i/" 2>/dev/null | grep -q "Parking Lot Camera"; then
+            if curl -s --max-time 3 "http://$prefix.$i/" 2>/dev/null | grep -q "Parking Lot Camera"; then
                 printf '%s' "http://$prefix.$i/stream" > "$tmp/found"
             fi
         ) &
@@ -267,9 +306,10 @@ cmd_start() {
         if [ ! -x "$PY_VISION" ]; then
             warn "$PY_VISION not found - set PY_VISION to the python that has cv2"
         else
-            # No ready-check: main.py has no port of its own unless the annotated
-            # view is up, and "it started" is all this can honestly claim.
-            start_one vision "" "cmd:src/main.py" \
+            # Ready means "the state document went fresh", not "the process exists".
+            # If it never does, the reason is in its own log (usually the camera
+            # stream), so that is what gets printed.
+            start_one vision "state_fresh" "cmd:src/main.py" \
                 "$PY_VISION" -u "$ROOT/vision/src/main.py" \
                 --source "$source" --annotated-port "$ANNOTATED_PORT" || true
         fi
@@ -320,12 +360,16 @@ cmd_status() {
     # The state document, its age, and whether its bays are the ones the strip is
     # mapped to. That last one is the failure that looks like "the strip is dead
     # and the log is clean": a vision process still running an older calibration.
+    local v_age
+    v_age="$(seconds_since_started vision)"
+
     if ! port_answers "$VISION_PORT"; then
         warn "serve.py is not answering on :$VISION_PORT - the strip has no state source"
     else
-        "$PY_SYS" - "$ROOT" "$VISION_PORT" <<'PY' || true
+        "$PY_SYS" - "$ROOT" "$VISION_PORT" "${v_age:-}" <<'PY' || true
 import json, sys, time, urllib.request, os
 root, port = sys.argv[1], sys.argv[2]
+just_started = sys.argv[3] if len(sys.argv) > 3 else ""
 try:
     doc = json.load(urllib.request.urlopen(
         f"http://127.0.0.1:{port}/out/parking_state.json", timeout=4))
@@ -336,7 +380,15 @@ age = int(time.time()) - int(doc.get("timestamp", 0))
 ids = set(doc.get("spots", {}))
 print(f"  state document: {age} s old, {len(ids)} bays")
 if age > 15:
-    print("  ! stale: main.py is not writing (that is what blanks the strip)")
+    # A stack that was just started is not broken, it is early: main.py needs to open
+    # the stream and write once, which takes seconds. Saying "not writing" at that
+    # moment is how a working stack gets diagnosed as a broken one.
+    if just_started and int(just_started) < 60:
+        print(f"  ... waiting for the first state document "
+              f"(vision started {just_started} s ago)")
+    else:
+        print("  ! stale: nothing is writing parking_state.json")
+        print("    (that blanks the strip by design - check: ./start.sh logs vision)")
 try:
     cfg = json.load(open(os.path.join(root, "vision/config/parking_spots.json")))
     want = {s["id"] for s in cfg["spots"]}
@@ -348,8 +400,19 @@ try:
         print("  bays match the calibration")
 except Exception:
     pass
-occupied = sum(1 for v in doc.get("spots", {}).values() if v.get("state") == "OCCUPIED")
-print(f"  {occupied} occupied, {len(ids) - occupied} empty/unknown")
+# Counted separately, because EMPTY and UNKNOWN are not the same thing on the strip:
+# EMPTY is green, UNKNOWN is dark. Lumping them together hides the difference between
+# "the lot is empty" and "the detector has not seen these bays yet".
+states = {}
+for v in doc.get("spots", {}).values():
+    states[v.get("state", "?")] = states.get(v.get("state", "?"), 0) + 1
+print("  {occ} occupied, {emp} empty, {unk} unknown".format(
+    occ=states.get("OCCUPIED", 0), emp=states.get("EMPTY", 0), unk=states.get("UNKNOWN", 0)))
+if states.get("UNKNOWN", 0) and age < 20:
+    print("    (unknown right after a start is normal: no frame has been seen yet,"
+          " and the strip shows those dark)")
+elif states.get("UNKNOWN", 0):
+    print("    ! bays have been unknown for a while: the detector is not seeing them")
 PY
     fi
 
@@ -357,14 +420,15 @@ PY
     if [ -f "$RUN/camera.txt" ]; then
         local cam
         cam="$(cat "$RUN/camera.txt")"
-        if camera_ok "$cam"; then
+        if camera_ok "$cam" 4; then
             local ver
             ver="$(curl -s --max-time 3 "$(camera_base "$cam")/" 2>/dev/null \
                    | sed -e 's/<[^>]*>/ /g' | tr -s ' \n' ' \n' \
                    | grep -i firmware | head -1 | sed 's/^ *//' || true)"
             info "camera: $cam  ($ver)"
         else
-            warn "camera $cam does not answer (cached address; will re-probe on next start)"
+            warn "camera $cam did not answer in 4 s"
+            warn "  (a busy camera can be slow to answer while streaming; ./start.sh status to retry)"
         fi
     else
         warn "camera: unknown (pass --source, or let start find it)"

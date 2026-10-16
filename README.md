@@ -1390,10 +1390,14 @@ stack status
   what the strip needs
   state document: 8 s old, 48 bays          ← 超过 15 秒就会报警（灯带会灭）
   bays match the calibration                ← 不匹配就报警，见下
-  11 occupied, 37 empty/unknown
+  10 occupied, 38 empty, 0 unknown
   camera: http://192.168.3.118/stream  (Firmware 0.2.20 (slot ota_1) )
   beacon: running - the device will follow this PC's address
 ```
+
+**`occupied` / `empty` / `unknown` 是分开数的**，因为它们在灯带上不是一回事：
+**EMPTY 是绿，UNKNOWN 是灭**。把它们合成一个数字，就看不出"停车场是空的"和
+"检测器还没看到这些车位"的区别了（刚启动时全是 UNKNOWN 是正常的，灯带会先灭一下）。
 
 **"状态文档和标定不一致"那一条是特意加的**：`main.py` 是用启动时的标定跑着的，
 改完地图不重启它，状态文档里就是**另一套车位 id** —— 灯带会一颗都匹配不上、**整条黑掉，
@@ -1430,7 +1434,19 @@ stack status
 | 找不到相机 | 板子上电没、在同一 Wi-Fi 没；或 `--source` 指定 |
 | 完全不知道从哪查 | `./start.sh status` |
 
-### 21.6 说明
+### 21.6 写这个脚本时踩出来的四个坑（都修了，记下来）
+
+| 坑 | 症状 | 处理 |
+|---|---|---|
+| `set -e` + `pipefail` 把"没找到"当致命错误 | `status` 跑到一半就退出（`pgrep` 没匹配、`curl` 连不上**都是正常答案**）| 这类调用全部显式标记"这不是失败" |
+| vision 的"就绪"没有判据 | 刚起完就报 `! stale: main.py is not writing` ——**把正常启动中的栈诊断成坏的** | 就绪判据改成"**状态文档真的变新鲜**"（`state_fresh`），等不到就把它的日志打出来 |
+| `EMPTY` 和 `UNKNOWN` 混成一个数字 | 显示 `0 occupied, 48 empty/unknown`，看不出"停车场是空的"和"检测器还没看到"的区别（**EMPTY 是绿、UNKNOWN 是灭**）| 分开数，并且对"刚启动时的 UNKNOWN"单独解释 |
+| 相机健康检查超时太紧 | 报 `camera does not answer`，**而 vision 正在读它的流** | 相机在推流时链路被塞满（ping 从 2ms 涨到 70-95ms），单次状态请求可能超过 2 秒 → 超时放宽到 4 秒，缓存失败先**重试一次**（8 秒）再重新探测 |
+
+> 最后一条的教训值得单独说：**在状态检查里报假警报，比不报还坏** —— 它会把排查引到一个正在正常工作的设备上。
+> 所以"不答"这种结论，宁可多等几秒、多试一次。
+
+### 21.7 说明
 
 - 脚本按 **macOS 自带的 bash 3.2** 写（不用关联数组、不用 `${var,,}`、不用 `mapfile`）
 - 端口想改就改脚本顶部的常量；`serve.py` 绑的是 `0.0.0.0`（**必须**，设备和手机是别的机器）
