@@ -20,6 +20,7 @@
 #include <mbedtls/sha256.h>
 #include <sdkconfig.h>
 
+#include "discovery.h"
 #include "display.h"
 #include "wifi.h"
 #include "version.h"
@@ -27,7 +28,8 @@
 /*
  * Thin OTA client - device pull model.
  *
- *   1. GET the manifest (CONFIG_OTA_MANIFEST_URL)
+ *   1. GET the manifest (CONFIG_OTA_MANIFEST_URL, or the discovered host if
+ *      CONFIG_DISCOVERY_APPLY_OTA is on)
  *   2. compare its "version" against the running version as integers
  *   3. if newer: GET the firmware, hashing the stream with SHA-256
  *   4. compare the digest with the manifest, then esp_ota_write into the
@@ -56,6 +58,28 @@ static TaskHandle_t s_task = NULL;
 static volatile bool s_in_progress = false;
 static char s_available_version[16] = "-";
 static char s_last_result[96] = "not checked yet";
+
+/*
+ * The manifest URL in force.
+ *
+ * Discovery does NOT redirect OTA by default, and that is a deliberate choice
+ * rather than an oversight. The strip following a stranger's beacon costs wrong
+ * colours; an OTA client following one costs whatever firmware that stranger
+ * serves, and the only thing checking it is a SHA256 that the same manifest
+ * supplies (README 11.5: no signature). On a sandbox LAN that is a reasonable
+ * trade for state colours and not a reasonable one for code execution, so
+ * following the beacon here is opt-in.
+ */
+static void ota_manifest_url(char *out, size_t size)
+{
+/* #ifdef, not #if: a bool that defaults to n is left undefined entirely, so #if
+ * would be a compile error rather than a false branch. */
+#ifdef CONFIG_DISCOVERY_APPLY_OTA
+    discovery_url(CONFIG_OTA_MANIFEST_URL, out, size);
+#else
+    snprintf(out, size, "%s", CONFIG_OTA_MANIFEST_URL);
+#endif
+}
 
 const char *ota_running_version(void)
 {
@@ -115,9 +139,18 @@ void ota_log_boot_info(void)
              running->label, ota_running_version(), ota_state_name(state),
              next ? next->label : "none");
 
-    /* Print the configured server up front. A wrong address here used to be
-     * invisible until an OTA check timed out 30 s after boot. */
-    ESP_LOGI(TAG, "manifest URL  = %s", CONFIG_OTA_MANIFEST_URL);
+    /* Print the server that will actually be used, up front. A wrong address here
+     * used to be invisible until an OTA check timed out 30 s after boot, and now
+     * that the host can be discovered rather than compiled in, "which one is it
+     * using" is a question worth being able to answer from the log alone. */
+    char url[192];
+#ifdef CONFIG_DISCOVERY_APPLY_OTA
+    const char *note = " (host follows discovery)";
+#else
+    const char *note = "";
+#endif
+    ota_manifest_url(url, sizeof(url));
+    ESP_LOGI(TAG, "manifest URL  = %s%s", url, note);
 }
 
 void ota_mark_current_valid(void)
@@ -232,7 +265,7 @@ static bool http_get_to_buffer(const char *url, char *buf, size_t buf_len, size_
     return ok;
 }
 
-static bool fetch_manifest(ota_manifest_t *m)
+static bool fetch_manifest(const char *manifest_url, ota_manifest_t *m)
 {
     char *body = malloc(OTA_MANIFEST_MAX);
     if (body == NULL) {
@@ -243,7 +276,7 @@ static bool fetch_manifest(ota_manifest_t *m)
     bool ok = false;
     size_t len = 0;
 
-    if (!http_get_to_buffer(CONFIG_OTA_MANIFEST_URL, body, OTA_MANIFEST_MAX, &len)) {
+    if (!http_get_to_buffer(manifest_url, body, OTA_MANIFEST_MAX, &len)) {
         set_result("manifest: fetch failed");
         goto done;
     }
@@ -459,10 +492,13 @@ static void check_once(void)
         return;                     /* no overlay was shown, nothing to undo */
     }
 
-    ESP_LOGI(TAG, "checking %s (running %s)", CONFIG_OTA_MANIFEST_URL, ota_running_version());
+    char manifest_url[192];
+    ota_manifest_url(manifest_url, sizeof(manifest_url));
+
+    ESP_LOGI(TAG, "checking %s (running %s)", manifest_url, ota_running_version());
     display_show_ota_checking();
 
-    if (!fetch_manifest(&manifest)) {
+    if (!fetch_manifest(manifest_url, &manifest)) {
         goto done;                  /* reason is already in s_last_result */
     }
     snprintf(s_available_version, sizeof(s_available_version), "%s", manifest.version);
@@ -476,7 +512,9 @@ static void check_once(void)
     ESP_LOGI(TAG, "update available: %s -> %s", ota_running_version(), manifest.version);
 
     char url[256];
-    make_firmware_url(CONFIG_OTA_MANIFEST_URL, manifest.firmware_url, url, sizeof(url));
+    /* Relative firmware_url resolves against whichever manifest was fetched, so
+     * the download lands on the same machine the manifest came from. */
+    make_firmware_url(manifest_url, manifest.firmware_url, url, sizeof(url));
 
     if (download_and_flash(url, &manifest)) {
         display_show_ota_result(true);

@@ -15,6 +15,7 @@
 #include <esp_rom_sys.h>
 #include <sdkconfig.h>
 
+#include "discovery.h"
 #include "wifi.h"
 
 /*
@@ -297,8 +298,11 @@ static bool fetch_target(char *route_buf, char *out, size_t out_len)
 {
     static int failures = 0;
 
+    char route_url[192];
+    discovery_url(CONFIG_LED_ROUTE_URL, route_url, sizeof(route_url));
+
     size_t len = 0;
-    if (!fetch_document(CONFIG_LED_ROUTE_URL, route_buf, ROUTE_BODY_MAX, &len)) {
+    if (!fetch_document(route_url, route_buf, ROUTE_BODY_MAX, &len)) {
         if (failures++ == 0 || failures % 20 == 0) {
             ESP_LOGW(TAG, "no route document (%d in a row) - showing no target", failures);
         }
@@ -615,8 +619,16 @@ static void led_task(void *arg)
             continue;
         }
 
+        /*
+         * Resolved per poll rather than once: the server can move (the sandbox
+         * changes Wi-Fi), and the cost is one strcmp against the last beacon. If
+         * nothing has been heard this is simply the configured URL.
+         */
+        char state_url[192];
+        discovery_url(CONFIG_LED_STATE_URL, state_url, sizeof(state_url));
+
         size_t len = 0;
-        bool ok = fetch_document(CONFIG_LED_STATE_URL, body, STATE_BODY_MAX, &len);
+        bool ok = fetch_document(state_url, body, STATE_BODY_MAX, &len);
 
         cJSON *root = NULL;
         const cJSON *spots = NULL;
@@ -701,10 +713,12 @@ bool led_start(void)
                  mapped, CONFIG_LED_COUNT - 1);
     }
     if (CONFIG_LED_ORDER[0] != '\0') {
-        ESP_LOGI(TAG, "state source = %s (every %d ms)", CONFIG_LED_STATE_URL,
-                 CONFIG_LED_POLL_MS);
+        char url[192];
+        discovery_url(CONFIG_LED_STATE_URL, url, sizeof(url));
+        ESP_LOGI(TAG, "state source = %s (every %d ms)", url, CONFIG_LED_POLL_MS);
+        discovery_url(CONFIG_LED_ROUTE_URL, url, sizeof(url));
         ESP_LOGI(TAG, "target source = %s (green=EMPTY red=OCCUPIED yellow=target dark=UNKNOWN)",
-                 CONFIG_LED_ROUTE_URL);
+                 url);
     }
 
     led_init_hw();

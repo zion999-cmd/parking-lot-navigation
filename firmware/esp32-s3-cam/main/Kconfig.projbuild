@@ -491,3 +491,51 @@ menu "QR code on the status panel"
             tools/make-qr-test.py; the scale follows the new version automatically.
 
 endmenu
+
+menu "Server discovery"
+
+    config DISCOVERY_ENABLE
+        bool "Find the PC by listening for its beacon"
+        default y
+        help
+            The three server URLs and the QR code all name a PC whose address comes
+            from DHCP, so moving the sandbox to another Wi-Fi used to mean a rebuild
+            before anything worked again.
+
+            With this on, the device listens on DISCOVERY_PORT for a small UDP
+            broadcast from tools/beacon.py and uses the address that packet came
+            from. Ports and paths are not touched - a service on another port is a
+            different service, and that is configuration.
+
+            It is an improvement, never a requirement: if no beacon is ever heard,
+            or the last one is older than 15 s, every URL is used exactly as
+            configured, so this can be left on permanently.
+
+            Broadcasts do not cross a router, so the device and the PC have to share
+            a subnet. That is the same condition plain HTTP already imposes here.
+
+    config DISCOVERY_PORT
+        int "Beacon UDP port"
+        range 1024 65535
+        default 9999
+        help
+            Must match tools/beacon.py (its --port, 9999 by default). Only the source
+            address matters; the packet body is checked for a magic prefix so that
+            unrelated broadcasts are ignored.
+
+    config DISCOVERY_APPLY_OTA
+        bool "Let the beacon redirect the OTA server as well"
+        default n
+        help
+            Off by default, and the reason is asymmetric damage rather than a
+            property of the beacon.
+
+            The strip following a stranger's broadcast costs wrong colours. An OTA
+            client following one costs whatever firmware that stranger serves, and
+            the only check is a SHA256 that the same manifest supplies - there is no
+            signature (README 11.5). On a sandbox LAN that is an acceptable trade for
+            state colours and not an acceptable one for code execution.
+
+            Turn it on only on a network where everyone broadcasting is yours.
+
+endmenu

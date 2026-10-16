@@ -12,6 +12,7 @@
 #include <sdkconfig.h>
 
 #include "camera.h"
+#include "discovery.h"
 #include "display.h"
 #include "gate.h"
 #include "led.h"
@@ -270,6 +271,15 @@ void app_main(void)
         ESP_LOGE(TAG, "could not create the network semaphores");
         esp_restart();
     }
+
+    /*
+     * Listen for the PC's beacon before anything that talks to it. Safe before
+     * Wi-Fi is up: the socket binds either way, and until a beacon arrives every
+     * address behaves exactly as configured.
+     */
+#if CONFIG_DISCOVERY_ENABLE
+    discovery_start();
+#endif
 
     /* Does NVS, netif, the default event loop and the Wi-Fi driver. */
     ESP_ERROR_CHECK(wifi_init());
