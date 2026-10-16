@@ -29,6 +29,9 @@ vision/tests/__pycache__/
 #   vision/config/parking_spots.json   - the calibration itself, it is work
 #   vision/data/cases/labels.json      - hand-written ground truth for the cases
 
+# --- start.sh 的运行产物（pid 文件 + 日志）---
+run/
+
 # --- macOS ---
 .DS_Store
 

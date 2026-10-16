@@ -14,6 +14,21 @@ ESP32-S3-CAM 网络摄像头节点 —— **P0001 + P0001.1**
 
 ---
 
+## 0. 先说怎么跑起来
+
+PC 侧有 **4 个常驻服务**（状态服务 / 视觉 / 地址广播 / OTA），**一条命令全起来**：
+
+```zsh
+./start.sh            # 起全套；相机自己找；已经在跑的不重复起
+./start.sh status     # 一屏看清谁在跑、灯带能不能工作
+./start.sh stop       # 停掉
+./start.sh logs vision    # 跟某个日志
+```
+
+细节见 **§21**。想不起"灯为什么不亮"的时候，先跑 `./start.sh status`。
+
+---
+
 ## 1. 范围
 
 ```
@@ -1336,3 +1351,87 @@ http://192.168.3.102:8010/out/parking_state.json  +  10.0.0.7
 | PC 广播真的能发出去并被收到 | ✅ 当场验证：4 秒收到 5 个包，源地址 `192.168.3.102`、魔数正确 |
 | 六组 Kconfig 组合零警告构建 | ✅ 且大小各异（关掉发现 −1008 B）|
 | **设备真的能听到并切换服务器** | ⏳ **未实测**（需要设备在线时跑 beacon，看串口是否出现 `discovery: server is …`）|
+
+---
+
+## 21. 一条命令起全套（`start.sh`）
+
+PC 侧要常驻 4 个进程，靠人记是记不住的，所以有一个脚本：
+
+```zsh
+./start.sh                 # 起全套（默认命令就是 start）
+./start.sh status          # 一屏看清状态
+./start.sh stop            # 停掉
+./start.sh restart
+./start.sh logs vision     # 跟日志；名字有 serve / vision / beacon / ota
+```
+
+### 21.1 四个服务，各自是干什么的
+
+| 服务 | 端口 | 少了它会怎样 |
+|---|---|---|
+| **`serve.py`** | 8010 | **灯带全灭**（拿不到状态文档）、**二维码扫了跳不过去**、网页打不开 |
+| **`main.py`**（视觉）| 8020 | `parking_state.json` 不再更新 → **灯带按设计全灭** |
+| **`beacon.py`** | 9999 | 设备退回固件里配的地址 → **换 Wi-Fi 后要重编固件** |
+| `ota-server` | 8000 | 平时没影响；**升级时**拉不到 manifest |
+
+`main.py` 用的是带 OpenCV 的那个 python（conda 的 `vision-dev` 环境）。
+挪了环境就用 `PY_VISION=/path/to/python ./start.sh` 覆盖。
+
+### 21.2 `status` 会告诉你什么
+
+```
+stack status
+  serve    up (pid 85941)
+  vision   up (pid 86764)
+  beacon   up (pid 85927)
+  ota      up (pid 85916)
+
+  what the strip needs
+  state document: 8 s old, 48 bays          ← 超过 15 秒就会报警（灯带会灭）
+  bays match the calibration                ← 不匹配就报警，见下
+  11 occupied, 37 empty/unknown
+  camera: http://192.168.3.118/stream  (Firmware 0.2.20 (slot ota_1) )
+  beacon: running - the device will follow this PC's address
+```
+
+**"状态文档和标定不一致"那一条是特意加的**：`main.py` 是用启动时的标定跑着的，
+改完地图不重启它，状态文档里就是**另一套车位 id** —— 灯带会一颗都匹配不上、**整条黑掉，
+而且日志里一行都没有**（因为"灭→灭"没有变化可打）。这个故障真发生过，所以现在脚本直接报出来。
+
+### 21.3 相机地址是脚本自己找的
+
+`main.py` 的 `--source` 默认值里写着一个设备 IP，那个地址会变。所以脚本：
+
+1. 先看缓存 `run/camera.txt`（快，一次请求验证）
+2. 缓存无效就**扫本机 /24**，按**状态页标题** `Parking Lot Camera` 认设备（不是按 IP 认）
+3. 找到就记进缓存，下次直接用
+
+所以平时**不用管设备叫什么地址**。要指定就 `./start.sh --source http://<ip>/stream`。
+
+> 这一步把"PC → 设备"那处写死的地址在**使用层面**解掉了；`main.py` 里的默认值还在，
+> 但已经不需要人去改它。（彻底去掉的做法见 §20.4.1。）
+
+### 21.4 不会重复启动
+
+已经在跑的服务（**包括别人手动起的**）会被识别出来并**"收养"**（记下 pid），不会再起一个：
+两个 `serve.py` 抢 8010、两个 `main.py` 抢摄像头，都是很难查的故障。
+
+日志和 pid 都在 `run/`（已 gitignore）：`run/serve.log`、`run/vision.log` …
+
+### 21.5 现象 → 查哪个服务
+
+| 现象 | 先查 |
+|---|---|
+| 灯带全灭 | `serve.py`（:8010）→ 再看状态文档是否新鲜、id 是否与标定一致 |
+| 二维码扫出来打不开 | `serve.py`（:8010）在不在；手机是否和 PC 同网；Mac 的 `.local` 名字能不能解析 |
+| 升级没反应 / `manifest: fetch failed` | `ota-server`（:8000） |
+| 换了 Wi-Fi 后什么都要重编 | `beacon.py` 没跑 |
+| 找不到相机 | 板子上电没、在同一 Wi-Fi 没；或 `--source` 指定 |
+| 完全不知道从哪查 | `./start.sh status` |
+
+### 21.6 说明
+
+- 脚本按 **macOS 自带的 bash 3.2** 写（不用关联数组、不用 `${var,,}`、不用 `mapfile`）
+- 端口想改就改脚本顶部的常量；`serve.py` 绑的是 `0.0.0.0`（**必须**，设备和手机是别的机器）
+- 这个脚本是**开发/演示用的**，不是部署工具：没有守护、没有开机自启、崩了不会重拉
