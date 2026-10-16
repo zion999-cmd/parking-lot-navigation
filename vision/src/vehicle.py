@@ -60,6 +60,19 @@ _DEFAULT_VEHICLE_CONFIG = {
     "open_kernel": 5,
     "close_kernel": 21,      # CLOSE_KERNEL, the value measured for the red car
     "min_area": 80,          # DEFAULT_MIN_AREA
+    # Attach the car's dark part to its painted part. A car painted at both ends (the red one:
+    # bonnet, windscreen, roof, rear glass, boot) is covered by the colour mask alone. A car
+    # painted at one end only - a yellow nose and a black cabin - is not: the mask covers half
+    # the car, which leaves no long axis, and `elongation < 1.6` then declines to name a front.
+    # 0 disables it, which is what a both-ends-painted car wants.
+    # Which end the taper means. A fact about a particular toy car, not about pixels, so it is
+    # data. True = the wider end is the front (measured for the red car: +0.17 / -0.15 either
+    # side of a 180 turn). The yellow-nosed car measures the opposite way round, and with the
+    # wrong value the taper fallback reports the front backwards - confidently (evidence 0.79).
+    "front_is_the_wider_end": True,
+    "attach_dark_margin_v": 0,
+    "attach_dark_max_s": 160,
+    "attach_dark_max_px": 60,
 }
 
 
@@ -76,7 +89,9 @@ def vehicle_config(path: str = VEHICLE_CONFIG_PATH) -> dict:
             with open(path, "r", encoding="utf-8") as fh:
                 raw = json.load(fh)
             cfg = dict(_DEFAULT_VEHICLE_CONFIG)
-            for key in ("hue_ranges", "open_kernel", "close_kernel", "min_area"):
+            for key in ("hue_ranges", "open_kernel", "close_kernel", "min_area",
+                        "attach_dark_margin_v", "attach_dark_max_s",
+                        "attach_dark_max_px", "front_is_the_wider_end"):
                 if key in raw:
                     cfg[key] = raw[key]
             _VEHICLE_CONFIG_CACHE = cfg
@@ -270,6 +285,61 @@ def merge_near_components(mask: np.ndarray, gap_fraction: float = 0.9,
     return out
 
 
+# How much bigger than the paint the attached region may be before it is treated as a failure.
+# 6.6x is a good attachment on the real car; 22.7x is the same car leaking into the road.
+ATTACH_MAX_GROWTH = 8.0
+
+
+def attach_dark(mask: np.ndarray, hsv: np.ndarray, margin_v: int, max_s: int,
+                max_px: int = 60, ring_px: int = 25) -> np.ndarray:
+    """Grow `mask` into the dark part of the car that its paint colour does not cover.
+
+    For a car painted at one end only - a yellow nose with a black cabin. The colour mask finds
+    the nose; this walks outward from it through pixels that are darker than the road around the
+    car, which is where the cabin is.
+
+    Why not a plain dark range in hue_ranges: on this frame the dark, unsaturated pixels are one
+    63,000 px component spanning the whole picture, so "largest blob" would return the
+    background.
+
+    Why not an absolute V threshold either, which is what the first version used: the black part
+    of a glossy toy car is a mirror. Measured on two frames of the same car in different places,
+    the cabin reads V=98 in one and V=147 in the other, while the adjacent road reads 150 and
+    183. The absolute threshold that worked on the first frame (110) caught nothing at all on
+    the second. What holds across both is the *contrast*: the cabin is 52 and 36 levels darker
+    than the road beside the car. So the reference is local, measured from a ring around the
+    paint, and `margin_v` is how many levels below it counts as the car.
+
+    max_px bounds the growth, because a shadow cast by the car is also darker than the road and
+    would otherwise be absorbed. It is a distance cap, not a stopping rule.
+    """
+    if margin_v <= 0 or mask.max() == 0:
+        return mask
+
+    # The road around the car, from a ring that does not touch it.
+    k = np.ones((2 * ring_px + 1, 2 * ring_px + 1), np.uint8)
+    ring = cv2.bitwise_and(cv2.dilate(mask, k), cv2.bitwise_not(mask))
+    if not ring.any():
+        return mask
+    # The 80th percentile, not the median: the ring is only 25 px out, so the thing being
+    # attached - the cabin - is itself inside it on the side where the car extends, and a median
+    # then measures a mixture of road and cabin. Measured: with the median, `allowed` came out
+    # below the cabin (V 147 against a reference of ~165) and the attachment added 6 px of
+    # nothing. The road is the brighter part of the ring, so take that end of it.
+    ref_v = float(np.percentile(hsv[:, :, 2][ring > 0], 80))
+
+    allowed = ((hsv[:, :, 2] <= ref_v - margin_v) & (hsv[:, :, 1] <= max_s)).astype(np.uint8)
+    kernel = np.ones((3, 3), np.uint8)
+    grown = mask.copy()
+    for _ in range(max_px):
+        nxt = cv2.bitwise_or(grown, cv2.bitwise_and(cv2.dilate(grown, kernel), allowed))
+        if np.array_equal(nxt, grown):
+            break
+        grown = nxt
+
+    return grown
+
+
 def red_mask(hsv: np.ndarray, close_kernel: Optional[int] = None,
              open_kernel: Optional[int] = None) -> np.ndarray:
     """The car-colour regions as one connected shape, with enclosed holes filled.
@@ -295,13 +365,40 @@ def red_mask(hsv: np.ndarray, close_kernel: Optional[int] = None,
     if open_kernel > 1:
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, _ellipse(open_kernel // 2))
 
+    # What the paint alone found, kept as the fallback and as the scale for the plausibility
+    # test at the end of this function.
+    paint_area = float(mask.sum())
+    paint_only = mask.copy()
+
+    # The car's dark part, if this car has one that the paint does not cover (see the config).
+    mask = attach_dark(mask, hsv,
+                       int(cfg.get("attach_dark_margin_v", 0)),
+                       int(cfg.get("attach_dark_max_s", 160)),
+                       int(cfg.get("attach_dark_max_px", 60)))
+
     mask = merge_near_components(mask, gap_fraction=0.9)
 
     holes = mask.copy()
     cv2.floodFill(holes,
                    np.zeros((mask.shape[0] + 2, mask.shape[1] + 2), np.uint8),
                    (0, 0), 255)
-    return mask | cv2.bitwise_not(holes)
+    full = mask | cv2.bitwise_not(holes)
+
+    # Plausibility, checked here rather than inside attach_dark, because that is not where the
+    # damage happens: measured stage by stage, the attachment added 6 px, the merge added 1,400,
+    # and the hole fill added 9,000 - the fill treats background as an enclosed hole when the
+    # mask cuts the frame's corner region off from (0, 0).
+    #
+    # The test is growth relative to the paint. Measured on the same car: a good mask is 6.6x the
+    # paint (433 px of nose to 2,848 px of car); the leaking one was 22.7x (492 to 10,925). Area
+    # is what separates them - the leaked blob's bounding box was only 1.25:1, so no shape test
+    # would have caught it.
+    #
+    # Refusing gives the paint alone: no long axis, so no heading, and the pose reports the nose
+    # instead of a centre that belongs to the road.
+    if full.sum() > ATTACH_MAX_GROWTH * paint_area:
+        return paint_only
+    return full
 
 
 def touches_border(bbox: Sequence[int], shape: Sequence[int],
@@ -728,13 +825,16 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
         return []
     hsv_full = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     mask = red_mask(hsv_full, close_kernel)
-    # Paint without the hole fill, so the windows stay visible as gaps: red_fraction per bin says
-    # where the enclosed glass is. (One inRange + open per frame.)
-    raw_red = np.zeros(frame.shape[:2], np.uint8)
-    for _lo, _hi in RED_HUE_RANGES:
-        raw_red |= cv2.inRange(hsv_full, np.array(_lo, np.uint8), np.array(_hi, np.uint8))
-    raw_red = cv2.morphologyEx(
-        raw_red, cv2.MORPH_OPEN,
+    # Paint without the hole fill, so the dark bands stay visible as gaps: the per-bin paint
+    # fraction says where the cabin/glass is. Read from the config, not from RED_HUE_RANGES:
+    # that constant is red, and a yellow car measured identically zero on this channel for the
+    # whole recording, which silently halved score_sign(). The template key is still called
+    # red_fraction - a legacy name from when the only car was red.
+    raw_paint = np.zeros(frame.shape[:2], np.uint8)
+    for _lo, _hi in vehicle_config()["hue_ranges"]:
+        raw_paint |= cv2.inRange(hsv_full, np.array(_lo, np.uint8), np.array(_hi, np.uint8))
+    raw_paint = cv2.morphologyEx(
+        raw_paint, cv2.MORPH_OPEN,
         cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
     gray_image = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
@@ -751,7 +851,7 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
         points = np.column_stack([xs, ys]).astype(np.float32)
         gray_values = gray_image[ys, xs].astype(np.float64)
         sat_values = hsv_full[ys, xs, 1].astype(np.float64)
-        is_raw_red = (raw_red[ys, xs] > 0).astype(np.float64)
+        is_raw_paint = (raw_paint[ys, xs] > 0).astype(np.float64)
         centre = points.mean(axis=0)
         values, vectors = np.linalg.eigh(np.cov((points - centre).T))
         major = vectors[:, int(np.argmax(values))]
@@ -779,7 +879,7 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
         sat_profile = redfraction_profile = None
         if axis_index is not None:
             sat_profile = binned(axis_index, sat_values)
-            redfraction_profile = binned(axis_index, is_raw_red)
+            redfraction_profile = binned(axis_index, is_raw_paint)
 
         # Which end the front is on, as signed evidence along the axis: +1 means the +axis end.
         # The car's pattern is the first choice - the brighter end is the front - and the taper
@@ -799,7 +899,8 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
             if abs(score_margin) >= SCORE_USE_MIN:
                 evidence = float(np.clip(score_margin / MARGIN_SCALE, -1.0, 1.0))
         if evidence is None and abs(taper) >= MIN_TAPER:
-            signed = taper if FRONT_IS_THE_WIDER_END else -taper
+            wider_is_front = bool(vehicle_config().get("front_is_the_wider_end", True))
+            signed = taper if wider_is_front else -taper
             evidence = float(np.clip(signed / TAPER_SCALE, -1.0, 1.0))
         if elongation < 1.6:
             evidence = None          # a blob with no axis cannot have a front either
