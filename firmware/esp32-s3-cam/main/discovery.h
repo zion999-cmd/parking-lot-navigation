@@ -35,11 +35,20 @@ extern "C" {
  * Fallback: if no beacon has ever been heard, or the last one is stale, every URL
  * is used exactly as configured. The discovery is an improvement, never a
  * requirement.
+ *
+ * Ordering: start this after wifi_init(), never before. See discovery_start().
  */
 
 /**
- * Start the listener task. Safe to call before Wi-Fi is up: the socket binds
- * either way and packets simply start arriving once there is an interface.
+ * Start the listener task.
+ *
+ * MUST be called after wifi_init(). That is not a preference: wifi_init() is what
+ * runs esp_netif_init() and therefore tcpip_init(), and socket() before it aborts
+ * ("tcpip_send_msg_wait_sem: Invalid mbox"). This doc comment used to say the
+ * opposite - "safe to call before Wi-Fi is up" - and that sentence is why the call
+ * was placed too early, which panicked every boot of the new image before it could
+ * confirm itself to the bootloader and produced an OTA/rollback loop. The order is
+ * enforced by the note at the call site in main.c; do not move it back.
  *
  * Returns false only if the task could not be created; the caller carries on with
  * the configured addresses.

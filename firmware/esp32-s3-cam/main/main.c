@@ -272,17 +272,30 @@ void app_main(void)
         esp_restart();
     }
 
+    /* Does NVS, netif, the default event loop and the Wi-Fi driver. */
+    ESP_ERROR_CHECK(wifi_init());
+
     /*
-     * Listen for the PC's beacon before anything that talks to it. Safe before
-     * Wi-Fi is up: the socket binds either way, and until a beacon arrives every
-     * address behaves exactly as configured.
+     * AFTER wifi_init(), and this is not a stylistic preference.
+     *
+     * wifi_init() is what runs esp_netif_init() and therefore tcpip_init(); before
+     * it, any lwIP call is a call into a stack that does not exist yet. Starting the
+     * discovery task first looked harmless - the socket binds either way, and until a
+     * beacon arrives every address behaves as configured - but the task runs at a
+     * higher priority than app_main, so it called socket() immediately, and lwIP
+     * answered with
+     *
+     *     assert failed: tcpip_send_msg_wait_sem (Invalid mbox)
+     *
+     * which panics before Wi-Fi and therefore before this firmware can call
+     * ota_mark_current_valid(). An image that panics before confirming itself is
+     * rolled back by the bootloader, the old image finds the newer manifest again,
+     * downloads it again, and the device loops between OTA and rollback until the
+     * flash wears out or someone stops the server. That is exactly what happened.
      */
 #if CONFIG_DISCOVERY_ENABLE
     discovery_start();
 #endif
-
-    /* Does NVS, netif, the default event loop and the Wi-Fi driver. */
-    ESP_ERROR_CHECK(wifi_init());
 
     provisioning_set_hooks(on_connected, on_disconnected, on_before_config_ap);
     provisioning_start_serial_console();
