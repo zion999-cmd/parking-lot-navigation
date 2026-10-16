@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Generate the fixed test QR matrix that firmware/esp32-s3-cam/main/qr_test.h holds.
+"""Generate the fixed test QR matrix that firmware/esp32-s3-cam/main/qr_code.h holds.
 
-    python3 tools/make-qr-test.py "PARKING-TEST-001" > firmware/esp32-s3-cam/main/qr_test.h
+    python3 tools/make-qr.py "http://<PC-IP>:8010/go" > firmware/esp32-s3-cam/main/qr_code.h
 
-Why a baked matrix instead of an encoder on the device: the payload is a constant,
-so an encoder would be dead weight in flash and one more thing to get wrong. The
+Why a baked matrix instead of an encoder on the device: the payload changes about
+once per installation, so an encoder would be flash spent on a decision already made -
+and one more thing to get wrong. The cost is that changing the URL is a rebuild plus an
+OTA, which is measured in minutes and happens once. The
 panel draws the modules as filled squares, so what the firmware needs is the
 module grid, which is exactly what this prints.
 
@@ -22,7 +24,16 @@ from qrcode.constants import ERROR_CORRECT_L
 
 
 def main() -> int:
-    payload = sys.argv[1] if len(sys.argv) > 1 else "PARKING-TEST-001"
+    # The payload is required rather than defaulted: a default here would be a second
+    # copy of the PC's address, and the copy in the generated header is the one the
+    # firmware actually uses. Two copies is how one of them goes stale.
+    if len(sys.argv) < 2:
+        sys.stderr.write(
+            'usage: make-qr.py "<url or text>"\n'
+            '   eg: make-qr.py "http://192.168.0.10:8010/go"\n'
+            '       > firmware/esp32-s3-cam/main/qr_code.h\n')
+        return 2
+    payload = sys.argv[1]
 
     # Error correction L, and the reason is module size rather than robustness: on a
     # 240 px panel the scale is what decides whether a phone can read it. L keeps a
@@ -47,26 +58,26 @@ def main() -> int:
 
     per_row = (n + 7) // 8
     print("/*")
-    print(" * Fixed test QR code - GENERATED, do not edit by hand.")
+    print(" * QR code for the gate panel - GENERATED, do not edit by hand.")
     print(" *")
     print(f' *   payload : "{payload}" ({len(payload)} characters)')
     print(f" *   version : {(n - 17) // 4}  ({n} x {n} modules)")
     print(" *   ECC     : L")
     print(" *")
     print(" * Regenerate with:")
-    print(f' *     python3 tools/make-qr-test.py "{payload}" \\')
-    print(" *         > firmware/esp32-s3-cam/main/qr_test.h")
+    print(f' *     python3 tools/make-qr.py "{payload}" \\')
+    print(" *         > firmware/esp32-s3-cam/main/qr_code.h")
     print(" *")
     print(" * One bit per module, bit 0 = leftmost column of that row, which is what")
     print(" * display.c walks when it paints the modules.")
     print(" */")
     print("#pragma once")
     print()
-    print(f"#define QR_TEST_PAYLOAD \"{payload}\"")
-    print(f"#define QR_TEST_SIZE    {n}")
-    print(f"#define QR_TEST_ROW_BYTES {per_row}")
+    print(f"#define QR_PAYLOAD \"{payload}\"")
+    print(f"#define QR_SIZE    {n}")
+    print(f"#define QR_ROW_BYTES {per_row}")
     print()
-    print("static const uint8_t qr_test_rows[QR_TEST_SIZE][QR_TEST_ROW_BYTES] = {")
+    print("static const uint8_t qr_rows[QR_SIZE][QR_ROW_BYTES] = {")
     for y, bits in enumerate(rows):
         packed = [(bits >> (8 * i)) & 0xFF for i in range(per_row)]
         body = ", ".join(f"0x{b:02X}" for b in packed)

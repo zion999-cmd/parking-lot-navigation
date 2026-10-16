@@ -42,6 +42,8 @@ import route                                                    # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 API_PATH = "/api/route"
+GO_PATH = "/go"
+NAV_PATH = "/web/navigation.html"
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -66,9 +68,28 @@ class Handler(SimpleHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/":
             return self._index()
+        if parsed.path == GO_PATH:
+            return self._go()
         if parsed.path != API_PATH:
             return super().do_GET()
         self._api_route(urllib.parse.parse_qs(parsed.query))
+
+    def _go(self) -> None:
+        """Short path for the QR code on the gate's panel.
+
+        The panel holds a baked QR matrix, and a shorter payload means a lower
+        version means bigger modules means a phone can read it from further away.
+        /web/navigation.html is 45 characters and lands on version 3 (6 px per
+        module on a 240 px panel); /go is 28 and lands on version 2 (7 px). Same
+        code, one pixel larger, for a string nobody reads.
+
+        A redirect rather than a copy of the page so there is still exactly one
+        navigation page.
+        """
+        self.send_response(302)
+        self.send_header("Location", NAV_PATH)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _index(self) -> None:
         """Two pages, one of which is for people. Say which is which rather than listing a dir."""

@@ -63,7 +63,7 @@ static void qr_overlay_start(void)
     if (s_qr_timer == NULL) {
         const esp_timer_create_args_t args = {
             .callback = qr_overlay_off,
-            .name = "qr_test",
+            .name = "qr_panel",
         };
         if (esp_timer_create(&args, &s_qr_timer) != ESP_OK) {
             ESP_LOGW(TAG, "could not create the QR timer - the code stays on screen");
@@ -260,7 +260,7 @@ void app_main(void)
      * healthy network is the one thing you cannot check when the network is what
      * you are debugging.
      */
-    display_show_qr(NULL);      /* NULL = the payload baked into qr_test.h */
+    display_show_qr(NULL);      /* NULL = the payload baked into qr_code.h */
     qr_overlay_start();
 #endif
 

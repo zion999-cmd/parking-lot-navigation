@@ -463,7 +463,7 @@ menu "QR code on the status panel"
         bool "Show the test QR code at boot"
         default y
         help
-            Displays the fixed test QR (main/qr_test.h) full screen for
+            Displays the fixed test QR (main/qr_code.h) full screen for
             QR_BOOT_SECONDS at every boot, then puts the status screen back.
 
             It is shown before Wi-Fi comes up on purpose: a QR code that only

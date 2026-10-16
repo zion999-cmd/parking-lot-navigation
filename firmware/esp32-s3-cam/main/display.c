@@ -18,7 +18,7 @@
 #include <esp_log.h>
 
 #include "font8x16.h"
-#include "qr_test.h"
+#include "qr_code.h"
 #include <sdkconfig.h>
 
 /*
@@ -308,7 +308,12 @@ static void flush(void)
  * the scale is chosen so a full four module border fits - which is also what
  * makes the modules as large as they can be:
  *
- *   (21 + 2*4) modules * 8 px = 232 px of 240, leaving 36 px each side.
+ *   (25 + 2*4) modules * 7 px = 231 px of 240, leaving 32 px each side.
+ *
+ * The payload decides the version and therefore the module size, which is why the
+ * QR points at /go (28 characters, version 2, 7 px per module) rather than at
+ * /web/navigation.html (45, version 3, 6 px). Same code, one pixel larger per
+ * module, for a string nobody reads.
  *
  * Anything bigger than 8 px per module would eat into the quiet zone, and a code
  * that is 12% larger but unreadable is not larger at all. The scale is computed
@@ -319,12 +324,12 @@ static void flush(void)
 
 static void draw_qr(void)
 {
-    const int total_modules = QR_TEST_SIZE + 2 * QR_QUIET_MODULES;
+    const int total_modules = QR_SIZE + 2 * QR_QUIET_MODULES;
     int scale = LCD_W / total_modules;
     if (scale < 1) {
         scale = 1;                  /* pathological payload: draw it anyway */
     }
-    const int side = QR_TEST_SIZE * scale;
+    const int side = QR_SIZE * scale;
     const int origin_x = (LCD_W - side) / 2;
     const int origin_y = (LCD_H - side) / 2;
 
@@ -332,9 +337,9 @@ static void draw_qr(void)
      * drawing dark-on-dark would be the one thing a scanner cannot fix. */
     fill(COL_QR_LIGHT);
 
-    for (int row = 0; row < QR_TEST_SIZE; row++) {
-        for (int col = 0; col < QR_TEST_SIZE; col++) {
-            if ((qr_test_rows[row][col / 8] >> (col % 8)) & 1) {
+    for (int row = 0; row < QR_SIZE; row++) {
+        for (int col = 0; col < QR_SIZE; col++) {
+            if ((qr_rows[row][col / 8] >> (col % 8)) & 1) {
                 /* Integer-aligned squares at the module size: no scaling, no
                  * interpolation, sharp edges. */
                 fill_rect(origin_x + col * scale, origin_y + row * scale,
@@ -722,8 +727,8 @@ void display_show_qr(const char *payload)
      * in the message anyway so that the log says which code is on the glass, which
      * is the thing that a "cannot scan it" report needs to be checked against.
      */
-    snprintf(m.a, sizeof(m.a), "%s", payload ? payload : QR_TEST_PAYLOAD);
+    snprintf(m.a, sizeof(m.a), "%s", payload ? payload : QR_PAYLOAD);
     ESP_LOGI(TAG, "showing QR code: \"%s\" (%d x %d modules)",
-             m.a, QR_TEST_SIZE, QR_TEST_SIZE);
+             m.a, QR_SIZE, QR_SIZE);
     post(&m);
 }
