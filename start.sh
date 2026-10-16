@@ -309,9 +309,13 @@ cmd_start() {
             # Ready means "the state document went fresh", not "the process exists".
             # If it never does, the reason is in its own log (usually the camera
             # stream), so that is what gets printed.
-            start_one vision "state_fresh" "cmd:src/main.py" \
-                "$PY_VISION" -u "$ROOT/vision/src/main.py" \
-                --source "$source" --annotated-port "$ANNOTATED_PORT" || true
+            #
+            # Wrapped in run-vision.sh because main.py finishes: the camera rebooting
+            # ends the stream, main.py returns after printing its summary, and the
+            # state document stops being written. It is the only service here that
+            # exits on purpose, so it is the only one that needs restarting.
+            start_one vision "state_fresh" "cmd:run-vision.sh" \
+                "$ROOT/tools/run-vision.sh" "$source" || true
         fi
     fi
 
@@ -342,7 +346,7 @@ cmd_status() {
             case "$name" in
                 serve)  pid="$(pid_by_port "$VISION_PORT")" ;;
                 ota)    pid="$(pid_by_port "$OTA_PORT")" ;;
-                vision) pid="$(pid_by_cmd "src/main.py")" ;;
+                vision) pid="$(pid_by_cmd "run-vision.sh")" ;;
                 beacon) pid="$(pid_by_cmd "tools/beacon.py")" ;;
             esac
             if [ -n "$pid" ]; then

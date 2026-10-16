@@ -218,6 +218,23 @@ menu "Parking Lot Bay Lights (WS2812B)"
             because both are served by src/serve.py and that is what has to be
             reachable - see LED_STATE_URL for the --host 0.0.0.0 note.
 
+    config LED_STATE_STALE_MS
+        int "Treat the state document as stale after this long without a change (ms)"
+        range 2000 120000
+        default 10000
+        help
+            The device has no wall clock, so freshness is judged by movement: main.py
+            rewrites the document every frame with a whole-second timestamp, so if the
+            timestamp has not advanced in this long, nobody is writing it.
+
+            A document that still arrives but no longer changes describes a moment that
+            has passed. Showing it is the same lie as reporting UNKNOWN as EMPTY - just
+            slower - so the strip blanks instead, exactly as it does when the fetch
+            fails, and the log says which of the two happened.
+
+            10 s is about 400 frames of margin. Lower it for a faster reaction, raise it
+            if the vision loop is ever run with a much lower frame rate.
+
     config LED_POLL_MS
         int "Poll period (ms)"
         default 500

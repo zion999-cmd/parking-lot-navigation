@@ -13,6 +13,7 @@
 #include <esp_http_client.h>
 #include <esp_log.h>
 #include <esp_rom_sys.h>
+#include <esp_timer.h>
 #include <sdkconfig.h>
 
 #include "discovery.h"
@@ -115,6 +116,23 @@ static char s_bay[CONFIG_LED_COUNT][BAY_ID_MAX];
 
 /* What each pixel showed at the last frame that went out, as a STATE_CHAR. */
 static char s_shown[CONFIG_LED_COUNT];
+
+/*
+ * Freshness of the state document, without a clock.
+ *
+ * The device has no reliable wall clock, but it does not need one: main.py rewrites
+ * the document every frame and its timestamp is whole seconds, so the timestamp
+ * advancing at all means someone is writing, and standing still means nobody is.
+ *
+ * Why this exists: the first version only checked that the fetch succeeded, so a
+ * document that had been frozen for five minutes was displayed as the current state
+ * - a strip confidently showing occupied bays that nobody had looked at since the
+ * vision loop died. That is the same lie as reporting UNKNOWN as EMPTY, just slower,
+ * and the README claimed the firmware did not do it. Now it does not.
+ */
+static int64_t s_doc_ts = -1;              /* last timestamp seen in the document */
+static int64_t s_doc_ts_changed_us;        /* when it last changed */
+static bool s_reported_stale;
 
 static rmt_channel_handle_t s_rmt = NULL;
 static rmt_encoder_handle_t s_encoder = NULL;
@@ -648,6 +666,30 @@ static void led_task(void *arg)
             }
         }
 
+        /*
+         * Reached, but is anyone still writing it? A document that arrives fine and
+         * never changes is a dead vision loop, and its contents describe a moment
+         * that has passed.
+         */
+        if (ok) {
+            const cJSON *jts = cJSON_GetObjectItemCaseSensitive(root, "timestamp");
+            int64_t now = esp_timer_get_time();
+
+            if (cJSON_IsNumber(jts) && (int64_t)jts->valuedouble != s_doc_ts) {
+                s_doc_ts = (int64_t)jts->valuedouble;
+                s_doc_ts_changed_us = now;
+            } else if (s_doc_ts >= 0 &&
+                       (now - s_doc_ts_changed_us) / 1000 > CONFIG_LED_STATE_STALE_MS) {
+                if (!s_reported_stale) {
+                    s_reported_stale = true;
+                    ESP_LOGE(TAG, "state document has not changed for %d ms - blanking the "
+                                  "strip (is main.py still running?)",
+                             CONFIG_LED_STATE_STALE_MS);
+                }
+                ok = false;
+            }
+        }
+
         if (!ok) {
             /*
              * Blank rather than hold the last frame. A stale green on a bay that
@@ -673,6 +715,10 @@ static void led_task(void *arg)
             if (failures > 0) {
                 ESP_LOGI(TAG, "state link recovered after %d failure(s)", failures);
                 failures = 0;
+            }
+            if (s_reported_stale) {
+                s_reported_stale = false;
+                ESP_LOGI(TAG, "state document is moving again");
             }
 
             /*
