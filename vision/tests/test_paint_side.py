@@ -16,6 +16,7 @@ Run:  python -m pytest tests/test_paint_side.py
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 
@@ -69,7 +70,10 @@ def test_the_dark_side_of_the_paint_is_found():
         side = vehicle.paint_side(mask, hsv[:, :, 2])
     finally:
         vehicle._VEHICLE_CONFIG_CACHE = previous
-    assert side == "right", f"expected the cabin on the right, got {side}"
+    # 0 degrees is to the right, which is where the cabin is. The answer is an angle rather than
+    # one of four names because the car can be parked at any angle, and the four-name version only
+    # worked when it was level - which the rotation sweep below caught.
+    assert side is not None and abs(side) < 20, f"expected the cabin to the right, got {side}"
 
 
 def test_the_whole_car_and_its_front_come_back():
@@ -110,3 +114,77 @@ def test_a_cabin_the_same_brightness_as_the_road_is_not_a_cabin():
     poses = _run(_frame(NOSE, (441, 300, 530, 340), cabin_v=ROAD_V))
     assert poses
     assert poses[0].area < 2_500, f"a cabin the colour of the road was accepted: {poses[0].area}"
+
+
+# ---------------------------------------------------------------------------------------------
+# Yellow is always the nose, and the front must never swing 180 degrees on its own.
+#
+# The axis heading is only defined in 0..180, where 0 and 180 are the same axis. Reconstructing a
+# directed front from it (`heading if evidence > 0 else heading + 180`) therefore flips by 180
+# whenever the smoothed axis lands on the other side of that wrap - and the paint did not move.
+# Forty live frames happened to read correctly, so this was latent, not visible; the tests below
+# are what make it stay fixed.
+# ---------------------------------------------------------------------------------------------
+
+
+def _base_car(angle_deg):
+    """The yellow-nosed car, rotated by `angle_deg`, and the exact direction its nose points.
+
+    The truth is geometry, not a measurement: the car is drawn level with the nose at the left
+    (x 430..470, pointing at 180 degrees) and then rotated, so the nose ends up at
+    (180 - angle) mod 360. The first version of this helper tried to recover the truth from the
+    image - the direction from the car's blob towards the paint's blob - and the two centroids are
+    close together, so the "truth" was noise: it read 199.8 then 292.6 for a 15-degree rotation
+    step, and made a detector that was correct at every angle look wrong at twenty of them.
+    """
+    img = np.full((700, 900, 3), ROAD_V, np.uint8)
+    cv2.rectangle(img, (430, 330), (470, 370), PAINT_BGR, -1)      # the nose, pointing left
+    cv2.rectangle(img, (471, 330), (560, 370), (CABIN_V,) * 3, -1)  # the cabin
+    matrix = cv2.getRotationMatrix2D((495.0, 350.0), angle_deg, 1.0)
+    img = cv2.warpAffine(img, matrix, (900, 700), borderValue=(ROAD_V,) * 3)
+    return cv2.GaussianBlur(img, (0, 0), 3), (180.0 - angle_deg) % 360.0
+
+
+def test_the_front_follows_the_paint_all_the_way_round():
+    """A full turn in 5-degree steps: the reported front must track the paint, never oppose it."""
+    worst, jumps, previous = 0.0, [], None
+    for angle in range(0, 360, 5):
+        frame, truth = _base_car(angle)
+        poses = _run(frame)
+        assert poses, f"not detected at {angle} degrees"
+        report = poses[0].as_dict()
+        assert report["front_is_known"], f"front lost at {angle} degrees"
+        error = abs((report["front_heading"] - truth + 180.0) % 360.0 - 180.0)
+        worst = max(worst, error)
+        assert error < 25.0, (f"front opposes the paint at {angle} degrees: "
+                              f"reported {report['front_heading']}, paint {truth:.1f}")
+        if previous is not None:
+            jumps.append(abs((report["front_heading"] - previous + 180.0) % 360.0 - 180.0))
+        previous = report["front_heading"]
+    assert max(jumps) < 45.0, f"the front jumped: {max(jumps):.1f} degrees in one 5-degree step"
+    assert worst < 25.0
+
+
+def test_the_smoother_keeps_the_front_through_the_axis_wrap():
+    """The regression itself: a smoothed axis at 179.9 and the same axis at 0.1.
+
+    Both are the same axis, so the front must not change. Before the fix the emitted front came
+    from `smoothed_heading + 180` and swung by 180 degrees when the smoothed axis crossed the wrap.
+    """
+    sweep = vehicle.VehicleTracker()
+    front = 180.0                                   # the nose points left, always
+    readings = []
+    for i in range(20):
+        heading = 179.7 if i % 2 else 0.3            # the same axis, either side of the wrap
+        pose = vehicle.VehiclePose(x=450.0, y=420.0, heading=heading, area=2400, fill=0.75,
+                                   elongation=3.0, bbox=(430, 400, 80, 40),
+                                   front_evidence=-1.0, front_heading=front,
+                                   front_is_known=True)
+        pose = sweep.update(pose)
+        if pose is not None and pose.front_heading is not None:
+            readings.append(pose.front_heading)
+    assert readings, "the smoother returned no front at all"
+    errors = [abs((r - front + 180.0) % 360.0 - 180.0) for r in readings]
+    assert max(errors) < 30.0, f"the front swung by up to {max(errors):.1f} degrees: {readings}"
+    # And not just at the end: no single output may be the opposite direction.
+    assert all(e < 90.0 for e in errors), readings

@@ -316,8 +316,17 @@ def merge_near_components(mask: np.ndarray, gap_fraction: float = 0.9,
 ATTACH_MAX_GROWTH = 8.0
 
 
-# The four sides of the paint's bounding box, as (name, sign along x, sign along y).
-_SIDES = (("right", 1, 0), ("left", -1, 0), ("below", 0, 1), ("above", 0, -1))
+def _circular_mean(angles: List[float]) -> Optional[float]:
+    """The mean of directions on the circle, in 0..360. None for an empty list.
+
+    Averaging angles as plain numbers is what breaks at the wrap: 359 and 1 average to 180, the
+    opposite direction. The same reason the axis heading is doubled before it is averaged.
+    """
+    if not angles:
+        return None
+    radians = np.radians(np.asarray(angles, np.float64))
+    return float(np.degrees(np.arctan2(float(np.sin(radians).mean()),
+                                      float(np.cos(radians).mean())))) % 360.0
 
 
 def _reach_for(reach: int, w: int, h: int) -> int:
@@ -347,99 +356,122 @@ def _largest_component(mask: np.ndarray) -> Tuple[np.ndarray, Tuple[int, int, in
     return (np.where(labels == i, 255, 0).astype(mask.dtype), (x, y, x + w - 1, y + h - 1))
 
 
-def paint_side(mask: np.ndarray, value: np.ndarray, gap: int = 6, reach: int = 45,
-               min_drop: int = 40) -> Optional[str]:
-    """Which side of the paint is dark - the cabin - or None if none of them is.
+def _paint_half_width(blob: np.ndarray) -> float:
+    """Half the width of the paint, in a way that does not change when the car is turned.
+
+    The first attempt used half the bounding box diagonal and the rotation sweep caught it: a
+    41x41 paint turned 45 degrees has a 58x58 bounding box, so the corridor came out 115 px wide
+    on a car 40 px across and swallowed the road (area 12,586 px against the car's 5,495) - the
+    blob went square and lost its axis at every angle. Half the square root of the area is the
+    same number at any rotation, and is the true half-width when the paint is square.
+    """
+    return 0.5 * math.sqrt(max(float(np.count_nonzero(blob)), 1.0))
+
+
+# The directions sampled around the paint: every 22.5 degrees, so a car at any angle has one ray
+# pointing down its own long axis. Four axis-aligned boxes were the first version, and a rotation
+# sweep - the acceptance test written before the code - showed they only work when the car is
+# level: at 15, 30, 45 degrees the cabin is beyond a corner, none of the four boxes reached it and
+# the mask fell back to the paint alone (1,947 px against 5,495 level). Measured, not guessed.
+_RAY_COUNT = 16
+# Rays outside this cone are treated as "the road" when judging how dark the darkest ray is.
+# Wide enough that the cabin, which spans two or three rays, cannot be counted as the reference.
+_RAY_CONE_DEG = 40.0
+
+
+def _ray_mask(shape, cx, cy, angle_deg, gap, reach, half_width):
+    """The pixels on a ray: a rectangle `gap` px out from (cx, cy), `reach` long, 2*half wide."""
+    radians = math.radians(angle_deg)
+    ux, uy = math.cos(radians), math.sin(radians)
+    nx, ny = -uy, ux                                     # perpendicular
+    ends = []
+    for distance in (gap, gap + reach):
+        bx, by = cx + ux * distance, cy + uy * distance
+        ends.append((bx + nx * half_width, by + ny * half_width))
+        ends.append((bx - nx * half_width, by - ny * half_width))
+    quad = np.array([ends[0], ends[1], ends[3], ends[2]], np.int32)
+    out = np.zeros(shape, np.uint8)
+    cv2.fillPoly(out, [quad], 255)
+    return out
+
+
+def paint_side(mask: np.ndarray, value: np.ndarray, gap: int = 6, reach: int = 0,
+               min_drop: int = 40) -> Optional[float]:
+    """The direction of the dark side of the paint - the cabin - or None if there is none.
 
     Four attempts to find this car's black cabin failed by asking a global question: where is
     everything dark (the road is full of dark patches), or how dark is the cabin relative to the
     road (the answer moved between frames). This asks a local one instead: **the paint is one end
-    of the car, so which side of the paint is dark?**
+    of the car, so which way from the paint is it dark?**
 
-    Measured on the real car, sampling a box beside each edge of the paint that is the paint's own
-    width:
+    Measured on the real car, level, one frame: right V=78, above 181, left 178, below 173, road
+    186. A 20:1 separation that did not move with the threshold (20, 30 and 40 levels all gave the
+    same answer). That is what the earlier attempts lacked.
 
-        right  V=78     the cabin, 108 levels below the road
-        above  V=181    5 levels below it
-        left   V=178    8
-        below  V=173   13
-
-    A 20:1 separation, and the answer did not change with the threshold (20, 30 and 40 levels all
-    gave the same box). That is the property the earlier attempts lacked.
-
-    Why a box beside the edge and not a ring: an earlier attempt measured the ring around the
-    paint, which contains the cabin itself on the side where the car extends, so the reference was
-    pulled towards the thing being searched for. Four separate boxes cannot be contaminated that
-    way, and comparing them against each other needs no reference at all.
+    The answer is an angle in 0..360, not one of four names, because a car can be parked at any
+    angle and the four-name version only worked when it was level.
     """
     blob, _ = _largest_component(mask)
     ys, xs = np.nonzero(blob)
     if ys.size == 0:
         return None
-    x0, x1, y0, y1 = int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())
-    reach = _reach_for(reach, x1 - x0, y1 - y0)
+    cx, cy = float(xs.mean()), float(ys.mean())
+    # The ray is as wide as the paint is, so it cannot swallow the road on either side of the car.
+    half = _paint_half_width(blob)
+    reach = _reach_for(reach, int(xs.max() - xs.min()), int(ys.max() - ys.min()))
 
     levels = {}
-    for name, sx, sy in _SIDES:
-        if sx:
-            bx0 = x1 + gap if sx > 0 else max(0, x0 - gap - reach)
-            bx1 = min(value.shape[1], x1 + gap + reach) if sx > 0 else max(0, x0 - gap)
-            by0, by1 = y0, y1 + 1
-        else:
-            by0 = y1 + gap if sy > 0 else max(0, y0 - gap - reach)
-            by1 = min(value.shape[0], y1 + gap + reach) if sy > 0 else max(0, y0 - gap)
-            bx0, bx1 = x0, x1 + 1
-        box = value[by0:by1, bx0:bx1]
-        if box.size >= 50:
-            levels[name] = float(np.median(box))
+    for k in range(_RAY_COUNT):
+        angle = 360.0 * k / _RAY_COUNT
+        ray = _ray_mask(value.shape, cx, cy, angle, gap, reach, half)
+        sample = value[(ray > 0) & (blob == 0)]
+        if sample.size >= 50:
+            levels[angle] = float(np.median(sample))
 
-    if len(levels) < 3:
+    if len(levels) < _RAY_COUNT // 2:
         return None
 
-    best = min(levels, key=lambda k: levels[k])
-    others = float(np.median([v for k, v in levels.items() if k != best]))
-    if others - levels[best] < min_drop:
-        return None                          # no side is dark enough: this is just the paint
+    best = min(levels, key=lambda a: levels[a])
+    others = [v for a, v in levels.items() if _ray_gap(a, best) > _RAY_CONE_DEG]
+    if not others:
+        return None
+    reference = float(np.median(others))
+    if reference - levels[best] < min_drop:
+        return None                          # no direction is dark enough: this is just the paint
     return best
 
 
-def attach_paint_side(mask: np.ndarray, value: np.ndarray, side: str, gap: int = 6,
-                      reach: int = 45, min_drop: int = 40) -> np.ndarray:
-    """The paint plus the dark region on `side` of it, kept to the paint's own width.
+def _ray_gap(a: float, b: float) -> float:
+    """Angular distance between two ray directions, 0..180."""
+    return abs((a - b + 180.0) % 360.0 - 180.0)
 
-    Keeping to the paint's width is what stops the car's own shadow being absorbed: the shadow
-    lies along the car, not across it. Measured with the corridor: the cabin side yields 1,850 px
-    against a paint of 693 (a car of 2,543 against an expected 2,980), and without it the region
-    ran 81 px across a car that is 31 px wide.
+
+def attach_paint_side(mask: np.ndarray, value: np.ndarray, angle: float, gap: int = 6,
+                      reach: int = 0, min_drop: int = 40) -> np.ndarray:
+    """The paint plus the dark region beyond it in direction `angle`.
+
+    Kept to a corridor a little wider than the paint: the car's shadow lies along the car, not
+    across it, and without that limit an earlier version absorbed the shadow and came out square
+    (81 px across a car 31 px wide) with no axis at all.
     """
     blob, _ = _largest_component(mask)
     ys, xs = np.nonzero(blob)
     if ys.size == 0:
         return mask
-    x0, x1, y0, y1 = int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())
-    reach = _reach_for(reach, x1 - x0, y1 - y0)
-    sx, sy = dict((n, (a, b)) for n, a, b in _SIDES)[side]
+    cx, cy = float(xs.mean()), float(ys.mean())
+    half = _paint_half_width(blob)
+    reach = _reach_for(reach, int(xs.max() - xs.min()), int(ys.max() - ys.min()))
 
-    if sx:
-        bx0 = x1 + gap if sx > 0 else max(0, x0 - gap - reach)
-        bx1 = min(value.shape[1], x1 + gap + reach) if sx > 0 else max(0, x0 - gap)
-        by0, by1 = y0, y1 + 1
-    else:
-        by0 = y1 + gap if sy > 0 else max(0, y0 - gap - reach)
-        by1 = min(value.shape[0], y1 + gap + reach) if sy > 0 else max(0, y0 - gap)
-        bx0, bx1 = x0, x1 + 1
-
-    box = value[by0:by1, bx0:bx1]
-    if box.size == 0:
+    corridor = _ray_mask(value.shape, cx, cy, angle, gap, reach, half * 1.4)
+    here = (corridor > 0) & (blob == 0)
+    if not here.any():
         return mask
-    paint_v = float(np.median(value[blob > 0]))
-    # Halfway between the paint and that side's own level: the cabin is far below both, the road
-    # is at the side's level, so the cut has a wide margin either way.
-    cut = (paint_v + float(np.median(box))) / 2.0
+    # Halfway between the paint and what that direction reads: the cabin is far below both, the
+    # road sits at that direction's own level, so the cut has a wide margin either way.
+    cut = 0.5 * (float(np.median(value[blob > 0])) + float(np.median(value[here])))
     dark = np.zeros_like(value)
-    dark[by0:by1, bx0:bx1] = np.where(box <= cut, 255, 0).astype(value.dtype)
+    dark[here & (value <= cut)] = 255
     return cv2.bitwise_or(mask, dark)
-
 
 def attach_dark(mask: np.ndarray, hsv: np.ndarray, margin_v: int, max_s: int,
                 max_px: int = 60, ring_px: int = 25) -> np.ndarray:
@@ -529,12 +561,12 @@ def red_mask(hsv: np.ndarray, close_kernel: Optional[int] = None,
     if cfg.get("attach_paint_side"):
         side = paint_side(mask, hsv[:, :, 2],
                           int(cfg.get("paint_side_gap", 6)),
-                          int(cfg.get("paint_side_reach", 45)),
+                          int(cfg.get("paint_side_reach", 0)),
                           int(cfg.get("paint_side_min_drop", 40)))
         if side is not None:
             mask = attach_paint_side(mask, hsv[:, :, 2], side,
                                      int(cfg.get("paint_side_gap", 6)),
-                                     int(cfg.get("paint_side_reach", 45)),
+                                     int(cfg.get("paint_side_reach", 0)),
                                      int(cfg.get("paint_side_min_drop", 40)))
 
     # The car's dark part, if this car has one that the paint does not cover (see the config).
@@ -688,6 +720,8 @@ class VehicleTracker:
         self._misses = 0
         # (axis heading, time) of recent raw poses, for the accumulated-rotation check.
         self._heading_history: "deque[Tuple[float, float]]" = deque()
+        self._fx = self._fy = 0.0
+        self._contrary = 0
         # Sign candidate while ESTABLISH_FRAMES votes accumulate, plus the vote count.
         self._establish_plus: Optional[bool] = None
         self._establish_votes = 0
@@ -702,6 +736,8 @@ class VehicleTracker:
         self._opposite_streak = 0
         self._misses = 0
         self._heading_history.clear()
+        self._fx = self._fy = 0.0
+        self._contrary = 0
         self._establish_plus = None
         self._establish_votes = 0
         self._sign_history.clear()
@@ -722,6 +758,18 @@ class VehicleTracker:
                     and time.monotonic() - self._heading_history[0][1]
                         > TURN_WINDOW_SECONDS)):
             self._heading_history.popleft()
+
+        # A pose may carry the evidence without an explicit front - the shape the API had before
+        # the direction was worked out per frame. Fill it in from the RAW heading, unwrapped by
+        # the turn the motion guard has already accumulated: the axis is only defined in 0..180,
+        # so after a 180-degree turn the raw heading reads the same as before and only the
+        # accumulated turn says the car has been round. Without that, a real about-turn comes out
+        # as "the nose did not move", which is the very fault this change removes.
+        front = pose.front_heading
+        if front is None and pose.front_evidence is not None:
+            axis_unwrapped = (pose.heading + self._accumulated_turn()) % 360.0
+            front = (axis_unwrapped if pose.front_evidence > 0
+                     else (axis_unwrapped + 180.0) % 360.0)
 
         # A jump too big to be driving means the car was moved by hand. That invalidates where
         # it is, but not what shape it is - so only the position starts again.
@@ -745,6 +793,43 @@ class VehicleTracker:
             self._ax = a * math.cos(doubled) + (1 - a) * self._ax
             self._ay = a * math.sin(doubled) + (1 - a) * self._ay
         heading = (math.degrees(math.atan2(self._ay, self._ax)) / 2.0) % 180.0
+
+        # The front is smoothed as a direction of its own: the same EMA, on the unit vector
+        # rather than on the angle, because averaging directions as numbers breaks at the wrap.
+        #
+        # This is what the axis cannot do. `front = smoothed_axis + 180` used to reconstruct the
+        # front, and it flipped by 180 whenever the smoothed axis crossed 0/180 - the same axis,
+        # opposite answer. Forty live frames happened to read correctly, so it was latent.
+        #
+        # A window of the last N frames was the first attempt and a test rejected it: against a
+        # deliberate U-turn it averaged the new direction away with the old one, the way any
+        # window would. An EMA is what x, y, the evidence and the axis all use, and it follows a
+        # real turn in about 1/alpha frames while still smoothing the jitter. Plain EMA was the
+        # second attempt and a different test rejected that: three strong contrary frames moved
+        # the reported front to nearly perpendicular. So the EMA only runs on frames that agree
+        # with the committed direction, and a contrary frame counts towards the same vote the
+        # sign already uses.
+        if front is not None:
+            if self._fx == 0.0 and self._fy == 0.0:
+                self._fx, self._fy = math.cos(math.radians(front)), math.sin(math.radians(front))
+            else:
+                committed = math.degrees(math.atan2(self._fy, self._fx))
+                if abs((front - committed + 180.0) % 360.0 - 180.0) > 90.0:
+                    # A reversal candidate. A few of these are the jitter the vote already
+                    # debounces, so they do not move the front; a sustained run is a real pivot
+                    # and re-seeds it.
+                    self._contrary += 1
+                    if self._contrary >= SIGN_VOTE_MIN:
+                        self._fx = math.cos(math.radians(front))
+                        self._fy = math.sin(math.radians(front))
+                        self._contrary = 0
+                else:
+                    self._contrary = 0
+                    radians = math.radians(front)
+                    self._fx = a * math.cos(radians) + (1 - a) * self._fx
+                    self._fy = a * math.sin(radians) + (1 - a) * self._fy
+        front_smoothed = (math.degrees(math.atan2(self._fy, self._fx)) % 360.0
+                          if (self._fx or self._fy) else None)
 
         pa = self.position_alpha
         self._x = pose.x if self._x is None else pa * pose.x + (1 - pa) * self._x
@@ -806,8 +891,7 @@ class VehicleTracker:
                     self._front_is_plus = majority_plus
 
         known = self._front_is_plus is not None and pose.elongation >= 1.6
-        front = ((heading if self._front_is_plus else (heading + 180.0) % 360.0)
-                 if self._front_is_plus is not None else None)
+        front = front_smoothed
         return replace(pose, x=self._x, y=self._y, heading=heading,
                        observed_turn=self._accumulated_turn(),
                        front_heading=front if known else None, front_is_known=known)
@@ -1055,8 +1139,9 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
         # front_is_the_wider_end, something a person told us about this car and not something the
         # pixels can work out. Then the sampled pattern, and last the silhouette's taper.
         evidence: Optional[float] = None
+        painted = is_raw_paint > 0
+        paint_is_front = False
         if vehicle_config().get("front_is_the_painted_end") and axis_index is not None:
-            painted = is_raw_paint > 0
             if painted.any():
                 # Only when the paint covers one END of the car rather than all of it. A car
                 # painted along its whole length - which the previous one was, red at both ends -
@@ -1067,6 +1152,7 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
                 if span_total > 0 and span_paint / span_total < 0.8:
                     # Where the paint sits along the axis, relative to the whole blob.
                     evidence = 1.0 if along[painted].mean() > along.mean() else -1.0
+                    paint_is_front = True
         ends_grey = 0.0
         forward_score = reverse_score = score_margin = None
         if profile is not None:
@@ -1090,7 +1176,16 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
         front_heading = None
         front_known = False
         if evidence is not None and abs(evidence) >= KEEP_EVIDENCE:
-            front_heading = heading if evidence > 0 else (heading + 180.0) % 360.0
+            # The painted end is the nose, so the front is the direction from the car's centre
+            # towards the paint. A direction in its own right - 0..360, needing no reconstruction
+            # afterwards - which is what makes it immune to the 180-degree flip described in
+            # Sweeper.update(). Reconstructing it from the axis (`heading` or `heading + 180`)
+            # cannot work in general, because the axis is only defined in 0..180.
+            if paint_is_front:
+                front_heading = math.degrees(math.atan2(float(ys[painted].mean()) - centre[1],
+                                                        float(xs[painted].mean()) - centre[0])) % 360.0
+            else:
+                front_heading = heading if evidence > 0 else (heading + 180.0) % 360.0
             front_known = True
         out.append(VehiclePose(x=float(centre[0]), y=float(centre[1]), heading=heading,
                                area=area, elongation=elongation,
