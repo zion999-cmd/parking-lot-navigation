@@ -9,6 +9,8 @@
 #include <esp_timer.h>
 #include <sdkconfig.h>
 
+#include "display.h"
+
 /*
  * Barrier gate - implementation. Read gate.h first for the resource audit.
  *
@@ -75,6 +77,18 @@ static int64_t s_ramp_started_us;
 /* Hold timer: -1 means "not counting", which is the case while the switch is
  * still pressed. */
 static int64_t s_hold_since_us = -1;
+
+/*
+ * When to take the QR code down, or 0 while the gate is open and it is not
+ * counting. Separate from the arm's own timing on purpose: how long the arm
+ * stays up is a mechanical question (the car has to clear the gate), while how
+ * long the code stays up is a human one (pick up the phone, open the camera, aim
+ * it, focus - 5 to 15 seconds with a car in the other hand). Tying them together
+ * means one of the two is always wrong.
+ */
+#if CONFIG_GATE_QR_ON_TRIGGER
+static int64_t s_qr_off_at_us;
+#endif
 
 /* ------------------------------------------------------------------------- */
 /* Servo                                                                      */
@@ -173,6 +187,19 @@ static void gate_step(void)
             s_armed = false;
             enter(GATE_OPENING);
             servo_ramp_to(CONFIG_GATE_PULSE_OPEN_US);
+#if CONFIG_GATE_QR_ON_TRIGGER
+            /*
+             * A car has arrived, so this is the moment to put the code in front of
+             * the person: they are standing there, holding the car, and the phone
+             * is the next thing they will reach for. Showing it at boot instead (or
+             * as well) is only for checking that it scans.
+             *
+             * A transient overlay, so display_restore() below puts the status
+             * screen back without this file having to know what it was.
+             */
+            display_show_qr(NULL);
+            s_qr_off_at_us = 0;      /* stays up while the car is on the sensor */
+#endif
         }
         break;
 
@@ -197,6 +224,12 @@ static void gate_step(void)
     case GATE_CLOSING:
         if (!s_ramping) {
             enter(GATE_CLOSED);
+#if CONFIG_GATE_QR_ON_TRIGGER
+            /* The arm is home, so start the code's own countdown. It is taken
+             * down here rather than when the arm starts moving, which alone is
+             * worth a ramp's worth of seconds. */
+            s_qr_off_at_us = esp_timer_get_time() + (int64_t)CONFIG_GATE_QR_LINGER_MS * 1000;
+#endif
         }
         break;
 
@@ -204,6 +237,14 @@ static void gate_step(void)
     default:
         break;
     }
+
+    /* --- QR countdown --------------------------------------------------- */
+#if CONFIG_GATE_QR_ON_TRIGGER
+    if (s_qr_off_at_us != 0 && now_us >= s_qr_off_at_us) {
+        s_qr_off_at_us = 0;
+        display_restore();
+    }
+#endif
 
     /* --- re-arm --------------------------------------------------------- */
     /* Only when the arm is home and the switch has actually been let go. */

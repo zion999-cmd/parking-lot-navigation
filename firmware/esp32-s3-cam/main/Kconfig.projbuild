@@ -340,6 +340,40 @@ menu "Barrier Gate (servo + contact switch)"
             rail that sags takes the camera and the panel with it, or resets the
             board (rst:0x1 POWERON). Slower costs nothing on a barrier arm.
 
+    config GATE_QR_ON_TRIGGER
+        bool "Show the QR code while the gate is open"
+        default y
+        help
+            A car has arrived, so the code goes in front of the person standing
+            there with it - that is the hand-off to the phone: scan, pick a bay,
+            drive.
+
+            Its timing is deliberately separate from the arm's. The arm stays up
+            because the car has to clear the gate (GATE_HOLD_MS); the code stays up
+            because a person has to get a phone out and aim it (GATE_QR_LINGER_MS,
+            counted from the moment the arm lands home). One number cannot serve
+            both - whichever way it is set, the other is wrong.
+
+            QR_SHOW_ON_BOOT is separate on purpose - it exists to check that the
+            code scans at all, and once that is confirmed this is the trigger that
+            should be doing it.
+
+    config GATE_QR_LINGER_MS
+        int "Keep the QR code up this long after the arm lands (ms)"
+        depends on GATE_QR_ON_TRIGGER
+        range 0 60000
+        default 10000
+        help
+            10 s by default, counted from the arm reaching home - so with the
+            default GATE_HOLD_MS the code is on screen from the trigger for
+            roughly 17 s in total.
+
+            That is the number to raise when someone says they could not get their
+            phone out in time. It costs nothing: the arm is already down and the
+            gate is already ready for the next car while the code is still up.
+
+            0 takes the code down the moment the arm lands.
+
     config GATE_START_PULSE_US
         int "First position commanded at boot (us)"
         range 500 2600
