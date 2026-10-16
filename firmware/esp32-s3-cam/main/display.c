@@ -311,9 +311,15 @@ static void flush(void)
  *   (25 + 2*4) modules * 7 px = 231 px of 240, leaving 32 px each side.
  *
  * The payload decides the version and therefore the module size, which is why the
- * QR points at /go (28 characters, version 2, 7 px per module) rather than at
- * /web/navigation.html (45, version 3, 6 px). Same code, one pixel larger per
- * module, for a string nobody reads.
+ * QR points at /go on the Mac's .local name (38 characters, version 3, 6 px per
+ * module) rather than straight at /web/navigation.html (55, version 4, 5 px).
+ *
+ * A name instead of an address is what makes the code survive a change of Wi-Fi:
+ * no IP in it means nothing to go stale, and macOS already answers for
+ * <hostname>.local on any network it joins. The price is one version - an address
+ * would fit in version 2 and give 7 px per module - which is the trade taken
+ * because a QR that has to be regenerated after every move is worse than one that
+ * is 14% smaller.
  *
  * Anything bigger than 8 px per module would eat into the quiet zone, and a code
  * that is 12% larger but unreadable is not larger at all. The scale is computed
