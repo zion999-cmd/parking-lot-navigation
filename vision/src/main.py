@@ -102,9 +102,12 @@ def annotate(frame: np.ndarray, spots: List[Spot], results: Dict[str, SpotResult
                     int(pose.y - half * math.sin(facing)))
             cv2.circle(canvas, fx, 7, COL_CAR, -1)      # filled = the front
             cv2.circle(canvas, rear, 7, COL_CAR, 2)     # hollow = the back
-        else:
-            # No front known: both ends get a ring, so the drawing does not claim a direction
-            # it does not have.
+        elif pose.elongation >= vehicle.AXIS_MIN_ELONGATION:
+            # No front known: both ends get a ring, so the drawing does not claim a direction it
+            # does not have. Which needs an axis to put them on: with no axis there are no ends
+            # to mark, and dx/dy above were never computed - wrapping the axis line in the same
+            # condition crashed here with UnboundLocalError the moment the car had no axis,
+            # which is exactly the situation this code was added for.
             for p in ((int(pose.x - dx), int(pose.y - dy)),
                       (int(pose.x + dx), int(pose.y + dy))):
                 cv2.circle(canvas, p, 5, COL_CAR, 2)
