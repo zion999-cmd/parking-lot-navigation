@@ -23,6 +23,15 @@ import vehicle                                                  # noqa: E402
 from road_network import KIND_ENTRANCE, RoadNetwork              # noqa: E402
 from spot_config import Spot                                    # noqa: E402
 
+# Pin the vehicle config to the built-in values (which are the red car's) for the whole file.
+#
+# The synthetic cars below are drawn RED, so these tests only work against red thresholds. Left
+# to read config/vehicle.json - which describes whichever car is on the sandbox right now - they
+# silently depend on the installation: swapping the hero car for a yellow one failed 16 of them
+# for reasons that had nothing to do with the logic they are checking. A test that breaks when
+# the hardware changes is not testing the code.
+vehicle._VEHICLE_CONFIG_CACHE = dict(vehicle._DEFAULT_VEHICLE_CONFIG)
+
 W, H = 800, 600
 BACKGROUND = 120
 # Pure red in BGR: hue 0, high saturation, middling value, which is what the mask wants.

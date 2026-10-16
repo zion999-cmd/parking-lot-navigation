@@ -205,7 +205,10 @@ def record(source: str, label: str, want_frames: int, seconds: float) -> int:
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         filled = vehicle.red_mask(hsv)
         raw_red = np.zeros(frame.shape[:2], np.uint8)
-        for lo, hi in vehicle.RED_HUE_RANGES:
+        # The configured paint colour, not RED_HUE_RANGES: that constant is red, and a yellow
+        # car measured identically zero on this channel for a whole recording - the same bug
+        # that was in vehicle.py's raw_red, in the tool that fills the template.
+        for lo, hi in vehicle.vehicle_config()["hue_ranges"]:
             raw_red |= cv2.inRange(hsv, np.array(lo, np.uint8), np.array(hi, np.uint8))
         raw_red = cv2.morphologyEx(raw_red, cv2.MORPH_OPEN,
                                    cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))

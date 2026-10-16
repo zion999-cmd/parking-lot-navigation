@@ -124,6 +124,12 @@ MIN_TAPER = 0.04
 
 # Below this a red blob is a sticker or a reflection, not a car.
 DEFAULT_MIN_AREA = 80
+
+# Below this elongation there is no axis to measure: an angle from a square blob is noise
+# wearing a number. Used both to refuse the taper-derived front and to report the heading as
+# unknown, on the same principle as front_is_known and the UNKNOWN bay state - a reader that
+# cannot tell "no measurement" from "a measurement of zero" will act on the wrong one.
+AXIS_MIN_ELONGATION = 1.6
 # Two pieces of the same car are joined if they are this close. The body breaks into pieces
 # wherever a dark band crosses it, and a centroid that jumps between two halves is not a
 # position.
@@ -179,9 +185,15 @@ class VehiclePose:
         return (self.x, self.y)
 
     def as_dict(self) -> dict:
+        # heading is null when the shape has no axis, rather than an angle from a square. The
+        # number is kept on the dataclass because the overlay and the diagnostic tools print it
+        # next to "NO CLEAR AXIS", but the contract is what a consumer acts on, and a consumer
+        # cannot tell a meaningless 87.6 from a real one.
+        axis_known = self.elongation >= AXIS_MIN_ELONGATION
         out = {"id": "hero", "x": round(self.x, 1), "y": round(self.y, 1),
-               "heading": round(self.heading, 1), "visible": True,
-               "heading_is_axis_only": True,
+               "heading": round(self.heading, 1) if axis_known else None,
+               "visible": True,
+               "heading_is_axis_only": bool(axis_known),
                "front_is_known": bool(self.front_is_known)}
         if self.front_is_known and self.front_heading is not None:
             # The axis, plus the one fact a person had to tell us: which end is the front.
@@ -902,7 +914,7 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
             wider_is_front = bool(vehicle_config().get("front_is_the_wider_end", True))
             signed = taper if wider_is_front else -taper
             evidence = float(np.clip(signed / TAPER_SCALE, -1.0, 1.0))
-        if elongation < 1.6:
+        if elongation < AXIS_MIN_ELONGATION:
             evidence = None          # a blob with no axis cannot have a front either
 
         front_heading = None

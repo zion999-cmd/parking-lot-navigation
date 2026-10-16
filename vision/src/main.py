@@ -82,10 +82,13 @@ def annotate(frame: np.ndarray, spots: List[Spot], results: Dict[str, SpotResult
         x, y, w, h = pose.bbox
         cv2.rectangle(canvas, (x, y), (x + w, y + h), COL_CAR, 2)
         length = max(w, h) * 0.7
-        rad = math.radians(pose.heading)
-        dx, dy = length * math.cos(rad) / 2, length * math.sin(rad) / 2
-        cv2.line(canvas, (int(pose.x - dx), int(pose.y - dy)),
-                 (int(pose.x + dx), int(pose.y + dy)), COL_CAR, 2)
+        if pose.elongation >= vehicle.AXIS_MIN_ELONGATION:
+            # Only draw an axis when there is one. A line through a square is a claim the mask
+            # cannot support, and on screen it reads as confidently as a real one.
+            rad = math.radians(pose.heading)
+            dx, dy = length * math.cos(rad) / 2, length * math.sin(rad) / 2
+            cv2.line(canvas, (int(pose.x - dx), int(pose.y - dy)),
+                     (int(pose.x + dx), int(pose.y + dy)), COL_CAR, 2)
         cv2.circle(canvas, (int(pose.x), int(pose.y)), 4, COL_CAR, -1)
         if pose.front_is_known and pose.front_heading is not None:
             # A filled dot at the end the car faces and a hollow one behind it. The picture
@@ -123,7 +126,9 @@ def annotate(frame: np.ndarray, spots: List[Spot], results: Dict[str, SpotResult
             text = (f"car ({pose.x:.0f},{pose.y:.0f}) FRONT {pose.front_heading:.0f}deg"
                     f"  (axis {pose.heading:.0f}){where}")
         else:
-            text = (f"car ({pose.x:.0f},{pose.y:.0f}) axis {pose.heading:.0f}deg"
+            axis_txt = (f"{pose.heading:.0f}deg" if pose.elongation >= vehicle.AXIS_MIN_ELONGATION
+                        else "unknown")
+            text = (f"car ({pose.x:.0f},{pose.y:.0f}) axis {axis_txt}"
                     f"  front unknown{where}")
         ev = f"{pose.front_evidence:+.2f}" if pose.front_evidence is not None else "  -  "
         detail = (f"elon {pose.elongation:.2f}  pca {pose.heading_pca:.0f}deg  d{agree:.0f}deg"
