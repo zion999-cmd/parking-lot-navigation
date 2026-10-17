@@ -8,6 +8,9 @@
 #   ./start.sh restart
 #   ./start.sh logs [name]     follow one log (serve, vision, beacon, ota, label)
 #   ./start.sh label           start the labelling page (:8030) as a managed service
+#   ./start.sh beacon          start the discovery beacon (UDP 9999) - NOT started by default: the
+#                              board was stable for 180 s with it down and resetting every 20-30 s
+#                              with it up. Without it the device uses its compiled-in address.
 #   ./start.sh ota             start the OTA server (:8000) - NOT started by default, because the
 #                              board polls it in a loop and a published build then updates the
 #                              hardware unattended
@@ -386,8 +389,17 @@ cmd_start() {
             "$PY_SYS" -u "$ROOT/tools/ota-server/server.py" --port "$OTA_PORT" || true
     fi
 
-    start_one beacon "" "cmd:tools/beacon.py" \
-        "$PY_SYS" -u "$ROOT/tools/beacon.py" --port "$BEACON_PORT" || true
+    # Not started by default. The board was measured stable for 180 s with the beacon down and
+    # resetting every 20-30 s with it up, on two separate runs; a UDP packet every 2 s is a radio
+    # wake-up every 2 s plus a firmware path that has already panicked once (the Invalid mbox assert
+    # fixed in 0.2.23). Whether the packet or the current it costs is what tips it over is not
+    # settled, and until it is the safer default is off - the device then uses its compiled-in
+    # address, which is what it does when nothing answers anyway. ./start.sh beacon starts it.
+    # This flag was parsed and never consulted before today: --no-beacon did nothing at all.
+    if [ "${OPT_BEACON:-0}" = "1" ] && [ "$OPT_NO_BEACON" = "0" ]; then
+        start_one beacon "" "cmd:tools/beacon.py" \
+            "$PY_SYS" -u "$ROOT/tools/beacon.py" --port "$BEACON_PORT" || true
+    fi
 
     # serve.py must be on 0.0.0.0: the device and the phone are other machines.
     start_one serve "$(port_answers "$VISION_PORT")" "port:$VISION_PORT" \
@@ -488,6 +500,19 @@ cmd_stop() {
 # Start the OTA server on its own. It serves /manifest.json and the published binaries; the board
 # polls it in a loop, so while this is running a published build reaches the hardware without anyone
 # asking again. That is useful during an upgrade and a hazard the rest of the time.
+# The discovery beacon: how the device learns this PC's address when the network moves underneath
+# it. Useful, and currently the thing the board does not survive indefinitely, so it is started
+# deliberately and stopped when the demo does not need it.
+cmd_beacon() {
+    if pid="$(pid_of beacon)"; then
+        info "beacon: already running (pid $pid)"
+        return 0
+    fi
+    start_one beacon "" "cmd:tools/beacon.py" \
+        "$PY_SYS" -u "$ROOT/tools/beacon.py" --port "$BEACON_PORT" || true
+    say "  broadcasting every 2 s on UDP $BEACON_PORT; watch the board: ./start.sh status"
+}
+
 cmd_ota() {
     if pid="$(pid_of ota)"; then
         info "ota: already running (pid $pid)"
@@ -681,6 +706,8 @@ while [ $# -gt 0 ]; do
         start|stop|restart|status|logs|label) cmd="$1"; shift ;;
         --all|-all) OPT_ALL=1; shift ;;
         --ota) OPT_OTA=1; shift ;;
+        --beacon) OPT_BEACON=1; shift ;;
+        beacon) cmd="beacon"; shift ;;
         ota) cmd="ota"; shift ;;
         --source) OPT_SOURCE="${2:?--source needs a URL}"; shift 2 ;;
         --no-ota) OPT_NO_OTA=1; shift ;;
@@ -697,6 +724,7 @@ case "$cmd" in
     restart) cmd_stop "${OPT_ALL:-0}"; cmd_start ;;
     label)   cmd_label ;;
     ota)     cmd_ota ;;
+    beacon)  cmd_beacon ;;
     status)  cmd_status ;;
     logs)    cmd_logs "${1:-}" ;;
 esac
