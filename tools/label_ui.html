@@ -51,7 +51,7 @@
     <select id="source"><option value="">实时画面</option></select>
   </label>
   <button id="next">下一帧 / 刷新 (N)</button>
-  <span class="hint">点 4 个角（<b>顺时针，第 1 点放在车头那侧</b>），再点一下车头方向</span>
+  <span class="hint" id="step">① 点第 1 个角（放在<b>车头</b>那一侧）</span>
 </header>
 
 <main>
@@ -77,9 +77,14 @@
 
     <div class="card">
       <h2>操作</h2>
+      <p class="hint" style="margin:0 0 8px">
+        点满 4 个角后，<b>箭头起点自动取四边形中心</b>，你只需再点一下<b>车头方向</b>。
+        点偏了再点一次即可重指方向。
+      </p>
       <div class="row">
         <button id="undo">撤销一点 (U)</button>
         <button id="reset">清空 (R)</button>
+        <button id="flip">反转点序</button>
       </div>
       <div class="row" style="margin-top:8px">
         <button class="primary" id="save">保存 (S)</button>
@@ -90,6 +95,7 @@
         <input type="text" id="notes" placeholder="备注（可选，如：车顶反光）">
       </div>
       <div id="msg"></div>
+      <p class="hint" id="orderwarn" style="margin:6px 0 0;color:#ffd43b"></p>
       <p class="hint" style="margin:6px 0 0">
         <kbd>N</kbd> 刷新帧 · <kbd>U</kbd> 撤销 · <kbd>R</kbd> 清空 · <kbd>S</kbd> 保存 ·
         <kbd>K</kbd> 跳过 · <kbd>X</kbd> 无效 · <kbd>←</kbd><kbd>→</kbd> 上/下一张图
@@ -110,6 +116,7 @@ const cv  = document.getElementById("cv");
 const ctx = cv.getContext("2d");
 let quad = [];          // 已点的角点，图像像素坐标
 let tip  = null;        // 车头箭头终点
+let mouse = null;       // 鼠标在图上的位置（画橡皮筋用）
 let natural = { w: 0, h: 0 };
 let currentFrom = "";   // "" = 实时；否则是磁盘上的文件名
 let saved = [];
@@ -152,6 +159,39 @@ function draw() {
       ctx.fillText(String(i + 1), q[0] + 7, q[1] - 7);
     });
   }
+
+  // 橡皮筋：让你看到下一段会连到哪里（第 4 点时回到 p0，之后从中心指向鼠标）
+  if (mouse && !tip) {
+    const m = [mouse[0] * s, mouse[1] * s];
+    if (p.length >= 1 && p.length < 4) {
+      ctx.setLineDash([6, 5]); ctx.strokeStyle = "#66d9ff"; ctx.lineWidth = 1.5;
+      const to = (p.length === 3) ? p[0] : m;
+      ctx.beginPath(); ctx.moveTo(p[p.length - 1][0], p[p.length - 1][1]);
+      ctx.lineTo(to[0], to[1]); ctx.stroke();
+      if (p.length === 3) {
+        ctx.beginPath(); ctx.moveTo(m[0], m[1]); ctx.lineTo(p[0][0], p[0][1]); ctx.stroke();
+      }
+      ctx.setLineDash([]);
+    }
+  }
+
+  // 四边形完成后：把自动取得的中心点画出来，并提示该点方向了
+  if (quad.length === 4) {
+    const c = centre();
+    const cx = c[0] * s, cy = c[1] * s;
+    ctx.strokeStyle = "#ff7a45"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(cx - 9, cy); ctx.lineTo(cx + 9, cy);
+    ctx.moveTo(cx, cy - 9); ctx.lineTo(cx, cy + 9); ctx.stroke();
+    ctx.fillStyle = "#ff7a45"; ctx.font = "bold 11px system-ui";
+    ctx.fillText("箭尖起点(自动)", cx + 12, cy - 10);
+    if (!tip && mouse) {
+      ctx.setLineDash([6, 5]); ctx.strokeStyle = "#66d9ff"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(cx, cy);
+      ctx.lineTo(mouse[0] * s, mouse[1] * s); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+
   if (tip && quad.length === 4) {
     const c = centre();
     const a = angleTo(c, tip);
@@ -162,6 +202,14 @@ function draw() {
     ctx.strokeStyle = "#66d9ff"; ctx.lineWidth = 3;
     ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(fx, fy); ctx.stroke();
     ctx.beginPath(); ctx.arc(fx, fy, 5, 0, 7); ctx.fillStyle = "#66d9ff"; ctx.fill();
+    // 箭头两翼，避免看成一条普通的线
+    const w = 0.42;
+    ctx.beginPath();
+    ctx.moveTo(fx, fy);
+    ctx.lineTo(fx - Math.cos(a - w) * 14, fy - Math.sin(a - w) * 14);
+    ctx.moveTo(fx, fy);
+    ctx.lineTo(fx - Math.cos(a + w) * 14, fy - Math.sin(a + w) * 14);
+    ctx.lineWidth = 3; ctx.stroke();
   }
 }
 
@@ -183,6 +231,15 @@ function polyArea(p) {
   }
   return Math.abs(s) / 2;
 }
+function clockwise() {
+  // 图像坐标 y 向下：按屏幕看顺时针 = 有序面积为正
+  let s = 0;
+  for (let i = 0; i < quad.length; i++) {
+    const q = quad[(i + 1) % quad.length];
+    s += quad[i][0] * q[1] - q[0] * quad[i][1];
+  }
+  return s > 0;
+}
 function sides(p) {
   return p.map((q, i) => Math.hypot(q[0] - p[(i + 1) % p.length][0], q[1] - p[(i + 1) % p.length][1]));
 }
@@ -197,6 +254,19 @@ function axisAngle(p) {
 function info() {
   document.getElementById("npts").textContent = quad.length + " / 4";
   document.getElementById("ntip").textContent = tip ? "已点" : "未点";
+  // 步骤提示：让流程不用猜
+  const step = document.getElementById("step");
+  if (quad.length < 4) {
+    const which = ["① 点第 1 个角（放在<b>车头</b>那一侧）", "② 点第 2 个角", "③ 点第 3 个角",
+                   "④ 点第 4 个角（顺时针回到起点侧）"][quad.length];
+    step.innerHTML = which;
+  } else if (!tip) {
+    step.innerHTML = "⑤ 四边形完成，箭头起点已自动取在<b>中心</b>（橙十字）— 现在点一下<b>车头方向</b>";
+  } else {
+    step.innerHTML = "✅ 完成：橙色边 = 车头侧，蓝箭头 = 车头方向 — 按 <b>S</b> 保存";
+  }
+  const warn = document.getElementById("orderwarn");
+  if (warn) warn.textContent = (quad.length === 4 && !clockwise()) ? "⚠ 点序是逆时针，建议按“反转点序”" : "";
   if (quad.length === 4) {
     const c = centre(), s = sides(quad);
     const long = Math.max(...s), wide = Math.min(...s);
@@ -226,6 +296,12 @@ cv.addEventListener("click", ev => {
   else tip = p;                                   // 第 5 次点击 = 车头方向
   draw(); info();
 });
+cv.addEventListener("mousemove", ev => {
+  if (!natural.w) return;
+  mouse = toImage(ev);
+  draw();
+});
+cv.addEventListener("mouseleave", () => { mouse = null; draw(); });
 img.addEventListener("load", () => {
   natural = { w: img.naturalWidth, h: img.naturalHeight };
   fit();
@@ -330,6 +406,13 @@ document.addEventListener("keydown", ev => {
 });
 
 document.getElementById("next").onclick = next;
+document.getElementById("flip").onclick = () => {
+  // Reverse the orientation but keep p0 where it is: p0 carries the fact that this corner is on
+  // the nose side, and a plain reverse() would move it to the opposite end of the car and quietly
+  // invalidate that. Reversing the middle two flips clockwise/anticlockwise and nothing else.
+  if (quad.length === 4) quad = [quad[0], quad[3], quad[2], quad[1]];
+  draw(); info();
+};
 document.getElementById("undo").onclick = () => { if (tip) tip = null; else quad.pop(); draw(); info(); };
 document.getElementById("reset").onclick = resetPoints;
 document.getElementById("save").onclick = () => save("ok");
