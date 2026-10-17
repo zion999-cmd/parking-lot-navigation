@@ -8,12 +8,16 @@
 #   ./start.sh restart
 #   ./start.sh logs [name]     follow one log (serve, vision, beacon, ota, label)
 #   ./start.sh label           start the labelling page (:8030) as a managed service
+#   ./start.sh ota             start the OTA server (:8000) - NOT started by default, because the
+#                              board polls it in a loop and a published build then updates the
+#                              hardware unattended
 #   ./start.sh stop --all      stop the stack AND every test/experiment process of this
 #                              project (tools/hero_lab, vision/tests, the labeller, ...)
 #
 # Options (for `start` / `restart`):
 #   --source URL     camera stream; default: find the camera on the LAN
-#   --no-ota         leave the OTA server alone (only needed for upgrades)
+#   --no-ota         keep the OTA server down (it is down by default now; flag kept for old commands)
+#   --ota            also start the OTA server with `start`
 #   --no-beacon      leave the beacon alone (the device then uses the addresses
 #                    compiled into it)
 #
@@ -372,7 +376,12 @@ cmd_start() {
     say "starting stack (logs in $RUN/)"
     print_services
 
-    if [ "$OPT_NO_OTA" = "0" ]; then
+    # The OTA server is not started by default, and that is a deliberate change: the firmware
+    # polls /manifest.json in a `while (true)` loop, so a resident server means that publishing a
+    # build updates the board unattended. This project has already lost an evening to an OTA rollback
+    # loop. The usage line always said "(only needed for upgrades)"; now the default agrees with it.
+    # Start it with ./start.sh ota, or ./start.sh start --ota.
+    if [ "${OPT_OTA:-0}" = "1" ] && [ "$OPT_NO_OTA" = "0" ]; then
         start_one ota "$(port_answers "$OTA_PORT")" "port:$OTA_PORT" \
             "$PY_SYS" -u "$ROOT/tools/ota-server/server.py" --port "$OTA_PORT" || true
     fi
@@ -476,6 +485,23 @@ cmd_stop() {
 
 # The labelling page is an entry point like any other, so it is started and stopped here rather than
 # with a remembered python command. It needs the camera to itself: see the warning in the tool itself.
+# Start the OTA server on its own. It serves /manifest.json and the published binaries; the board
+# polls it in a loop, so while this is running a published build reaches the hardware without anyone
+# asking again. That is useful during an upgrade and a hazard the rest of the time.
+cmd_ota() {
+    if pid="$(pid_of ota)"; then
+        info "ota: already running (pid $pid)"
+        return 0
+    fi
+    start_one ota "$(port_answers "$OTA_PORT")" "port:$OTA_PORT" \
+        "$PY_SYS" -u "$ROOT/tools/ota-server/server.py" --port "$OTA_PORT" || true
+    local mf="$ROOT/tools/ota-server/manifest.json"
+    if [ -f "$mf" ]; then
+        say "  publishing: $(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$mf" | head -1)"
+    fi
+    say "  the board polls this; stop it with ./start.sh stop when the upgrade is done"
+}
+
 cmd_label() {
     local port="${LABEL_PORT:-8030}"
     if pid="$(pid_of label)"; then
@@ -654,6 +680,8 @@ while [ $# -gt 0 ]; do
     case "$1" in
         start|stop|restart|status|logs|label) cmd="$1"; shift ;;
         --all|-all) OPT_ALL=1; shift ;;
+        --ota) OPT_OTA=1; shift ;;
+        ota) cmd="ota"; shift ;;
         --source) OPT_SOURCE="${2:?--source needs a URL}"; shift 2 ;;
         --no-ota) OPT_NO_OTA=1; shift ;;
         --no-beacon) OPT_NO_BEACON=1; shift ;;
@@ -668,6 +696,7 @@ case "$cmd" in
     stop)    cmd_stop "${OPT_ALL:-0}" ;;
     restart) cmd_stop "${OPT_ALL:-0}"; cmd_start ;;
     label)   cmd_label ;;
+    ota)     cmd_ota ;;
     status)  cmd_status ;;
     logs)    cmd_logs "${1:-}" ;;
 esac
