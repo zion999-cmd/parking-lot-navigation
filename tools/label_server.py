@@ -26,7 +26,12 @@ Notes that matter:
     tip_source, so the two can be compared later - a systematic disagreement would mean the
     convention is being applied wrongly somewhere, which is worth knowing before the labels are
     trusted.
-  * Saved under vision/data/labels/, which is not gitignored: labels are work.
+  * Saved under vision/data/labels/, which is not gitignored: labels are work. Nothing here
+    deletes anything - the tool only appends. If a test needs to write, point it at a throwaway
+    directory with --labels, because the two annotation images lost on 2026-10-17 were deleted by a
+    cleanup command that globbed ann-*.jpg instead of removing the one file it had just written.
+    The quads survived in annotations.jsonl; the pictures did not, and they came from the live
+    stream, so they are gone.
 """
 
 from __future__ import annotations
@@ -245,11 +250,19 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
+    # Declared before anything reads them: `default=LABELS` below counts as a use, and Python
+    # rejects a `global` that comes after a use in the same function.
+    global LABELS, ANNOTATIONS
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8030)
     ap.add_argument("--source", default=DEFAULT_STREAM)
+    ap.add_argument("--labels", default=LABELS,
+                    help="where to write labels; point at a temporary directory when testing so a "
+                         "test can never write to, or clean up, the real dataset")
     args = ap.parse_args()
 
+    LABELS = os.path.abspath(args.labels)
+    ANNOTATIONS = os.path.join(LABELS, "annotations.jsonl")
     os.makedirs(LABELS, exist_ok=True)
     Handler.frames = Frames(args.source)
     server = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
