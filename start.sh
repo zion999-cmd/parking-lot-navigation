@@ -191,8 +191,12 @@ kill_pids() {
 # The managed services, plus whatever else is running their code. Children before wrappers: killing
 # run-vision.sh alone leaves main.py alive and still holding the camera, which is how a "restart"
 # ends up with two clients instead of none.
-SERVICE_SCRIPTS="tools/run-vision.sh vision/src/main.py vision/src/serve.py tools/beacon.py tools/ota-server"
-TEST_SCRIPTS="tools/hero_lab tools/label_server.py vision/tests vision/src/calibration.py vision/src/emit_map.py vision/src/plan.py"
+# Both spellings of every script: run-vision.sh starts main.py by its *relative* path
+# ("src/main.py"), and the sweep only matched "vision/src/main.py", so an orphan from 01:29 was
+# still holding a second camera connection hours later - visible as Clients 2 on the board's status
+# page and as two entries in lsof. Second camera clients are exactly what this project cannot have.
+SERVICE_SCRIPTS="tools/run-vision.sh vision/src/main.py src/main.py vision/src/serve.py src/serve.py tools/beacon.py tools/ota-server"
+TEST_SCRIPTS="tools/hero_lab tools/label_server.py vision/tests vision/src/calibration.py vision/src/emit_map.py vision/src/plan.py src/calibration.py src/emit_map.py src/plan.py tools/serial_capture.py tools/watch_device.py"
 
 adopt() {                                   # remember a pid we did not start
     local name="$1" pid="$2"
