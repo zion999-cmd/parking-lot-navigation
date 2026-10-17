@@ -229,6 +229,10 @@ class Handler(BaseHTTPRequestHandler):
             "from": origin,
             "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "quad": [[int(round(p[0])), int(round(p[1]))] for p in quad],   # clockwise, p0 at the nose
+            # The quad is a fitted rectangle; raw_quad is what the hand actually clicked, kept
+            # because a fit cannot be un-fitted later and the clicks cannot be recovered from it.
+            "raw_quad": [[int(round(p[0])), int(round(p[1]))]
+                         for p in (payload.get("raw_quad") or [])][:4],
             "tip": [int(round(payload["tip"][0])), int(round(payload["tip"][1]))]
             if payload.get("tip") else None,
             "tip_source": str(payload.get("tip_source", ""))[:12],   # auto | manual

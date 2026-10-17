@@ -96,6 +96,7 @@
       </div>
       <div id="msg"></div>
       <p class="hint" id="orderwarn" style="margin:6px 0 0;color:#ffd43b"></p>
+      <p class="hint" id="rectnote" style="margin:6px 0 0;color:#8ce99a"></p>
       <p class="hint" style="margin:6px 0 0">
         <kbd>N</kbd> 刷新帧 · <kbd>U</kbd> 撤销 · <kbd>R</kbd> 清空 · <kbd>S</kbd> 保存 ·
         <kbd>K</kbd> 跳过 · <kbd>X</kbd> 无效 · <kbd>←</kbd><kbd>→</kbd> 上/下一张图
@@ -114,7 +115,8 @@
 const img = document.getElementById("img");
 const cv  = document.getElementById("cv");
 const ctx = cv.getContext("2d");
-let quad = [];          // 已点的角点，图像像素坐标（第 1 点 = 车的右前角，顺时针）
+let clicks = [];        // 人工点击的原始点，原样保存为 raw_quad
+let quad = [];          // 由 clicks 拟合出的精确矩形（保存为 quad）
 let tip  = null;        // 手动指定的车头方向（null = 用自动算出来的）
 let mouse = null;       // 鼠标在图上的位置（画橡皮筋用）
 let natural = { w: 0, h: 0 };
@@ -186,6 +188,19 @@ function draw() {
     ctx.fillText("方向起点(自动)", cx + 12, cy - 10);
   }
 
+  // 预览：第 2、3 次点击之后，用鼠标位置先拟合一遍 —— 看到的就是点下去会得到的矩形
+  if (mouse && !tip && (clicks.length === 2 || clicks.length === 3)) {
+    const ghost = snapRect([...clicks, mouse]);
+    if (ghost.length === 4) {
+      ctx.setLineDash([5, 4]); ctx.strokeStyle = "#4d7c8a"; ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(ghost[1][0] * s, ghost[1][1] * s);
+      ctx.lineTo(ghost[2][0] * s, ghost[2][1] * s);
+      ctx.lineTo(ghost[3][0] * s, ghost[3][1] * s);
+      ctx.closePath(); ctx.stroke(); ctx.setLineDash([]);
+    }
+  }
+
   // 车头方向：默认由四边形自动算出（第 1 点=右前角 ⇒ 前方 = −(p1→p0)），手动点过就用手动的。
   const arrow = shownTip();
   if (arrow && quad.length === 4) {
@@ -220,6 +235,37 @@ function centre() {
 function angleTo(from, to) {
   let a = Math.atan2(to[1] - from[1], to[0] - from[0]) * 180 / Math.PI;
   return (a + 360) % 360;
+}
+function unit(v) {
+  const n = Math.hypot(v[0], v[1]) || 1;
+  return [v[0] / n, v[1] / n];
+}
+function perpendicular(u) { return [-u[1], u[0]]; }
+function reflect(pt, a, b) {
+  // 把 pt 关于直线 ab 镜像：用来把车宽换到第 1 条边的另一侧，矩形仍然精确
+  const d = unit([b[0] - a[0], b[1] - a[1]]);
+  const t = (pt[0] - a[0]) * d[0] + (pt[1] - a[1]) * d[1];
+  return [2 * (a[0] + d[0] * t) - pt[0], 2 * (a[1] + d[1] * t) - pt[1]];
+}
+function snapRect(clicks) {
+  /* 由 3 或 4 次点击得到精确矩形。
+
+     第 1 条边 p0->p1 定方向 u 与车长 L；最近一次点击投影到 u 的垂直方向，得到车宽 w 与车身
+     在哪一侧；于是 p2 = p1 + n·w、p3 = p0 + n·w。于是：
+       edge2 垂直 edge1、edge3 垂直 edge2 是构造出来的，不是量出来的；
+       |edge3| = |edge1|、|edge4| = |edge2|（对边精确等长）；
+       残差只剩 float64 舍入，实测 ~1e-16（tools/tests/autotip_test.js 里量的）。
+     原始点击另存为 raw_quad：矩形是拟合，人工输入本身不该被丢掉。 */
+  if (clicks.length < 3) return clicks.slice();
+  const p0 = clicks[0], p1 = clicks[1];
+  const L = Math.hypot(p1[0] - p0[0], p1[1] - p0[1]);
+  if (L < 3) return clicks.slice();               // 第 1 条边太短，别硬算
+  const u = unit([p1[0] - p0[0], p1[1] - p0[1]]);
+  let n = perpendicular(u);
+  const ref = clicks[clicks.length - 1];          // 最近一次点击：既定车宽，也定在哪一侧
+  if ((ref[0] - p1[0]) * n[0] + (ref[1] - p1[1]) * n[1] < 0) n = [-n[0], -n[1]];
+  const w = (ref[0] - p1[0]) * n[0] + (ref[1] - p1[1]) * n[1];
+  return [p0, p1, [p1[0] + n[0] * w, p1[1] + n[1] * w], [p0[0] + n[0] * w, p0[1] + n[1] * w]];
 }
 function dirRadians(from, to) {
   // 唯一一处角度→弧度转换。Math.cos/sin 要的是弧度，直接喂 angleTo() 的返回值就会画歪
@@ -275,12 +321,18 @@ function info() {
   document.getElementById("npts").textContent = quad.length + " / 4";
   document.getElementById("ntip").textContent =
     tip ? "手动修正" : (quad.length === 4 ? "自动（平行第 1 条边）" : "–");
+  const rectNote = document.getElementById("rectnote");
+  if (rectNote) {
+    rectNote.textContent = (quad.length === 4)
+      ? "矩形已拟合：对边等长、四角 90°（残差只有 float64 舍入）" : "";
+  }
   // 步骤提示：让流程不用猜
   const step = document.getElementById("step");
-  if (quad.length < 4) {
-    const which = ["① 点车的<b>右前角</b>（然后顺时针点其余三个角）", "② 点<b>同一侧的后角</b>（沿车身长边）",
-                   "③ 点第三个角", "④ 点最后一个角（回到起点侧）"][quad.length];
-    step.innerHTML = which;
+  if (clicks.length < 3) {
+    step.innerHTML = ["① 点车的<b>右前角</b>",
+                      "② 点<b>同一侧的后角</b>（沿车身长边，定车长）"][clicks.length];
+  } else if (clicks.length === 3) {
+    step.innerHTML = "③ 点向车的<b>另一侧</b>（定车宽；第 2 条边自动垂直第 1 条边）— 也可直接按 <b>S</b> 保存";
   } else if (!tip) {
     step.innerHTML = "✅ 方向已自动算出（蓝箭头）— 要修正就点一下，否则按 <b>S</b> 保存";
   } else {
@@ -322,8 +374,12 @@ function toImage(ev) {
 cv.addEventListener("click", ev => {
   if (!natural.w) return;
   const p = toImage(ev);
-  if (quad.length < 4) quad.push(p);
-  else tip = p;                                   // 第 5 次点击 = 车头方向
+  if (clicks.length < 4) {
+    clicks.push(p);
+    quad = snapRect(clicks);                      // 每点一下都重算，矩形始终精确
+  } else {
+    tip = p;                                      // 第 5 次点击 = 手动修正车头方向
+  }                                   // 第 5 次点击 = 车头方向
   draw(); info();
 });
 cv.addEventListener("mousemove", ev => {
@@ -351,7 +407,7 @@ function status() {
 async function save(kind) {
   if (kind === "ok" && !status()) return;
   if (kind === "ok" && !shownTip()) { msg("需要先点满四个角", true); return; }
-  const body = { quad, tip: shownTip(), tip_source: tip ? "manual" : "auto",
+  const body = { quad, raw_quad: clicks, tip: shownTip(), tip_source: tip ? "manual" : "auto",
                  status: kind, notes: document.getElementById("notes").value,
                  from: currentFrom };
   const r = await fetch("/save", { method: "POST",
@@ -366,7 +422,7 @@ async function save(kind) {
   if (kind === "ok") await next();               // 实时帧下自动取新的一帧，连续标注
 }
 
-function resetPoints() { quad = []; tip = null; draw(); info(); }
+function resetPoints() { clicks = []; quad = []; tip = null; draw(); info(); }
 
 async function loadFrames() {
   const j = await (await fetch("/frames")).json();
@@ -427,7 +483,7 @@ document.addEventListener("keydown", ev => {
   if (ev.target.tagName === "INPUT") return;
   const k = ev.key.toLowerCase();
   if (k === "n") { next(); }
-  else if (k === "u") { if (tip) tip = null; else quad.pop(); draw(); info(); }
+  else if (k === "u") { undoOne(); }
   else if (k === "r") { resetPoints(); }
   else if (k === "s") { ev.preventDefault(); save("ok"); }
   else if (k === "k") { save("skip"); }
@@ -437,14 +493,23 @@ document.addEventListener("keydown", ev => {
 });
 
 document.getElementById("next").onclick = next;
+function undoOne() {
+  if (tip) { tip = null; }
+  else { clicks.pop(); quad = snapRect(clicks); }
+  draw(); info();
+}
 document.getElementById("flip").onclick = () => {
   // Reverse the orientation but keep p0 where it is: p0 carries the fact that this corner is on
   // the nose side, and a plain reverse() would move it to the opposite end of the car and quietly
   // invalidate that. Reversing the middle two flips clockwise/anticlockwise and nothing else.
-  if (quad.length === 4) quad = [quad[0], quad[3], quad[2], quad[1]];
+  if (clicks.length >= 3) {
+    const i = clicks.length - 1;
+    clicks[i] = reflect(clicks[i], clicks[0], clicks[1]);   // 换到第 1 条边另一侧
+    quad = snapRect(clicks);                                 // 仍然是精确矩形
+  }
   draw(); info();
 };
-document.getElementById("undo").onclick = () => { if (tip) tip = null; else quad.pop(); draw(); info(); };
+document.getElementById("undo").onclick = undoOne;
 document.getElementById("reset").onclick = resetPoints;
 document.getElementById("save").onclick = () => save("ok");
 document.getElementById("skip").onclick = () => save("skip");

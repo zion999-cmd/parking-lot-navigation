@@ -24,7 +24,8 @@ const path = require("path");
 const ui = process.argv[2] || path.join(__dirname, "..", "label_ui.html");
 const script = fs.readFileSync(ui, "utf8").match(/<script>([\s\S]*?)<\/script>/)[1];
 
-for (const name of ["centre", "angleTo", "dirRadians", "sides", "autoTip"]) {
+for (const name of ["centre", "angleTo", "dirRadians", "sides", "autoTip", "unit",
+                    "perpendicular", "snapRect", "reflect"]) {
   const m = script.match(new RegExp("function " + name + "\\([^)]*\\) \\{[\\s\\S]*?\\n\\}"));
   if (!m) {
     console.log(`  cannot find ${name}() in ${ui}`);
@@ -81,6 +82,32 @@ check(worstOld > 0.1, `the old degrees-into-radians call is measurably wrong (${
 quad = [[430,240],[370,240],[370,360],[430,360]];            // corner 2 across the width
 const off = Math.abs((angleTo(centre(), autoTip()) - 270 + 540) % 360 - 180);
 check(Math.abs(off - 90) < 5, `corner 2 on the width edge tilts the heading by ${off.toFixed(0)} deg - what the page warns about`);
+
+/* ---- 4. the rectangle snap: 90 degrees by construction, not by measurement ---- */
+const noisy = [[430, 240], [430, 360], [370, 362], [362, 358]];   // corners 3 and 4 clicked sloppily
+const before = JSON.stringify(noisy);
+const r = snapRect(noisy);
+const seg = (i) => [r[(i + 1) % 4][0] - r[i][0], r[(i + 1) % 4][1] - r[i][1]];
+const len = (v) => Math.hypot(v[0], v[1]);
+const cosBetween = (a, b) => (a[0] * b[0] + a[1] * b[1]) / (len(a) * len(b) || 1);
+let worstCos = 0, worstLen = 0;
+for (let i = 0; i < 4; i++) {
+  worstCos = Math.max(worstCos, Math.abs(cosBetween(seg(i), seg((i + 1) % 4))));
+  worstLen = Math.max(worstLen, Math.abs(len(seg(i)) - len(seg((i + 2) % 4))));
+}
+const worstDeg = Math.asin(Math.min(1, worstCos)) * 180 / Math.PI;
+check(worstCos < 1e-12,
+      `four corners are 90 deg by construction: worst |cos| ${worstCos.toExponential(2)} ` +
+      `= ${worstDeg.toExponential(2)} deg off (float64 rounding only)`);
+check(worstLen < 1e-9, `opposite sides equal: worst difference ${worstLen.toExponential(2)} px`);
+check(JSON.stringify(noisy) === before, "snapRect leaves the raw clicks untouched");
+quad = r;
+const par = (() => {
+  const c = centre(), t = autoTip();
+  const a = [t[0] - c[0], t[1] - c[1]], e1 = [r[1][0] - r[0][0], r[1][1] - r[0][1]];
+  return Math.abs(e1[0] * a[1] - e1[1] * a[0]) / (len(e1) * len(a) || 1);
+})();
+check(par < 1e-9, `heading stays parallel to the snapped first edge (|sin| ${par.toExponential(1)})`);
 
 console.log(failed ? `\n  ${failed} check(s) FAILED` : "\n  all checks passed");
 process.exit(failed ? 1 : 0);
