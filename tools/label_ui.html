@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>HERO 车辆标注</title>
+<style>
+  :root { --bg:#14171c; --panel:#1d2229; --line:#2c333d; --fg:#e6e9ee; --dim:#98a2b3; --hot:#ff7a45; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.5 -apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif; }
+  header { display:flex; gap:14px; align-items:center; padding:10px 16px; background:var(--panel);
+           border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  h1 { font-size:15px; margin:0 12px 0 0; font-weight:600; }
+  main { display:grid; grid-template-columns:1fr 320px; gap:14px; padding:14px; }
+  .stage { position:relative; background:#000; border:1px solid var(--line); border-radius:8px;
+           overflow:hidden; align-self:start; }
+  .stage img { display:block; max-width:100%; height:auto; user-select:none; -webkit-user-drag:none; }
+  .stage canvas { position:absolute; left:0; top:0; cursor:crosshair; }
+  aside { display:flex; flex-direction:column; gap:10px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
+  .card h2 { font-size:12px; margin:0 0 8px; color:var(--dim); font-weight:600; letter-spacing:.04em; }
+  button { background:#262d37; color:var(--fg); border:1px solid var(--line); border-radius:6px;
+           padding:7px 12px; cursor:pointer; font-size:13px; }
+  button:hover { background:#303845; }
+  button.primary { background:var(--hot); border-color:var(--hot); color:#20160f; font-weight:600; }
+  button.warn { border-color:#7a4; color:#cfd; }
+  select, input[type=text] { background:#11141a; color:var(--fg); border:1px solid var(--line);
+           border-radius:6px; padding:6px 8px; font-size:13px; }
+  input[type=text] { width:100%; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; }
+  kbd { background:#11141a; border:1px solid var(--line); border-bottom-width:2px; border-radius:4px;
+        padding:0 5px; font-size:11px; color:var(--dim); }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  td { padding:3px 4px; border-bottom:1px solid var(--line); }
+  td.k { color:var(--dim); white-space:nowrap; }
+  td.v { text-align:right; font-variant-numeric:tabular-nums; }
+  .list { max-height:38vh; overflow:auto; }
+  .list div { display:flex; justify-content:space-between; gap:8px; padding:4px 2px;
+              border-bottom:1px solid var(--line); font-size:12px; cursor:pointer; }
+  .list div:hover { background:#232a34; }
+  .ok { color:#8ce99a; } .skip { color:#ffd43b; } .invalid { color:#ff8787; }
+  .hint { color:var(--dim); font-size:12px; }
+  #msg { min-height:18px; font-size:12px; color:#8ce99a; }
+  .err { color:#ff8787; }
+</style>
+</head>
+<body>
+<header>
+  <h1>HERO 车辆标注</h1>
+  <label>帧来源
+    <select id="source"><option value="">实时画面</option></select>
+  </label>
+  <button id="next">下一帧 / 刷新 (N)</button>
+  <span class="hint">点 4 个角（<b>顺时针，第 1 点放在车头那侧</b>），再点一下车头方向</span>
+</header>
+
+<main>
+  <div class="stage" id="stage">
+    <img id="img" alt="">
+    <canvas id="cv"></canvas>
+  </div>
+
+  <aside>
+    <div class="card">
+      <h2>当前标注</h2>
+      <table>
+        <tr><td class="k">已点角点</td><td class="v" id="npts">0 / 4</td></tr>
+        <tr><td class="k">车头箭头</td><td class="v" id="ntip">未点</td></tr>
+        <tr><td class="k">中心 (图像像素)</td><td class="v" id="centre">–</td></tr>
+        <tr><td class="k">长 / 宽 (px)</td><td class="v" id="size">–</td></tr>
+        <tr><td class="k">长轴角 0–180</td><td class="v" id="axis">–</td></tr>
+        <tr><td class="k">车头角 0–360</td><td class="v" id="head">–</td></tr>
+        <tr><td class="k">面积 (px)</td><td class="v" id="area">–</td></tr>
+      </table>
+      <p class="hint" style="margin:8px 0 0">角度按图像坐标：0° = 向右(+x)，顺时针增大（+y 向下）。</p>
+    </div>
+
+    <div class="card">
+      <h2>操作</h2>
+      <div class="row">
+        <button id="undo">撤销一点 (U)</button>
+        <button id="reset">清空 (R)</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button class="primary" id="save">保存 (S)</button>
+        <button class="warn" id="skip">跳过 (K)</button>
+        <button class="warn" id="invalid">无效 (X)</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <input type="text" id="notes" placeholder="备注（可选，如：车顶反光）">
+      </div>
+      <div id="msg"></div>
+      <p class="hint" style="margin:6px 0 0">
+        <kbd>N</kbd> 刷新帧 · <kbd>U</kbd> 撤销 · <kbd>R</kbd> 清空 · <kbd>S</kbd> 保存 ·
+        <kbd>K</kbd> 跳过 · <kbd>X</kbd> 无效 · <kbd>←</kbd><kbd>→</kbd> 上/下一张图
+      </p>
+    </div>
+
+    <div class="card">
+      <h2>已保存 <span id="count" class="hint"></span></h2>
+      <div class="list" id="list"></div>
+      <p class="hint" style="margin:6px 0 0">点一条可重新打开那张图（角点已回填）。</p>
+    </div>
+  </aside>
+</main>
+
+<script>
+const img = document.getElementById("img");
+const cv  = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+let quad = [];          // 已点的角点，图像像素坐标
+let tip  = null;        // 车头箭头终点
+let natural = { w: 0, h: 0 };
+let currentFrom = "";   // "" = 实时；否则是磁盘上的文件名
+let saved = [];
+
+const K = (a,b) => [a,b];
+
+/* ---------- 画布尺寸跟随图片显示尺寸 ---------- */
+function fit() {
+  const r = img.getBoundingClientRect();
+  cv.width = Math.round(r.width || img.naturalWidth);
+  cv.height = Math.round(r.height || img.naturalHeight);
+  draw();
+}
+window.addEventListener("resize", fit);
+
+function scale() {
+  const r = img.getBoundingClientRect();
+  return r.width && natural.w ? natural.w / r.width : 1;
+}
+
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  const s = 1 / scale();
+  const p = quad.map(q => [q[0] * s, q[1] * s]);
+  if (p.length) {
+    ctx.lineWidth = 2; ctx.strokeStyle = "#ffd43b";
+    ctx.beginPath(); ctx.moveTo(p[0][0], p[0][1]);
+    for (let i = 1; i < p.length; i++) ctx.lineTo(p[i][0], p[i][1]);
+    if (p.length === 4) ctx.closePath();
+    ctx.stroke();
+    // 第 1 条边（p0→p1）用橙色标出：那侧是车头
+    if (p.length >= 2) {
+      ctx.strokeStyle = "#ff7a45"; ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.moveTo(p[0][0], p[0][1]); ctx.lineTo(p[1][0], p[1][1]); ctx.stroke();
+    }
+    p.forEach((q, i) => {
+      ctx.fillStyle = i === 0 ? "#ff7a45" : "#ffd43b";
+      ctx.beginPath(); ctx.arc(q[0], q[1], 5, 0, 7); ctx.fill();
+      ctx.fillStyle = "#14171c"; ctx.font = "bold 11px system-ui";
+      ctx.fillText(String(i + 1), q[0] + 7, q[1] - 7);
+    });
+  }
+  if (tip && quad.length === 4) {
+    const c = centre();
+    const a = angleTo(c, tip);
+    const s2 = 1 / scale();
+    const len = Math.hypot(tip[0] - c[0], tip[1] - c[1]) * s2 || 60;
+    const cx = c[0] * s2, cy = c[1] * s2;
+    const fx = cx + Math.cos(a) * len, fy = cy + Math.sin(a) * len;
+    ctx.strokeStyle = "#66d9ff"; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(fx, fy); ctx.stroke();
+    ctx.beginPath(); ctx.arc(fx, fy, 5, 0, 7); ctx.fillStyle = "#66d9ff"; ctx.fill();
+  }
+}
+
+/* ---------- 几何（与 vision/src/vehicle.py 同一套约定） ---------- */
+function centre() {
+  let x = 0, y = 0;
+  quad.forEach(q => { x += q[0]; y += q[1]; });
+  return [x / quad.length, y / quad.length];
+}
+function angleTo(from, to) {
+  let a = Math.atan2(to[1] - from[1], to[0] - from[0]) * 180 / Math.PI;
+  return (a + 360) % 360;
+}
+function polyArea(p) {
+  let s = 0;
+  for (let i = 0; i < p.length; i++) {
+    const q = p[(i + 1) % p.length];
+    s += p[i][0] * q[1] - q[0] * p[i][1];
+  }
+  return Math.abs(s) / 2;
+}
+function sides(p) {
+  return p.map((q, i) => Math.hypot(q[0] - p[(i + 1) % p.length][0], q[1] - p[(i + 1) % p.length][1]));
+}
+function axisAngle(p) {
+  // 最长边的方向，归到 0..180（与 heading 同一个量）
+  const s = sides(p);
+  let k = 0;
+  for (let i = 1; i < 4; i++) if (s[i] > s[k]) k = i;
+  const a = angleTo(p[k], p[(k + 1) % 4]);
+  return a % 180;
+}
+function info() {
+  document.getElementById("npts").textContent = quad.length + " / 4";
+  document.getElementById("ntip").textContent = tip ? "已点" : "未点";
+  if (quad.length === 4) {
+    const c = centre(), s = sides(quad);
+    const long = Math.max(...s), wide = Math.min(...s);
+    document.getElementById("centre").textContent =
+      c[0].toFixed(1) + ", " + c[1].toFixed(1);
+    document.getElementById("size").textContent =
+      long.toFixed(0) + " × " + wide.toFixed(0) + "  (比 " + (long / wide).toFixed(2) + ")";
+    document.getElementById("axis").textContent = axisAngle(quad).toFixed(1) + "°";
+    document.getElementById("area").textContent = polyArea(quad).toFixed(0);
+    document.getElementById("head").textContent = tip ? angleTo(c, tip).toFixed(1) + "°" : "–";
+  } else {
+    ["centre","size","axis","area","head"].forEach(id =>
+      document.getElementById(id).textContent = "–");
+  }
+}
+
+/* ---------- 交互 ---------- */
+function toImage(ev) {
+  const r = img.getBoundingClientRect();
+  const s = scale();
+  return [(ev.clientX - r.left) * s, (ev.clientY - r.top) * s];
+}
+cv.addEventListener("click", ev => {
+  if (!natural.w) return;
+  const p = toImage(ev);
+  if (quad.length < 4) quad.push(p);
+  else tip = p;                                   // 第 5 次点击 = 车头方向
+  draw(); info();
+});
+img.addEventListener("load", () => {
+  natural = { w: img.naturalWidth, h: img.naturalHeight };
+  fit();
+});
+
+function msg(text, bad) {
+  const m = document.getElementById("msg");
+  m.textContent = text; m.className = bad ? "err" : "";
+  if (text && !bad) setTimeout(() => { if (m.textContent === text) m.textContent = ""; }, 2500);
+}
+
+function status() {
+  if (quad.length !== 4) { msg("先点满 4 个角点", true); return null; }
+  return "ok";
+}
+
+async function save(kind) {
+  if (kind === "ok" && !status()) return;
+  if (kind === "ok" && !tip) { msg("再点一下车头方向", true); return; }
+  const body = { quad, tip, status: kind, notes: document.getElementById("notes").value,
+                 from: currentFrom };
+  const r = await fetch("/save", { method: "POST",
+                                   headers: { "Content-Type": "application/json" },
+                                   body: JSON.stringify(body) });
+  const j = await r.json();
+  if (!j.ok) { msg("保存失败: " + j.why, true); return; }
+  msg(kind === "ok" ? "已保存 " + j.saved : "已保存（" + kind + "）");
+  document.getElementById("notes").value = "";
+  resetPoints();
+  await loadList();
+  if (kind === "ok") await next();               // 实时帧下自动取新的一帧，连续标注
+}
+
+function resetPoints() { quad = []; tip = null; draw(); info(); }
+
+async function loadFrames() {
+  const j = await (await fetch("/frames")).json();
+  const sel = document.getElementById("source");
+  sel.innerHTML = '<option value="">实时画面</option>' +
+    j.seed.map(n => `<option value="${n}">磁盘: ${n}</option>`).join("");
+  sel.dataset.seed = JSON.stringify(j.seed);
+  if (j.error) msg("取流问题: " + j.error, true);
+}
+
+function showSource() {
+  currentFrom = document.getElementById("source").value;
+  resetPoints();
+  const q = currentFrom ? "?from=" + encodeURIComponent(currentFrom) : "?t=" + Date.now();
+  img.src = "/snapshot" + q;
+}
+
+async function next() {
+  if (currentFrom) {
+    const seed = JSON.parse(document.getElementById("source").dataset.seed || "[]");
+    const i = seed.indexOf(currentFrom);
+    if (i >= 0 && i + 1 < seed.length)
+      document.getElementById("source").value = seed[i + 1];
+    showSource();
+  } else {
+    showSource();
+  }
+}
+
+function prev() {
+  const seed = JSON.parse(document.getElementById("source").dataset.seed || "[]");
+  const i = seed.indexOf(currentFrom);
+  if (i > 0) { document.getElementById("source").value = seed[i - 1]; showSource(); }
+}
+
+async function loadList() {
+  const j = await (await fetch("/list")).json();
+  saved = j.labels || [];
+  document.getElementById("count").textContent = saved.length ? "(" + saved.length + ")" : "";
+  document.getElementById("list").innerHTML = saved.map(l =>
+    `<div data-id="${l.id}" data-image="${l.image}">
+       <span class="${l.status}">${l.id.slice(4)}</span>
+       <span class="hint">${l.status}</span>
+     </div>`).join("") || '<span class="hint">还没有</span>';
+  document.querySelectorAll("#list div").forEach(el => el.addEventListener("click", () => {
+    const l = saved.find(s => s.id === el.dataset.id);
+    if (!l) return;
+    currentFrom = l.image;
+    img.src = "/snapshot?from=" + encodeURIComponent(l.image);
+    quad = (l.quad || []).map(p => [p[0], p[1]]);
+    tip = l.tip ? [l.tip[0], l.tip[1]] : null;
+    msg("已打开 " + l.image + "（改完再按 S 保存为新的一条）");
+  }));
+}
+
+/* ---------- 快捷键 ---------- */
+document.addEventListener("keydown", ev => {
+  if (ev.target.tagName === "INPUT") return;
+  const k = ev.key.toLowerCase();
+  if (k === "n") { next(); }
+  else if (k === "u") { if (tip) tip = null; else quad.pop(); draw(); info(); }
+  else if (k === "r") { resetPoints(); }
+  else if (k === "s") { ev.preventDefault(); save("ok"); }
+  else if (k === "k") { save("skip"); }
+  else if (k === "x") { save("invalid"); }
+  else if (ev.key === "ArrowRight") { ev.preventDefault(); next(); }
+  else if (ev.key === "ArrowLeft") { ev.preventDefault(); prev(); }
+});
+
+document.getElementById("next").onclick = next;
+document.getElementById("undo").onclick = () => { if (tip) tip = null; else quad.pop(); draw(); info(); };
+document.getElementById("reset").onclick = resetPoints;
+document.getElementById("save").onclick = () => save("ok");
+document.getElementById("skip").onclick = () => save("skip");
+document.getElementById("invalid").onclick = () => save("invalid");
+document.getElementById("source").onchange = showSource;
+
+(async function start() {
+  await loadFrames();
+  await loadList();
+  showSource();
+})();
+</script>
+</body>
+</html>
