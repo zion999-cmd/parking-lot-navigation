@@ -6,7 +6,10 @@
 #   ./start.sh status          one screen: what is up, and will the strip work
 #   ./start.sh stop            stop what this script started
 #   ./start.sh restart
-#   ./start.sh logs [name]     follow one log (serve, vision, beacon, ota)
+#   ./start.sh logs [name]     follow one log (serve, vision, beacon, ota, label)
+#   ./start.sh label           start the labelling page (:8030) as a managed service
+#   ./start.sh stop --all      stop the stack AND every test/experiment process of this
+#                              project (tools/hero_lab, vision/tests, the labeller, ...)
 #
 # Options (for `start` / `restart`):
 #   --source URL     camera stream; default: find the camera on the LAN
@@ -92,6 +95,97 @@ pid_of() {                                  # read a pid file, "" if absent/dead
 # which is exactly what a status command must never do.
 pid_by_port() { lsof -nP -iTCP:"$1" -sTCP:LISTEN -t 2>/dev/null | head -1 || true; }
 pid_by_cmd()  { pgrep -f "$1" 2>/dev/null | head -1 || true; }
+
+# Every entry point into this project is supposed to be this script. In practice there are others -
+# a labelling server, a one-off eval, a main.py left behind when its supervisor was killed - and they
+# all fight over the same camera, whose frame budget is shared between clients. Measured: one stray
+# client took the vision stream from ~12 fps to 3.5, which made main.py exit and the supervisor
+# restart it 12,907 times in a day.
+#
+# So: a way to list them, and a way to kill them.
+#
+# The match is on the script path, and a pid is only killed if it is actually an interpreter
+# (python/sh/bash). Without that second test, `pgrep -f tools/beacon.py` also matches the editor that
+# has that file open, and `stop --all` would close the editor.
+SELF_PIDS=" $$ $PPID "
+MANAGED=""
+
+is_interpreter() {
+    case "$(ps -o comm= -p "$1" 2>/dev/null | sed 's#.*/##')" in
+        python*|sh|bash|env|dash|perl) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# The pids this script is supposed to be running, plus their children. A managed service is not a
+# stray: run-vision.sh is in vision.pid and main.py is its child, and listing either of them under
+# "not managed" makes the report untrustworthy exactly where it matters.
+managed_pids() {
+    local f pid
+    for f in "$RUN"/*.pid; do
+        [ -f "$f" ] || continue
+        pid="$(cat "$f" 2>/dev/null)"
+        [ -n "$pid" ] && printf '%s\n' "$pid"
+    done
+}
+
+is_descendant_of_managed() {
+    local pid="$1" parent
+    while parent="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"; do
+        [ -z "$parent" ] && return 1
+        [ "$parent" -le 1 ] && return 1
+        case " $MANAGED " in *" $parent "*) return 0 ;; esac
+        pid="$parent"
+    done
+    return 1
+}
+
+# pids running one of these scripts, never this script or its parent
+stray_pids() {
+    local pattern pid
+    MANAGED="$(managed_pids | tr '\n' ' ')"
+    for pattern in "$@"; do
+        for pid in $(pgrep -f "$pattern" 2>/dev/null); do
+            case "$SELF_PIDS" in *" $pid "*) continue ;; esac
+            case " $MANAGED " in *" $pid "*) continue ;; esac
+            is_descendant_of_managed "$pid" && continue
+            is_interpreter "$pid" && printf '%s\n' "$pid"
+        done
+    done | sort -u
+}
+
+describe_pid() {
+    ps -o pid=,command= -p "$1" 2>/dev/null | cut -c1-100 | sed 's/^ *//'
+}
+
+# TERM, wait, then KILL. Says what it did, because "stopped" without a pid is not evidence.
+kill_pids() {
+    local pid i=0 killed=0
+    for pid in "$@"; do
+        kill "$pid" 2>/dev/null || continue
+        killed=$((killed + 1))
+    done
+    while [ "$i" -lt 25 ]; do
+        local alive=0
+        for pid in "$@"; do kill -0 "$pid" 2>/dev/null && alive=1; done
+        [ "$alive" -eq 0 ] && break
+        sleep 0.2
+        i=$((i + 1))
+    done
+    for pid in "$@"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            warn "pid $pid ignored SIGTERM; sending SIGKILL"
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+    done
+    printf '%s' "$killed"
+}
+
+# The managed services, plus whatever else is running their code. Children before wrappers: killing
+# run-vision.sh alone leaves main.py alive and still holding the camera, which is how a "restart"
+# ends up with two clients instead of none.
+SERVICE_SCRIPTS="tools/run-vision.sh vision/src/main.py vision/src/serve.py tools/beacon.py tools/ota-server"
+TEST_SCRIPTS="tools/hero_lab tools/label_server.py vision/tests vision/src/calibration.py vision/src/emit_map.py vision/src/plan.py"
 
 adopt() {                                   # remember a pid we did not start
     local name="$1" pid="$2"
@@ -227,7 +321,7 @@ find_camera() {
             printf '%s' "$cached"
             return 0
         fi
-        warn "cached camera $cached did not answer; looking again"
+        warn "cached camera ${cached:0:48} did not answer; looking again" >&2
         rm -f "$RUN/camera.txt"
     fi
 
@@ -293,7 +387,18 @@ cmd_start() {
     local source="$OPT_SOURCE"
     if [ -z "$source" ]; then
         say "  finding the camera on the LAN ..."
-        if ! source="$(find_camera)"; then
+        # find_camera writes exactly one URL to stdout; anything else in there is a bug, and it
+        # has happened - a warning was printed to stdout and captured, so the "URL" handed to
+        # main.py was the warning's text, which failed as an HTTP URL and took the service down
+        # into the restart loop. Validate rather than trust.
+        source="$(find_camera)" || source=""
+        case "$source" in
+            http*) ;;
+            "")    ;;
+            *)     warn "camera resolution returned something that is not a URL: $source" >&2
+                   source="" ;;
+        esac
+        if [ -z "$source" ]; then
             warn "no camera found. Is the board powered and on this Wi-Fi?"
             warn "give it explicitly:  ./start.sh --source http://<ip>/stream"
         else
@@ -327,11 +432,64 @@ cmd_start() {
 }
 
 cmd_stop() {
+    local all="${1:-0}"
     say "stopping stack"
     stop_one vision
     stop_one serve
     stop_one beacon
     stop_one ota
+    stop_one label
+
+    # The pid files cover the processes this script started; these cover everything else running the
+    # same code - an adopted copy, a second main.py from a killed supervisor, a service started by
+    # hand. Without this, "stopped" means "stopped the ones I knew about".
+    local strays
+    # shellcheck disable=SC2086
+    strays="$(stray_pids $SERVICE_SCRIPTS)"
+    if [ -n "$strays" ]; then
+        say "  also stopping:"
+        for pid in $strays; do printf '    %s\n' "$(describe_pid "$pid")"; done
+        kill_pids $strays >/dev/null
+    fi
+
+    if [ "$all" = "1" ]; then
+        # shellcheck disable=SC2086
+        strays="$(stray_pids $TEST_SCRIPTS)"
+        if [ -n "$strays" ]; then
+            say "  stopping test and experiment processes (--all):"
+            for pid in $strays; do printf '    %s\n' "$(describe_pid "$pid")"; done
+            kill_pids $strays >/dev/null
+        fi
+        rm -f "$RUN"/label.pid
+    fi
+
+    local left
+    # shellcheck disable=SC2086
+    left="$(stray_pids $SERVICE_SCRIPTS)"
+    if [ -n "$left" ]; then
+        warn "still running:"
+        for pid in $left; do printf '    %s\n' "$(describe_pid "$pid")"; done
+        return 1
+    fi
+    say "  nothing of this project is left running"
+}
+
+# The labelling page is an entry point like any other, so it is started and stopped here rather than
+# with a remembered python command. It needs the camera to itself: see the warning in the tool itself.
+cmd_label() {
+    local port="${LABEL_PORT:-8030}"
+    if pid="$(pid_of label)"; then
+        info "label: already running (pid $pid) - http://127.0.0.1:$port"
+        return 0
+    fi
+    if port_answers "$VISION_PORT"; then
+        warn "the vision service is running and holds the camera stream"
+        say "     each extra client takes a share of the camera's frames (measured: 12 -> 3.5 fps)."
+        say "     ./start.sh stop          first, then ./start.sh label, then ./start.sh start"
+    fi
+    start_one label "" "cmd:tools/label_server.py" \
+        "$PY_VISION" "$ROOT/tools/label_server.py" --port "$port" || true
+    say "  open: http://127.0.0.1:$port"
 }
 
 cmd_status() {
@@ -339,7 +497,7 @@ cmd_status() {
     say "stack status"
 
     local name pid state
-    for name in serve vision beacon ota; do
+    for name in serve vision beacon ota label; do
         if pid="$(pid_of "$name")"; then
             state="up (pid $pid)"
         else
@@ -359,6 +517,17 @@ cmd_status() {
     done
 
     say ""
+    # Not managed, but still running this project's code - and therefore still a client on the
+    # camera, which is the resource every one of these competes for.
+    local strays
+    # shellcheck disable=SC2086
+    strays="$(stray_pids $SERVICE_SCRIPTS $TEST_SCRIPTS)"
+    if [ -n "$strays" ]; then
+        say "  not managed by this script (they count as camera clients):"
+        for pid in $strays; do printf '    %s\n' "$(describe_pid "$pid")"; done
+        say "    ./start.sh stop --all   stops these too"
+    fi
+
     say "  what the strip needs"
 
     # The state document, its age, and whether its bays are the ones the strip is
@@ -438,7 +607,8 @@ PY
     # The camera: cached address, and the firmware it is actually running.
     if [ -f "$RUN/camera.txt" ]; then
         local cam
-        cam="$(cat "$RUN/camera.txt")"
+        cam="$(cat "$RUN/camera.txt" 2>/dev/null)"
+        case "$cam" in http*) ;; *) cam="" ;; esac
         if camera_ok "$cam" 4; then
             local ver
             ver="$(curl -s --max-time 3 "$(camera_base "$cam")/" 2>/dev/null \
@@ -482,7 +652,8 @@ usage() {
 cmd=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        start|stop|restart|status|logs) cmd="$1"; shift ;;
+        start|stop|restart|status|logs|label) cmd="$1"; shift ;;
+        --all|-all) OPT_ALL=1; shift ;;
         --source) OPT_SOURCE="${2:?--source needs a URL}"; shift 2 ;;
         --no-ota) OPT_NO_OTA=1; shift ;;
         --no-beacon) OPT_NO_BEACON=1; shift ;;
@@ -494,8 +665,9 @@ done
 
 case "$cmd" in
     start)   cmd_start ;;
-    stop)    cmd_stop ;;
-    restart) cmd_stop; cmd_start ;;
+    stop)    cmd_stop "${OPT_ALL:-0}" ;;
+    restart) cmd_stop "${OPT_ALL:-0}"; cmd_start ;;
+    label)   cmd_label ;;
     status)  cmd_status ;;
     logs)    cmd_logs "${1:-}" ;;
 esac
