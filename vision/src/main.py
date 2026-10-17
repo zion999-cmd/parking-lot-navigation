@@ -568,10 +568,17 @@ def main() -> int:
                          "defaults to data/debug/frame.jpg when that file exists")
     ap.add_argument("--no-reference", action="store_true",
                     help="start without a reference (capture one with 'r')")
-    ap.add_argument("--changed-ratio", type=float, default=0.15,
-                    help="occupancy threshold on changed_ratio (default 0.15)")
-    ap.add_argument("--pixel-threshold", type=int, default=25)
-    ap.add_argument("--blur", type=int, default=5)
+    # Defaults come from OccupancyParams, not from copies of its numbers. They used to be copies -
+    # 0.15 here against 0.15 there - and raising the one in occupancy.py had no effect at all
+    # because this default overrode it: measured, the service still called bays at changed_ratio
+    # 0.284 occupied with a threshold of 0.40 on the other file. One source of truth, or the change
+    # is a rumour.
+    _occ = OccupancyParams()
+    ap.add_argument("--changed-ratio", type=float, default=_occ.changed_ratio_threshold,
+                    help=f"occupancy threshold on changed_ratio "
+                         f"(default {_occ.changed_ratio_threshold:g}, from OccupancyParams)")
+    ap.add_argument("--pixel-threshold", type=int, default=_occ.pixel_threshold)
+    ap.add_argument("--blur", type=int, default=_occ.blur_ksize)
     ap.add_argument("--headless", action="store_true", help="no window; print/CVS only")
     ap.add_argument("--duration", type=float, default=0.0,
                     help="stop after N seconds (0 = run until Ctrl-C)")

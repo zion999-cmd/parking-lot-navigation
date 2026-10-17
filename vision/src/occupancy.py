@@ -44,7 +44,22 @@ class OccupancyParams:
     # A pixel counts as "changed" when absdiff exceeds this (0-255).
     pixel_threshold: int = 25
     # Fraction of the inner area that must change for the bay to count occupied.
-    changed_ratio_threshold: float = 0.15
+    #
+    # Raised from 0.15 to 0.40 on request: 0.15 was firing on bays that were only marginally
+    # different, and the strip showed them occupied.
+    #
+    # Measured on 5 live frames against the production reference (10 October, still good inside the
+    # bays - the whole-frame difference of 36% is the road and the lights, not the bays):
+    #
+    #     threshold 0.15   occupied  3/48   ratio median 0.009   max 0.293
+    #     threshold 0.40   occupied  0/48
+    #
+    # so the three bays reading 0.15-0.29 (32, 43, 44 on the day) now read EMPTY. If those are
+    # genuinely occupied, this threshold hides them; if they are the flicker that prompted the
+    # change, it is the right trade. A reference captured at 11:53 measured *worse* inside the bays
+    # (median 0.071, 15 bays over 0.15) and must not be promoted - a fresher reference is not
+    # automatically a better one, and the whole-frame difference says nothing about the bays.
+    changed_ratio_threshold: float = 0.40
     # Morphology: remove speckle, then join nearby changed regions.
     open_ksize: int = 3
     close_ksize: int = 5
