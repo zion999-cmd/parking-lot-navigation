@@ -20,6 +20,12 @@ Notes that matter:
     full rate if you want it.
   * Coordinates on the page are image pixels, scaled from whatever the browser displayed, so the
     numbers saved are directly comparable with the ones in the contract (origin top left).
+  * The heading is derived from the quad, not clicked: corner 1 is the car's RIGHT-FRONT corner and
+    the rest follow clockwise, so p0->p1 runs along the car's side pointing rearward and the front
+    is the other way. The page still allows a click to override, and records which happened as
+    tip_source, so the two can be compared later - a systematic disagreement would mean the
+    convention is being applied wrongly somewhere, which is worth knowing before the labels are
+    trusted.
   * Saved under vision/data/labels/, which is not gitignored: labels are work.
 """
 
@@ -225,6 +231,7 @@ class Handler(BaseHTTPRequestHandler):
             "quad": [[int(round(p[0])), int(round(p[1]))] for p in quad],   # clockwise, p0 at the nose
             "tip": [int(round(payload["tip"][0])), int(round(payload["tip"][1]))]
             if payload.get("tip") else None,
+            "tip_source": str(payload.get("tip_source", ""))[:12],   # auto | manual
             "status": status,                    # ok | skip | invalid
             "notes": str(payload.get("notes", ""))[:200],
         }

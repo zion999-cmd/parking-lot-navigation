@@ -51,7 +51,7 @@
     <select id="source"><option value="">实时画面</option></select>
   </label>
   <button id="next">下一帧 / 刷新 (N)</button>
-  <span class="hint" id="step">① 点第 1 个角（放在<b>车头</b>那一侧）</span>
+  <span class="hint" id="step">① 点车的<b>右前角</b>（然后顺时针点其余三个角）</span>
 </header>
 
 <main>
@@ -78,13 +78,13 @@
     <div class="card">
       <h2>操作</h2>
       <p class="hint" style="margin:0 0 8px">
-        点满 4 个角后，<b>箭头起点自动取四边形中心</b>，你只需再点一下<b>车头方向</b>。
-        点偏了再点一次即可重指方向。
+        <b>车头方向自动算</b>：第 1 点定在车的右前角，第 2 点顺时针沿同一侧 →
+        方向 = 从中心平行第 1 条边指向<b>前方</b>。点偏了再点一下可手动修正。
       </p>
       <div class="row">
-        <button id="undo">撤销一点 (U)</button>
+        <button id="undo">撤销 (U)</button>
         <button id="reset">清空 (R)</button>
-        <button id="flip">反转点序</button>
+        <button id="flip">第 2 点改到另一侧</button>
       </div>
       <div class="row" style="margin-top:8px">
         <button class="primary" id="save">保存 (S)</button>
@@ -114,8 +114,8 @@
 const img = document.getElementById("img");
 const cv  = document.getElementById("cv");
 const ctx = cv.getContext("2d");
-let quad = [];          // 已点的角点，图像像素坐标
-let tip  = null;        // 车头箭头终点
+let quad = [];          // 已点的角点，图像像素坐标（第 1 点 = 车的右前角，顺时针）
+let tip  = null;        // 手动指定的车头方向（null = 用自动算出来的）
 let mouse = null;       // 鼠标在图上的位置（画橡皮筋用）
 let natural = { w: 0, h: 0 };
 let currentFrom = "";   // "" = 实时；否则是磁盘上的文件名
@@ -183,24 +183,20 @@ function draw() {
     ctx.beginPath(); ctx.moveTo(cx - 9, cy); ctx.lineTo(cx + 9, cy);
     ctx.moveTo(cx, cy - 9); ctx.lineTo(cx, cy + 9); ctx.stroke();
     ctx.fillStyle = "#ff7a45"; ctx.font = "bold 11px system-ui";
-    ctx.fillText("箭尖起点(自动)", cx + 12, cy - 10);
-    if (!tip && mouse) {
-      ctx.setLineDash([6, 5]); ctx.strokeStyle = "#66d9ff"; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.moveTo(cx, cy);
-      ctx.lineTo(mouse[0] * s, mouse[1] * s); ctx.stroke();
-      ctx.setLineDash([]);
-    }
+    ctx.fillText("方向起点(自动)", cx + 12, cy - 10);
   }
 
-  if (tip && quad.length === 4) {
+  // 车头方向：默认由四边形自动算出（第 1 点=右前角 ⇒ 前方 = −(p1→p0)），手动点过就用手动的。
+  const arrow = shownTip();
+  if (arrow && quad.length === 4) {
     const c = centre();
-    const a = angleTo(c, tip);
+    const a = angleTo(c, arrow);
     const s2 = 1 / scale();
-    const len = Math.hypot(tip[0] - c[0], tip[1] - c[1]) * s2 || 60;
-    const cx = c[0] * s2, cy = c[1] * s2;
-    const fx = cx + Math.cos(a) * len, fy = cy + Math.sin(a) * len;
+    const len = Math.hypot(arrow[0] - c[0], arrow[1] - c[1]) * s2 || 60;
+    const cx2 = c[0] * s2, cy2 = c[1] * s2;
+    const fx = cx2 + Math.cos(a) * len, fy = cy2 + Math.sin(a) * len;
     ctx.strokeStyle = "#66d9ff"; ctx.lineWidth = 3;
-    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(fx, fy); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx2, cy2); ctx.lineTo(fx, fy); ctx.stroke();
     ctx.beginPath(); ctx.arc(fx, fy, 5, 0, 7); ctx.fillStyle = "#66d9ff"; ctx.fill();
     // 箭头两翼，避免看成一条普通的线
     const w = 0.42;
@@ -209,7 +205,10 @@ function draw() {
     ctx.lineTo(fx - Math.cos(a - w) * 14, fy - Math.sin(a - w) * 14);
     ctx.moveTo(fx, fy);
     ctx.lineTo(fx - Math.cos(a + w) * 14, fy - Math.sin(a + w) * 14);
-    ctx.lineWidth = 3; ctx.stroke();
+    ctx.stroke();
+    ctx.font = "bold 11px system-ui";
+    ctx.fillStyle = tip ? "#ffd43b" : "#66d9ff";
+    ctx.fillText(tip ? "手动修正" : "自动：平行第 1 条边指向前方", fx + 10, fy + 4);
   }
 }
 
@@ -240,6 +239,23 @@ function clockwise() {
   }
   return s > 0;
 }
+function longestFirstEdge() {
+  // 约定的全部内容就在这一条：p0→p1 必须沿车身长边（车的侧边）。
+  // 第 2 点若点成了车宽那条边，自动算出的方向会偏 90°。
+  const s = sides(quad);
+  return s[0] >= Math.min(...s) + 1e-6;
+}
+function autoTip() {
+  // 前方 = 从中心沿 −(p1→p0)：p0 是右前角，p1 是同侧的后角，所以反向即向前。
+  if (quad.length !== 4) return null;
+  let dx = quad[0][0] - quad[1][0], dy = quad[0][1] - quad[1][1];
+  const n = Math.hypot(dx, dy) || 1;
+  dx /= n; dy /= n;
+  const c = centre();
+  const len = Math.max(...sides(quad)) / 2;        // 中心到车头边缘
+  return [c[0] + dx * len, c[1] + dy * len];
+}
+function shownTip() { return tip || autoTip(); }
 function sides(p) {
   return p.map((q, i) => Math.hypot(q[0] - p[(i + 1) % p.length][0], q[1] - p[(i + 1) % p.length][1]));
 }
@@ -253,20 +269,29 @@ function axisAngle(p) {
 }
 function info() {
   document.getElementById("npts").textContent = quad.length + " / 4";
-  document.getElementById("ntip").textContent = tip ? "已点" : "未点";
+  document.getElementById("ntip").textContent =
+    tip ? "手动修正" : (quad.length === 4 ? "自动（平行第 1 条边）" : "–");
   // 步骤提示：让流程不用猜
   const step = document.getElementById("step");
   if (quad.length < 4) {
-    const which = ["① 点第 1 个角（放在<b>车头</b>那一侧）", "② 点第 2 个角", "③ 点第 3 个角",
-                   "④ 点第 4 个角（顺时针回到起点侧）"][quad.length];
+    const which = ["① 点车的<b>右前角</b>（然后顺时针点其余三个角）", "② 点<b>同一侧的后角</b>（沿车身长边）",
+                   "③ 点第三个角", "④ 点最后一个角（回到起点侧）"][quad.length];
     step.innerHTML = which;
   } else if (!tip) {
-    step.innerHTML = "⑤ 四边形完成，箭头起点已自动取在<b>中心</b>（橙十字）— 现在点一下<b>车头方向</b>";
+    step.innerHTML = "✅ 方向已自动算出（蓝箭头）— 要修正就点一下，否则按 <b>S</b> 保存";
   } else {
-    step.innerHTML = "✅ 完成：橙色边 = 车头侧，蓝箭头 = 车头方向 — 按 <b>S</b> 保存";
+    step.innerHTML = "✅ 方向已手动修正 — 按 <b>S</b> 保存";
   }
   const warn = document.getElementById("orderwarn");
-  if (warn) warn.textContent = (quad.length === 4 && !clockwise()) ? "⚠ 点序是逆时针，建议按“反转点序”" : "";
+  if (warn) {
+    if (quad.length === 4 && !longestFirstEdge()) {
+      warn.textContent = "⚠ 第 1 条边看起来是车宽：第 2 点应在车的同一侧、沿长边 → 可点“第 2 点改到另一侧”";
+    } else if (quad.length === 4 && !clockwise()) {
+      warn.textContent = "提示：点序现在是逆时针（约定是顺时针），不影响使用";
+    } else {
+      warn.textContent = "";
+    }
+  }
   if (quad.length === 4) {
     const c = centre(), s = sides(quad);
     const long = Math.max(...s), wide = Math.min(...s);
@@ -276,7 +301,8 @@ function info() {
       long.toFixed(0) + " × " + wide.toFixed(0) + "  (比 " + (long / wide).toFixed(2) + ")";
     document.getElementById("axis").textContent = axisAngle(quad).toFixed(1) + "°";
     document.getElementById("area").textContent = polyArea(quad).toFixed(0);
-    document.getElementById("head").textContent = tip ? angleTo(c, tip).toFixed(1) + "°" : "–";
+    document.getElementById("head").textContent =
+      (shownTip() ? angleTo(c, shownTip()).toFixed(1) + "°" : "–") + (tip ? "（手动）" : "（自动）");
   } else {
     ["centre","size","axis","area","head"].forEach(id =>
       document.getElementById(id).textContent = "–");
@@ -320,8 +346,9 @@ function status() {
 
 async function save(kind) {
   if (kind === "ok" && !status()) return;
-  if (kind === "ok" && !tip) { msg("再点一下车头方向", true); return; }
-  const body = { quad, tip, status: kind, notes: document.getElementById("notes").value,
+  if (kind === "ok" && !shownTip()) { msg("需要先点满四个角", true); return; }
+  const body = { quad, tip: shownTip(), tip_source: tip ? "manual" : "auto",
+                 status: kind, notes: document.getElementById("notes").value,
                  from: currentFrom };
   const r = await fetch("/save", { method: "POST",
                                    headers: { "Content-Type": "application/json" },
