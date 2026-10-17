@@ -1,68 +1,86 @@
-/* The annotation convention, as an executable check.
+/* The annotation convention and the drawing units, as executable checks.
 
-   Corner 1 is the car's RIGHT-FRONT corner and the rest follow clockwise, so p0->p1 runs along the
-   car's right side pointing rearward and the front direction is the other way. Every label in
-   vision/data/labels rests on that, so it is tested rather than trusted.
+   Two things this has to catch, both of which have already gone wrong once:
 
-   The functions below are extracted verbatim from tools/label_ui.html - a copy would test the copy.
+   1. The convention: corner 1 is the car's RIGHT-FRONT corner and the rest follow clockwise, so
+      p0->p1 runs along the car's right side pointing rearward and the front is the other way.
+      Every label in vision/data/labels rests on that.
 
-       node tools/tests/autotip_test.js        (or: node tools/tests/autotip_test.js <ui.html>)
+   2. The drawing units: Math.cos and Math.sin take RADIANS, and this page's own angleTo() returns
+      DEGREES. Feeding one to the other draws an arrow that is merely wrong-looking rather than
+      throwing, which is why the first version shipped with an automatic arrow that was not parallel
+      to the first edge and a manual arrow that did not reach the clicked point. The first test
+      written for this file checked the ANGLE - and the angle was right. It was the conversion to a
+      unit vector that was wrong, so that is what is checked now.
 
-   Headings are image coordinates: 0 along +x (right), increasing towards +y (down).
+   The functions are extracted verbatim from tools/label_ui.html: a copy would test the copy.
+
+       node tools/tests/autotip_test.js                      (default: tools/label_ui.html)
+       node tools/tests/autotip_test.js <path-to-ui.html>
 */
 const fs = require("fs");
-const path = process.argv[2] || require("path").join(__dirname, "..", "label_ui.html");
-const src = fs.readFileSync(path, "utf8");
-const script = src.match(/<script>([\s\S]*?)<\/script>/)[1];
-for (const name of ["centre", "angleTo", "sides", "autoTip"]) {
+const path = require("path");
+
+const ui = process.argv[2] || path.join(__dirname, "..", "label_ui.html");
+const script = fs.readFileSync(ui, "utf8").match(/<script>([\s\S]*?)<\/script>/)[1];
+
+for (const name of ["centre", "angleTo", "dirRadians", "sides", "autoTip"]) {
   const m = script.match(new RegExp("function " + name + "\\([^)]*\\) \\{[\\s\\S]*?\\n\\}"));
-  if (!m) { console.log("  cannot find " + name + " in " + path); process.exit(1); }
+  if (!m) {
+    console.log(`  cannot find ${name}() in ${ui}`);
+    process.exit(1);
+  }
   eval(m[0]);
 }
+
+let failed = 0;
+const check = (ok, line) => { if (!ok) failed++; console.log(`  ${ok ? "ok  " : "FAIL"} ${line}`); };
+
+/* ---- 1. the convention: heading from the quad, four orientations ---- */
 let quad = [];
-function centre() {
-  let x = 0, y = 0;
-  quad.forEach(q => { x += q[0]; y += q[1]; });
-  return [x / quad.length, y / quad.length];
-}
-function angleTo(from, to) {
-  let a = Math.atan2(to[1] - from[1], to[0] - from[0]) * 180 / Math.PI;
-  return (a + 360) % 360;
-}
-function sides(p) {
-  return p.map((q, i) => Math.hypot(q[0] - p[(i + 1) % p.length][0], q[1] - p[(i + 1) % p.length][1]));
-}
-function autoTip() {
-  // 前方 = 从中心沿 −(p1→p0)：p0 是右前角，p1 是同侧的后角，所以反向即向前。
-  if (quad.length !== 4) return null;
-  let dx = quad[0][0] - quad[1][0], dy = quad[0][1] - quad[1][1];
-  const n = Math.hypot(dx, dy) || 1;
-  dx /= n; dy /= n;
-  const c = centre();
-  const len = Math.max(...sides(quad)) / 2;        // 中心到车头边缘
-  return [c[0] + dx * len, c[1] + dy * len];
-}
-// 约定：第 1 点 = 车的右前角，顺时针。于是 p0→p1 沿车身右长边指向后方，
-// 前方 = 从中心沿 −(p1→p0)。这四条是全部标签的地基，所以做成可重跑的检查。
 const cars = {
-  "车头朝上": [[430,240],[430,360],[370,360],[370,240]],
-  "车头朝右": [[460,330],[340,330],[340,270],[460,270]],
-  "车头朝下": [[370,360],[370,240],[430,240],[430,360]],
-  "车头朝左": [[340,270],[460,270],[460,330],[340,330]],
+  "nose up":    [[430,240],[430,360],[370,360],[370,240]],
+  "nose right": [[460,330],[340,330],[340,270],[460,270]],
+  "nose down":  [[370,360],[370,240],[430,240],[430,360]],
+  "nose left":  [[340,270],[460,270],[460,330],[340,330]],
 };
-const want = { "车头朝上": 270, "车头朝右": 0, "车头朝下": 90, "车头朝左": 180 };
-let bad = 0;
+const want = { "nose up": 270, "nose right": 0, "nose down": 90, "nose left": 180 };
 for (const [name, q] of Object.entries(cars)) {
   quad = q;
   const got = angleTo(centre(), autoTip());
   const err = Math.abs((got - want[name] + 540) % 360 - 180);
-  if (err > 0.5) bad++;
-  console.log(`  ${name}: ${got.toFixed(1)} deg (want ${want[name]}) err ${err.toFixed(2)} ${err <= 0.5 ? "ok" : "FAIL"}`);
+  check(err < 0.5, `${name}: heading ${got.toFixed(2)} (want ${want[name]}), ${err.toFixed(2)} deg out`);
 }
-// 第 2 点点到车宽那条边（错误用法）会偏 90 度，这正是页面要警告的情况。
-quad = [[430,240],[370,240],[370,360],[430,360]];
-const wrong = angleTo(centre(), autoTip());
-const off = Math.abs((wrong - 270 + 540) % 360 - 180);
-console.log(`  p1 on the width edge: ${wrong.toFixed(1)} deg, ${off.toFixed(0)} deg off - the page warns`);
-if (bad || Math.abs(off - 90) > 5) { console.log("FAILED"); process.exit(1); }
-console.log("  all four orientations exact; the width-edge mistake is detected by the warning");
+
+/* the arrow must also be parallel to the first edge, not merely point the right way */
+quad = cars["nose up"];
+const edge = [quad[0][0] - quad[1][0], quad[0][1] - quad[1][1]];
+const c = centre(), tip = autoTip();
+const arrow = [tip[0] - c[0], tip[1] - c[1]];
+const cross = Math.abs(edge[0] * arrow[1] - edge[1] * arrow[0]) /
+              (Math.hypot(...edge) * Math.hypot(...arrow) || 1);
+check(cross < 1e-9, `auto arrow is parallel to edge 1 (|sin| = ${cross.toExponential(1)})`);
+
+/* ---- 2. the drawing units ---- */
+const dirs = [0, 45, 90, 135, 180, 225, 270, 315, 271.3, 3.7];
+let worstNew = 0, worstOld = 0;
+for (const deg of dirs) {
+  const from = [400, 300];
+  const rad = dirs.length && deg * Math.PI / 180;
+  const to = [from[0] + Math.cos(rad) * 50, from[1] + Math.sin(rad) * 50];
+  const good = [Math.cos(dirRadians(from, to)), Math.sin(dirRadians(from, to))];
+  const bad = [Math.cos(angleTo(from, to)), Math.sin(angleTo(from, to))];   // 把角度当弧度
+  const wantVec = [Math.cos(rad), Math.sin(rad)];
+  worstNew = Math.max(worstNew, Math.hypot(good[0] - wantVec[0], good[1] - wantVec[1]));
+  worstOld = Math.max(worstOld, Math.hypot(bad[0] - wantVec[0], bad[1] - wantVec[1]));
+}
+check(worstNew < 1e-9, `dirRadians(): worst unit-vector error ${worstNew.toExponential(1)} over ${dirs.length} directions`);
+check(worstOld > 0.1, `the old degrees-into-radians call is measurably wrong (${worstOld.toFixed(3)}), so this test would have caught it`);
+
+/* ---- 3. the mistake the page warns about ---- */
+quad = [[430,240],[370,240],[370,360],[430,360]];            // corner 2 across the width
+const off = Math.abs((angleTo(centre(), autoTip()) - 270 + 540) % 360 - 180);
+check(Math.abs(off - 90) < 5, `corner 2 on the width edge tilts the heading by ${off.toFixed(0)} deg - what the page warns about`);
+
+console.log(failed ? `\n  ${failed} check(s) FAILED` : "\n  all checks passed");
+process.exit(failed ? 1 : 0);

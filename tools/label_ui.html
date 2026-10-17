@@ -190,21 +190,20 @@ function draw() {
   const arrow = shownTip();
   if (arrow && quad.length === 4) {
     const c = centre();
-    const a = angleTo(c, arrow);
     const s2 = 1 / scale();
-    const len = Math.hypot(arrow[0] - c[0], arrow[1] - c[1]) * s2 || 60;
     const cx2 = c[0] * s2, cy2 = c[1] * s2;
-    const fx = cx2 + Math.cos(a) * len, fy = cy2 + Math.sin(a) * len;
+    // 箭头就画到那个点本身：不经过任何三角换算，自然也就不会因为单位错而指歪。
+    const fx = arrow[0] * s2, fy = arrow[1] * s2;
     ctx.strokeStyle = "#66d9ff"; ctx.lineWidth = 3;
     ctx.beginPath(); ctx.moveTo(cx2, cy2); ctx.lineTo(fx, fy); ctx.stroke();
     ctx.beginPath(); ctx.arc(fx, fy, 5, 0, 7); ctx.fillStyle = "#66d9ff"; ctx.fill();
     // 箭头两翼，避免看成一条普通的线
-    const w = 0.42;
+    const rad = dirRadians(c, arrow), w = 0.42;
     ctx.beginPath();
     ctx.moveTo(fx, fy);
-    ctx.lineTo(fx - Math.cos(a - w) * 14, fy - Math.sin(a - w) * 14);
+    ctx.lineTo(fx - Math.cos(rad - w) * 14, fy - Math.sin(rad - w) * 14);
     ctx.moveTo(fx, fy);
-    ctx.lineTo(fx - Math.cos(a + w) * 14, fy - Math.sin(a + w) * 14);
+    ctx.lineTo(fx - Math.cos(rad + w) * 14, fy - Math.sin(rad + w) * 14);
     ctx.stroke();
     ctx.font = "bold 11px system-ui";
     ctx.fillStyle = tip ? "#ffd43b" : "#66d9ff";
@@ -221,6 +220,11 @@ function centre() {
 function angleTo(from, to) {
   let a = Math.atan2(to[1] - from[1], to[0] - from[0]) * 180 / Math.PI;
   return (a + 360) % 360;
+}
+function dirRadians(from, to) {
+  // 唯一一处角度→弧度转换。Math.cos/sin 要的是弧度，直接喂 angleTo() 的返回值就会画歪
+  // （270 被当成 270 弧度），而且画歪的方向看上去像“差不多”，不会报错。
+  return angleTo(from, to) * Math.PI / 180;
 }
 function polyArea(p) {
   let s = 0;
