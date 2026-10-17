@@ -13,8 +13,12 @@
 # So the thing that produces the state is the one thing start.sh keeps alive. Everything
 # else there is a service that runs until it is stopped; this is a program that finishes.
 #
-# A 2 s pause between attempts so a camera that is down does not turn into a spin loop
-# filling the log; the reason each attempt failed is already in the log above it.
+# The pause between attempts backs off: 2 s, 4, 8, ... up to 60 s, and resets after a run that
+# lasted a minute. A fixed 2 s was measured doing real damage - one extra client on the camera
+# starved the stream to 3.5 fps, main.py exited on "no frames for 20 s" every ~87 s, and this loop
+# restarted it 12,907 times in a day, each restart churning the camera connection that was already
+# the problem. The delay is capped so a genuine recovery is still noticed quickly, and the count is
+# printed so a restart storm is visible in the log instead of being inferred from its size.
 
 set -uo pipefail
 
@@ -30,14 +34,23 @@ stop() {
 }
 trap stop TERM INT
 
+delay=2
+attempt=0
 while true; do
+    attempt=$((attempt + 1))
+    started=$(date +%s)
     "$PY_VISION" -u "$ROOT/vision/src/main.py" \
         --source "$SOURCE" --annotated-port "$ANNOTATED_PORT" &
     child=$!
     wait "$child"
     rc=$?
     child=""
-    printf -- '--- main.py exited (rc=%s) at %s; restarting in 2 s\n' \
-           "$rc" "$(date '+%H:%M:%S')"
-    sleep 2
+    ran=$(( $(date +%s) - started ))
+    # A run of a minute or more means the camera was healthy: start the backoff again from 2 s.
+    [ "$ran" -ge 60 ] && delay=2
+    printf -- '--- main.py exited (rc=%s) at %s after %ss (attempt %d); restarting in %s s\n' \
+           "$rc" "$(date '+%H:%M:%S')" "$ran" "$attempt" "$delay"
+    sleep "$delay"
+    delay=$(( delay * 2 ))
+    [ "$delay" -gt 60 ] && delay=60
 done

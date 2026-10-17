@@ -266,6 +266,23 @@ def main() -> int:
     os.makedirs(LABELS, exist_ok=True)
     Handler.frames = Frames(args.source)
     server = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
+    # The camera is a single MJPEG stream with a fixed budget: every extra client takes a share of
+    # its frames. Measured on this rig, one extra permanent client took the vision service from
+    # ~12 fps down to 3.5, main.py then hit "no frames for 20 s" and exited, and the supervisor
+    # restarted it every 2 s - 12,907 times. So say it before it happens.
+    busy = False
+    try:
+        import urllib.request
+        urllib.request.urlopen("http://127.0.0.1:8010/out/parking_state.json", timeout=1.5).read(1)
+        busy = True
+    except Exception:
+        busy = False
+    if busy:
+        print("  ! the vision service is running and holds the camera stream")
+        print("    each extra client takes a share of the camera's frames - measured, it drops the")
+        print("    service from ~12 fps to ~3.5, after which main.py exits on 'no frames for 20 s'")
+        print("    and the supervisor restarts it in a loop. For a labelling session run:")
+        print("        ./start.sh stop vision        (and ./start.sh start vision afterwards)")
     print(f"  标注页: http://127.0.0.1:{args.port}")
     print(f"  取帧:   {args.source}（后台保持一路连接）")
     print(f"  保存到: {LABELS}/  （图片 + annotations.jsonl）")
