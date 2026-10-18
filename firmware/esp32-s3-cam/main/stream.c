@@ -76,6 +76,10 @@ static httpd_handle_t s_server = NULL;
 static uint32_t s_frames_sent = 0;
 static volatile float s_fps = 0.0f;
 static int64_t s_last_frame_us = 0;
+/* When the last frame *started*, for the rate limit. s_last_frame_us is when the last frame
+ * finished sending, and pacing against that double-counted: an 83 ms wait after an 80 ms send is
+ * 163 ms per frame, measured as src=5.5 fps against a 12 fps cap. */
+static int64_t s_last_grab_us = 0;
 static volatile int s_clients = 0;
 
 /* ------------------------------------------------------------------------- */
@@ -244,12 +248,13 @@ static void stream_task(void *arg)
          * in link quality: 6 dBm made the uplink marginal and Wi-Fi took three minutes to
          * settle. Resolution stays 800x600 because the bay calibration is in those pixels.
          */
-        if (STREAM_MIN_INTERVAL_US > 0 && s_last_frame_us != 0) {
-            int64_t since = esp_timer_get_time() - s_last_frame_us;
+        if (STREAM_MIN_INTERVAL_US > 0 && s_last_grab_us != 0) {
+            int64_t since = esp_timer_get_time() - s_last_grab_us;
             if (since < STREAM_MIN_INTERVAL_US) {
                 vTaskDelay(pdMS_TO_TICKS((STREAM_MIN_INTERVAL_US - since + 999) / 1000));
             }
         }
+        s_last_grab_us = esp_timer_get_time();
         int64_t t_grab0 = esp_timer_get_time();
         camera_fb_t *fb = esp_camera_fb_get();
         int64_t t_grab1 = esp_timer_get_time();
@@ -359,6 +364,7 @@ static void stream_task(void *arg)
 
     s_clients--;
     s_last_frame_us = 0;
+    s_last_grab_us = 0;
     s_fps = 0.0f;
 
     vTaskDelete(NULL);
@@ -460,6 +466,7 @@ void stream_server_stop(void)
     s_server = NULL;
     s_fps = 0.0f;
     s_last_frame_us = 0;
+    s_last_grab_us = 0;
 }
 
 bool stream_server_is_running(void)
