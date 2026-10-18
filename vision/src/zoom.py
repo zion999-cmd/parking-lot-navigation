@@ -7,13 +7,14 @@ OTA. What it cannot do is add resolution: the camera has already scaled the scen
 1.2x zoom makes the car bigger and slightly softer rather than sharper. That trade is worth knowing
 before turning it on.
 
-The two halves have to move together. Zooming the frame without moving the bays and roads would
-silently misplace every polygon, and the bays would then all read OCCUPIED. So:
+Only the frame is zoomed. The coordinate helpers below exist because a different use of a zoom
+would need them, but the pipeline does NOT call them, and that is deliberate:
 
-    frame   -> crop the central W/z x H/z and resize back to W x H
-    points  -> x_z = (x_o - off_x) * z          (the inverse of the crop)
+    the zoom undoes a lens change - a 5640 sees wider than the 3660 it replaced, so the scene came
+    out smaller - which means the zoomed frame is the frame the bays were calibrated on. Moving the
+    polygons would place them off the objects they were drawn around.
 
-with off_x = W(1 - 1/z)/2. At z = 1 both are the identity, which is what the default is.
+At z = 1 everything is the identity, which is the default.
 """
 
 from __future__ import annotations

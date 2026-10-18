@@ -560,7 +560,7 @@ def run_edit_mode(get_frame, config_path: str, template_path: Optional[str],
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Fixed-ROI parking occupancy (PoC).")
-    ap.add_argument("--source", default="http://192.168.3.118/stream")
+    ap.add_argument("--source", default="http://192.168.3.199/stream")
     ap.add_argument("--backend", default="auto", choices=("auto", "opencv", "mjpeg"))
     ap.add_argument("--config", default=os.path.join(ROOT, "config", "parking_spots.json"))
     ap.add_argument("--reference", default=os.path.join(ROOT, "data", "reference", "reference.jpg"))
@@ -658,17 +658,20 @@ def main() -> int:
     zoom_shape = _declared_image_size(args.config) or (600, 800)
     
     def _spots(path, shape=None, skip_bad=False):
-        raw = load_spots(path, shape, skip_bad=skip_bad)
-        kept = zoom.transform_spots(raw, args.zoom, shape or zoom_shape)
-        if len(kept) != len(raw):
-            # Zooming in removes the outer part of the picture, so some bays are simply no longer
-            # visible. Saying so is cheaper than wondering later why a bay went quiet.
-            print(f"  zoom {args.zoom:g}x: {len(raw) - len(kept)} bay(s) fell outside the view "
-                  f"and will not be reported", file=sys.stderr)
-        return kept
+        # No coordinate transform, on purpose.
+        #
+        # The zoom undoes a lens change: a 5640 sees wider than the 3660 it replaced, so the scene
+        # came out smaller, and zooming 1.2x puts the framing back. The zoomed frame is therefore
+        # the frame the bays were calibrated on, and they are already in the right place in it.
+        # Transforming them - what the first version did - moved every polygon off the object it
+        # was drawn around, which looked like "the detection boxes got bigger".
+        #
+        # If a future change really alters the framing instead of restoring it, this is the single
+        # place to add the transform - and then the bays have to be re-calibrated, not rescaled.
+        return load_spots(path, shape, skip_bad=skip_bad)
     
     def _roads(path):
-        return zoom.transform_network(RoadNetwork.load(path), args.zoom, zoom_shape)
+        return RoadNetwork.load(path)
     
     try:
         still = (cv2.imread(args.reference, cv2.IMREAD_COLOR)
