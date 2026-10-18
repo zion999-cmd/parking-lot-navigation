@@ -790,7 +790,7 @@ def main() -> int:
     snapshot_done = False
     audit_done = False
     size_warned = False
-    frame = still_frame
+    frame = zoom.zoom_frame(still_frame, args.zoom)
     last_frame_at = started
     stall_warned = False
     state_written = [0.0, None]      # when it was written, and what was written
@@ -1028,7 +1028,12 @@ def main() -> int:
                 elif key == ord('e'):
                     # Correct the calibration without leaving the viewer: the offset is
                     # plainly visible here, which is the whole point.
-                    get_frame = (lambda: still_frame) if use_still else cam.read
+                    # The editor and the calibration app take their frames from here, so the
+                    # zoom has to be applied at this one point - otherwise edit mode shows the
+                    # unzoomed picture and the bays, which are drawn in the zoomed frame, no
+                    # longer sit on the objects they were calibrated on.
+                    get_frame = (lambda: zoom.zoom_frame(still_frame, args.zoom)) if use_still \
+                        else (lambda: zoom.zoom_frame(cam.read(), args.zoom))
                     shape = run_edit_mode(get_frame, args.config, args.template,
                                           args.reference, frame.shape[:2], args.align)
                     if shape is None:

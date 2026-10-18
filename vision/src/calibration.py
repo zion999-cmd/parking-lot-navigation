@@ -92,6 +92,7 @@ from detector import (DetectorParams, detect_bays, draw_debug,  # noqa: E402
 from road_editor import RoadEditor                             # noqa: E402
 from road_network import (KIND_ENTRANCE, KIND_JUNCTION,        # noqa: E402
                           KIND_SPOT, KIND_WAYPOINT, nearest_edge)
+import zoom
 from spot_config import DEFAULT_INNER_SCALE                    # noqa: E402
 from spot_editor import SpotEditor                             # noqa: E402
 
@@ -1007,6 +1008,10 @@ def main() -> int:
     ap.add_argument("--source", default="http://192.168.3.118/stream")
     ap.add_argument("--backend", default="auto", choices=("auto", "opencv", "mjpeg"))
     ap.add_argument("--frame", help="use this still image instead of the live stream")
+    ap.add_argument("--zoom", type=float, default=1.0, metavar="X",
+                    help="digital zoom, matching main.py: the same 1/X of the frame scaled back "
+                         "to its own size, so bays are drawn on the picture they will be seen "
+                         "on (default 1.0 = off)")
     ap.add_argument("--out", default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                                   "..", "config", "parking_spots.json"))
     ap.add_argument("--start-id", type=int, default=38)
@@ -1051,7 +1056,7 @@ def main() -> int:
         if still is None:
             print(f"error: could not read {args.frame}", file=sys.stderr)
             return 2
-        get_frame = lambda: still                               # noqa: E731
+        get_frame = lambda: zoom.zoom_frame(still, args.zoom)    # noqa: E731
         shape = still.shape[:2]
         print(f"offline: {args.frame} ({shape[1]}x{shape[0]})")
     else:
@@ -1069,7 +1074,7 @@ def main() -> int:
             print("error: no frame from the camera", file=sys.stderr)
             cam.close()
             return 2
-        get_frame = cam.read
+        get_frame = lambda: zoom.zoom_frame(cam.read(), args.zoom)   # noqa: E731
         shape = first.shape[:2]
         print(f"live: {args.source} ({shape[1]}x{shape[0]}) backend {cam.name}")
 
