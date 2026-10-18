@@ -53,6 +53,7 @@ from detector import DetectorParams                              # noqa: E402
 from occupancy import (EMPTY, OCCUPIED, OccupancyDetector,        # noqa: E402
                        OccupancyParams, SpotResult)
 from spot_config import Spot, SpotConfigError, load_spots         # noqa: E402
+import zoom
 from spot_editor import SpotEditor                                # noqa: E402
 
 WINDOW = "ESP32 Camera - parking occupancy"
@@ -604,6 +605,12 @@ def main() -> int:
     ap.add_argument("--no-vehicle", action="store_true",
                     help="do not look for the hero car (the red one); it is located by "
                          "colour and shape, see src/vehicle.py")
+    ap.add_argument("--zoom", type=float, default=1.0, metavar="X",
+                    help="digital zoom: keep the central 1/X of the frame and scale it "
+                         "back to the same size, so the car is X times bigger (default 1.0 "
+                         "= off). Bays and roads are moved into the zoomed frame "
+                         "automatically, so the calibration stays valid. Costs sharpness, "
+                         "not correctness: the camera has already scaled to 800x600.")
     ap.add_argument("--vehicle-min-area", type=int, default=vehicle.DEFAULT_MIN_AREA,
                     help="ignore red blobs smaller than this (default %d)"
                          % vehicle.DEFAULT_MIN_AREA)
@@ -645,19 +652,37 @@ def main() -> int:
 
     # -- spots ---------------------------------------------------------------
     declared_size = None
+    # Every bay and road load goes through these two, so no code path can forget the zoom
+    # and end up with polygons in the unzoomed frame while the picture is zoomed - which
+    # would read as "every bay is occupied" rather than as a mistake.
+    zoom_shape = _declared_image_size(args.config) or (600, 800)
+    
+    def _spots(path, shape=None, skip_bad=False):
+        raw = load_spots(path, shape, skip_bad=skip_bad)
+        kept = zoom.transform_spots(raw, args.zoom, shape or zoom_shape)
+        if len(kept) != len(raw):
+            # Zooming in removes the outer part of the picture, so some bays are simply no longer
+            # visible. Saying so is cheaper than wondering later why a bay went quiet.
+            print(f"  zoom {args.zoom:g}x: {len(raw) - len(kept)} bay(s) fell outside the view "
+                  f"and will not be reported", file=sys.stderr)
+        return kept
+    
+    def _roads(path):
+        return zoom.transform_network(RoadNetwork.load(path), args.zoom, zoom_shape)
+    
     try:
         still = (cv2.imread(args.reference, cv2.IMREAD_COLOR)
                  if os.path.exists(args.reference) else None)
         declared_size = _declared_image_size(args.config)
         if still is not None:
-            spots = load_spots(args.config, still.shape[:2], skip_bad=True)
+            spots = _spots(args.config, still.shape[:2], skip_bad=True)
         else:
             # No reference yet, so the frame geometry is unknown. Do NOT invent one:
             # preparing a polygon against a guessed shape is what produced
             # "spot 16: detection area is empty after clipping" (the guess was also
             # passed height-first). set_reference() prepares the spots with the real
             # frame once the reference has been captured.
-            spots = load_spots(args.config)
+            spots = _spots(args.config)
     except SpotConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
         print("  hint: the calibration and the frame it was drawn on must be the same "
@@ -669,7 +694,7 @@ def main() -> int:
 
     # The road network, for answering "which bay, or on which road" about the car. Only the
     # geometry is needed here, so it does not matter that the frame size is not known yet.
-    road_net = RoadNetwork.load(args.config) if os.path.exists(args.config) else None
+    road_net = _roads(args.config) if os.path.exists(args.config) else None
 
     # The picture on screen is drawn from the config; the board page clicks the *emitted* map.
     # Those are two files, and when they disagree the page highlights a bay that is not where the
@@ -809,11 +834,11 @@ def main() -> int:
                 elif mtime is not None and mtime != config_mtime:
                     config_mtime = mtime
                     try:
-                        spots = load_spots(args.config, frame.shape[:2], skip_bad=True)
+                        spots = _spots(args.config, frame.shape[:2], skip_bad=True)
                         # Anything keyed by bay id has to be rebuilt with the new ones, or the
                         # next frame's totals raise KeyError on a bay that was just renamed.
                         sums = {s.id: [0.0, 0, 0] for s in spots}
-                        road_net = (RoadNetwork.load(args.config)
+                        road_net = (_roads(args.config)
                                     if os.path.exists(args.config) else None)
                         if detector_ref_frame is not None:
                             detector.set_reference(detector_ref_frame, spots)
@@ -826,7 +851,7 @@ def main() -> int:
 
             fresh = still_frame if use_still else cam.read()
             if fresh is not None:
-                frame = fresh
+                frame = zoom.zoom_frame(fresh, args.zoom)
                 last_frame_at = time.time()
                 stall_warned = False
 
@@ -1006,7 +1031,7 @@ def main() -> int:
                     if shape is None:
                         continue
                     try:
-                        spots = load_spots(args.config, frame.shape[:2], skip_bad=True)
+                        spots = _spots(args.config, frame.shape[:2], skip_bad=True)
                     except SpotConfigError as exc:
                         print(f"  error reloading {args.config}: {exc}", file=sys.stderr)
                         continue

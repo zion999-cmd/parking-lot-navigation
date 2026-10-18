@@ -57,19 +57,31 @@ def transform_points(points: Iterable[Sequence[float]], zoom: float,
 
 
 def transform_spots(spots: List, zoom: float, shape: Sequence[int]) -> List:
-    """Rewrite each bay's polygon in place and re-derive the inner one, then return the list.
+    """Rewrite each bay's polygon into the zoomed frame, dropping the ones now out of view.
+
+    Zooming in is not free: at 1.2x the outer eighth of the picture is gone, and a bay drawn there
+    has no pixels left to watch. Keeping it would make prepare() raise "detection area is empty
+    after clipping" - which is how this was found - and pretending it is still visible would be
+    worse. So those bays are dropped and the caller reports how many.
 
     The Spot keeps its geometry in `polygon`; `inner`/`detect_polygon`/the prepared crop are derived
-    from it, so transforming the polygon and calling prepare() again is enough - and doing it any
-    other way would leave the two disagreeing.
+    from it, so transforming the polygon and calling prepare() again is enough.
     """
     if zoom == 1.0 or not spots:
         return spots
+    height, width = int(shape[0]), int(shape[1])
+    kept = []
     for spot in spots:
-        spot.polygon = np.asarray(transform_points(spot.polygon, zoom, shape), np.float32)
+        poly = np.asarray(transform_points(spot.polygon, zoom, shape), np.float32)
+        x0, y0 = float(poly[:, 0].min()), float(poly[:, 1].min())
+        x1, y1 = float(poly[:, 0].max()), float(poly[:, 1].max())
+        if min(x1, width) - max(x0, 0.0) < 4 or min(y1, height) - max(y0, 0.0) < 4:
+            continue
+        spot.polygon = poly
         if hasattr(spot, "prepare"):
-            spot.prepare(tuple(int(v) for v in shape[:2]))
-    return spots
+            spot.prepare((height, width))
+        kept.append(spot)
+    return kept
 
 
 def transform_network(network, zoom: float, shape: Sequence[int]):
