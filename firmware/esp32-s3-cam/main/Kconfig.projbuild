@@ -20,15 +20,16 @@ menu "Parking Lot Camera"
     config STREAM_MAX_FPS
         int "Camera stream frame rate cap (fps, 0 = uncapped)"
         range 0 30
-        default 12
+        default 0
         help
-            Frames per second the MJPEG stream is paced to. 0 disables pacing.
+            Frames per second the MJPEG stream is paced to. 0 disables pacing (the default).
 
-            The board can push 24-27 fps at 800x600, which is about 1 MB/s - more than the vision
-            service needs (it works at around 10) and more transmit airtime than this supply can
-            afford. Pacing halves both the average transmit current and the uplink load without
-            changing the transmit power, which is what sets the link quality. Resolution is not
-            touched: the bay calibration is in 800x600 pixels.
+            Was set to 12 to cut transmit airtime while the board seemed to be browning out. The
+            board browned out at 12 anyway, and the camera does 24-27 fps at 800x600, so the cap was
+            paying for nothing: quality first. Set a number only if the uplink or the supply turns
+            out to need it, and remember every client shares whatever this allows (12 gives each of
+            N viewers 12/N). Resolution is not touched either way: the bay calibration is in 800x600
+            pixels.
 
     config WIFI_MAX_TX_POWER_DBM
         int "Wi-Fi maximum transmit power (dBm)"
