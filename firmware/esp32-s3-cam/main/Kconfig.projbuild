@@ -17,20 +17,33 @@ menu "Parking Lot Camera"
             no-op because there is no queue to post to. The camera node is
             unaffected.
 
+    config STREAM_MAX_FPS
+        int "Camera stream frame rate cap (fps, 0 = uncapped)"
+        range 0 30
+        default 12
+        help
+            Frames per second the MJPEG stream is paced to. 0 disables pacing.
+
+            The board can push 24-27 fps at 800x600, which is about 1 MB/s - more than the vision
+            service needs (it works at around 10) and more transmit airtime than this supply can
+            afford. Pacing halves both the average transmit current and the uplink load without
+            changing the transmit power, which is what sets the link quality. Resolution is not
+            touched: the bay calibration is in 800x600 pixels.
+
     config WIFI_MAX_TX_POWER_DBM
         int "Wi-Fi maximum transmit power (dBm)"
         range 2 20
-        default 6
+        default 10
         help
             Cap on the Wi-Fi transmit power, in dBm. 6 by default, not the 20 the
             hardware allows, and that is deliberate.
 
-            Was 10. Lowered because 10 was not enough once the LCD module (which the earlier
-            comparison showed was acting as decoupling capacitance) was removed: the stream still
-            stalled. With the access point a couple of metres away and the link reading -32 dBm,
-            there are tens of dB of margin, so shouting louder buys nothing and costs peak current.
-            The value to judge it by is not the RSSI but the stream: run with the module removed and
-            watch whether /stream stops stalling.
+            Was tried at 6 and reverted: the RSSI on the status page is the *downlink*, and it
+            looked excellent either way, but the *uplink* at 6 dBm was marginal - association
+            succeeded and then the link took about three minutes to settle, with pings answering in
+            1-2 s while it did. That is not an acceptable start-up. 10 dBm is the value that was
+            measured working; the current reduction is done with STREAM_MAX_FPS instead, which does
+            not touch the link quality at all.
             NOTE: sdkconfig is the file the build actually uses, and an existing one does not
             follow this default. Change both.
 

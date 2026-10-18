@@ -29,6 +29,18 @@ static const char *TAG = "stream";
 
 #define PART_BOUNDARY "parkinglotcamboundary"
 
+/*
+ * Minimum time between frames. 0 disables pacing.
+ *
+ * #if, not #ifdef: a Kconfig int is always defined, and the project has already been bitten once by
+ * an #ifdef on a `default n` bool that the build never defined.
+ */
+#if CONFIG_STREAM_MAX_FPS > 0
+#define STREAM_MIN_INTERVAL_US (1000000 / CONFIG_STREAM_MAX_FPS)
+#else
+#define STREAM_MIN_INTERVAL_US 0
+#endif
+
 static const char *STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=" PART_BOUNDARY;
 /*
  * Boundary and part header in one write.
@@ -223,6 +235,21 @@ static void stream_task(void *arg)
     int64_t window_start_us = esp_timer_get_time();
 
     while (res == ESP_OK) {
+        /*
+         * Pacing: the uplink is the scarce resource here, not the camera. Measured on this
+         * rig, 800x600 at 24-27 fps is about 1 MB/s - far more than the vision service uses
+         * (it works at around 10) and more transmit airtime than this supply should carry.
+         * Waiting so frames start at most STREAM_MAX_FPS apart halves the airtime and the
+         * average transmit current, and unlike lowering the transmit power it costs nothing
+         * in link quality: 6 dBm made the uplink marginal and Wi-Fi took three minutes to
+         * settle. Resolution stays 800x600 because the bay calibration is in those pixels.
+         */
+        if (STREAM_MIN_INTERVAL_US > 0 && s_last_frame_us != 0) {
+            int64_t since = esp_timer_get_time() - s_last_frame_us;
+            if (since < STREAM_MIN_INTERVAL_US) {
+                vTaskDelay(pdMS_TO_TICKS((STREAM_MIN_INTERVAL_US - since + 999) / 1000));
+            }
+        }
         int64_t t_grab0 = esp_timer_get_time();
         camera_fb_t *fb = esp_camera_fb_get();
         int64_t t_grab1 = esp_timer_get_time();

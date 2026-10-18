@@ -46,11 +46,22 @@ while true; do
     rc=$?
     child=""
     ran=$(( $(date +%s) - started ))
-    # A run of a minute or more means the camera was healthy: start the backoff again from 2 s.
-    [ "$ran" -ge 60 ] && delay=2
+    # rc=2 is main.py's "could not open the camera": the board is still booting, or its single
+    # stream slot is still held by the connection that just went away. Both are normal for a few
+    # seconds and neither is a reason to wait a minute. Measured before this: the loop sat at
+    # "after 6s ... restarting in 60 s" for attempts 97..106 while the board had been on the air
+    # for nine seconds, which is where the "two minutes before the Wi-Fi settles" came from.
+    if [ "$rc" = "2" ]; then
+        delay=3
+    else
+        # A run of a minute or more means the camera was healthy: start the backoff from 2 s again.
+        [ "$ran" -ge 60 ] && delay=2
+    fi
     printf -- '--- main.py exited (rc=%s) at %s after %ss (attempt %d); restarting in %s s\n' \
            "$rc" "$(date '+%H:%M:%S')" "$ran" "$attempt" "$delay"
     sleep "$delay"
-    delay=$(( delay * 2 ))
-    [ "$delay" -gt 60 ] && delay=60
+    if [ "$rc" != "2" ]; then
+        delay=$(( delay * 2 ))
+        [ "$delay" -gt 60 ] && delay=60
+    fi
 done
