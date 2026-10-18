@@ -20,10 +20,19 @@ menu "Parking Lot Camera"
     config WIFI_MAX_TX_POWER_DBM
         int "Wi-Fi maximum transmit power (dBm)"
         range 2 20
-        default 10
+        default 6
         help
-            Cap on the Wi-Fi transmit power, in dBm. 10 by default, not the 20 the
+            Cap on the Wi-Fi transmit power, in dBm. 6 by default, not the 20 the
             hardware allows, and that is deliberate.
+
+            Was 10. Lowered because 10 was not enough once the LCD module (which the earlier
+            comparison showed was acting as decoupling capacitance) was removed: the stream still
+            stalled. With the access point a couple of metres away and the link reading -32 dBm,
+            there are tens of dB of margin, so shouting louder buys nothing and costs peak current.
+            The value to judge it by is not the RSSI but the stream: run with the module removed and
+            watch whether /stream stops stalling.
+            NOTE: sdkconfig is the file the build actually uses, and an existing one does not
+            follow this default. Change both.
 
             This board's 3.3 V rail cannot carry the current spikes of a 20 dBm
             transmit burst. The evidence is a hardware comparison, not a guess: with
