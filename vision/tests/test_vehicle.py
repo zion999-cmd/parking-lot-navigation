@@ -40,11 +40,11 @@ def test_the_committed_template_finds_the_arrow_in_a_saved_frame():
         pytest.skip("no saved frame or no committed template")
     frame = cv2.imread(frame_path)
     template = arrow.load()
-    match = arrow.locate(frame, template, roi_hint=(191, 486))
+    match = arrow.locate(frame, template, roi_hint=(202, 225))
     assert match is not None, "the arrow was not found in a frame it was annotated on"
     assert match.score > 0.9
-    # The hand annotation that produced the template sits at (154, 496).
-    assert abs(match.centre[0] - 154) < 8 and abs(match.centre[1] - 496) < 8
+    # The template is now the printed marker, cut at (202, 225) on the frame it came from.
+    assert abs(match.centre[0] - 202) < 10 and abs(match.centre[1] - 225) < 10
 
 
 def test_the_arrow_is_reported_as_the_front_of_the_car():

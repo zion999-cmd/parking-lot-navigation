@@ -31,7 +31,8 @@ from typing import List, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 
-import arrow            # the roof arrow; see src/arrow.py
+import arrow            # the printed arrow template; see src/arrow.py
+import aruco_hero       # an ArUco marker, which also reports the direction
 # Car-specific but data-driven, so the hero car can be swapped without editing source. The file
 # holds the HSV target colour plus the morphology sizes; built-in values below are the fallback.
 VEHICLE_CONFIG_PATH = os.path.join(
@@ -916,6 +917,24 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
     """
     if frame is None or frame.size == 0:
         return []
+
+    # An ArUco marker first, when one is on the roof. It detects through rotation, scale and
+    # perspective and its corner order states the heading outright, which is everything the
+    # flat template could not do - the same template scored 0.997 facing one way and 0.757
+    # turned around. The template stays as the fallback so a car without the marker still works.
+    marker = aruco_hero.detect(frame)
+    if marker is not None:
+        xs = [c[0] for c in marker.corners]
+        ys = [c[1] for c in marker.corners]
+        w = float(max(xs) - min(xs))
+        h = float(max(ys) - min(ys))
+        heading = float(marker.heading % 360.0)
+        return [VehiclePose(
+            x=float(marker.centre[0]), y=float(marker.centre[1]), heading=heading,
+            area=int(round(w * h)), elongation=max(w, h) / max(min(w, h), 1.0), fill=1.0,
+            bbox=(int(min(xs)), int(min(ys)), int(w), int(h)), heading_pca=heading,
+            forward_score=float(marker.score), heading_from_arrow=True,
+            front_heading=heading, front_is_known=True)]
 
     global _ARROW_TEMPLATE
     if _ARROW_TEMPLATE is None:
