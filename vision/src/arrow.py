@@ -37,7 +37,13 @@ ARROW_DIR = os.path.join(ROOT, "data", "arrow")
 
 # Below this a match is not the arrow. 0.85 sits between the measured 0.993 (true) and
 # 0.765 (the highest wrong angle) with room on both sides.
-MIN_SCORE = 0.85
+# Below this a match is not the arrow.
+#
+# It was 0.85, chosen from the angle sweep (0.993 true, 0.765 the highest wrong angle). Two
+# measurements moved it: a car standing 250 px from where the template was cut scores 0.814 -
+# the perspective cost - and the road-patch false positive that argued against lowering it
+# sits at x=738, outside the region vehicle.py trusts (x 60..700), so it can no longer win.
+MIN_SCORE = 0.78
 
 # Search window around the paint blob, in pixels. The arrow sits on the car, and the
 # paint blob is on the car, so this only has to be larger than the car.
@@ -207,3 +213,86 @@ def locate(frame: np.ndarray, template: Optional[_Template] = None,
     if m is None or m.score < min_score:
         return None
     return m
+
+
+# ---------------------------------------------------------------------------------------------
+# Perspective-tolerant matching.
+#
+# A flat template matches a flat marker only while the camera sees it the same way. Measured:
+# the template, cut where the marker was, scored 1.000 there and 0.784 after the car moved
+# 298 px across the table - and the marker's white square measured 60x46 px at the new place,
+# i.e. an aspect of 1.30 instead of 1.00. That is the camera looking at the roof from a
+# different angle, not a printing problem.
+#
+# The fix is what a fiducial detector does and what the marker's white square makes possible:
+# find the square's four corners, warp it to a canonical square, and match the template inside
+# that. The warp removes the perspective; the arrow inside still points where the car points.
+# ---------------------------------------------------------------------------------------------
+
+def _quad_candidates(grey, min_side=22, max_side=110):
+    """Four-cornered, roughly square, bright regions: the marker's white paper."""
+    blur = cv2.GaussianBlur(grey, (5, 5), 0)
+    _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    contours, _h = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    out = []
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area < min_side * min_side * 0.5 or area > max_side * max_side * 2.0:
+            continue
+        peri = cv2.arcLength(c, True)
+        if peri <= 0:
+            continue
+        quad = cv2.approxPolyDP(c, 0.04 * peri, True)
+        if len(quad) != 4:
+            continue
+        pts = quad.reshape(4, 2).astype(np.float32)
+        sides = [float(np.linalg.norm(pts[(i + 1) % 4] - pts[i])) for i in range(4)]
+        if min(sides) < min_side or max(sides) > max_side:
+            continue
+        if max(sides) / max(min(sides), 1e-6) > 1.6:
+            continue
+        hull = cv2.convexHull(pts)
+        if cv2.contourArea(hull) <= 0 or area / cv2.contourArea(hull) < 0.80:
+            continue
+        out.append(pts)
+    return out
+
+
+def _order_quad(pts: np.ndarray) -> np.ndarray:
+    """Corners in a stable order: sum and difference of the coordinates."""
+    s = pts.sum(axis=1)
+    d = np.diff(pts, axis=1).ravel()
+    return np.array([pts[np.argmin(s)], pts[np.argmin(d)], pts[np.argmax(s)], pts[np.argmax(d)]],
+                    np.float32)
+
+
+def find_perspective(grey: np.ndarray, template: "_Template", side: int = 40,
+                     min_score: float = MIN_SCORE):
+    """Warp each candidate square to `side` px and match the template inside it.
+
+    All four rotations of the corner order are tried, because contours have no idea which
+    corner is the marker's top-left; the asymmetric arrow inside decides.
+    """
+    best = None
+    dst = np.array([[0, 0], [side - 1, 0], [side - 1, side - 1], [0, side - 1]], np.float32)
+    for quad in _quad_candidates(grey):
+        ordered = _order_quad(quad)
+        for shift in range(4):
+            src = np.roll(ordered, -shift, axis=0)
+            M = cv2.getPerspectiveTransform(src, dst)
+            warped = cv2.warpPerspective(grey, M, (side, side), flags=cv2.INTER_LINEAR)
+            tpl_warped = _Template(warped.astype(np.float32), np.full((side, side), 255, np.uint8), 0.0)
+            # The template lives in the marker's own frame, so match it against the warp.
+            m = find_in(warped.astype(np.float32), template, origin=(0, 0))
+            if m is None:
+                continue
+            if best is None or m.score > best.score:
+                # Map the match centre back to image coordinates.
+                inv = np.linalg.inv(M)
+                p = inv @ np.array([m.centre[0], m.centre[1], 1.0])
+                p = p[:2] / p[2]
+                best = Match(score=m.score, centre=(float(p[0]), float(p[1])),
+                             heading=m.heading, corners=[tuple(v) for v in ordered])
+    if best is None or best.score < min_score:
+        return None
+    return best
