@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "main.c"
         "camera.c"
+        "camera_diag.c"
         "stream.c"
         "ota.c"
         "led.c"

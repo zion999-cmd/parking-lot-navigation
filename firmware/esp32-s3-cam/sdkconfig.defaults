@@ -100,17 +100,13 @@ CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# TCP buffers sized for MJPEG, not for a text page.
+# TCP buffers for MJPEG (the 0.2.41 baseline that worked)
 #
-# The default send buffer is 5760 bytes (4 x MSS), so a 24-40 KB JPEG cannot be in
-# flight: the sender fills the window, waits an ACK, fills it again, seven times per
-# frame. With a Wi-Fi round trip of tens of milliseconds that alone caps the stream at
-# a couple of frames per second, which is exactly what the board was delivering.
-# 32 KB lets a whole frame be handed to the stack in one go.
+# Reverted from the IDF defaults after measuring them: 5760 bytes of send window
+# against this link produced 0.05 fps / 1.0 KB/s, i.e. no video at all. 32 KB
+# restores ~11 fps. This is the known-good operating point, not a new experiment.
 # ---------------------------------------------------------------------------
 CONFIG_LWIP_TCP_SND_BUF_DEFAULT=32768
 CONFIG_LWIP_TCP_WND_DEFAULT=32768
-# Receive mail box: the IDF help says LWIP_TCP_WND_DEFAULT/TCP_MSS + 2, i.e. 32768/1440+2
-# ~= 25, so 32 leaves headroom. (There is no LWIP_TCP_RECV_BUF_DEFAULT in IDF 5.5.)
 CONFIG_LWIP_TCP_RECVMBOX_SIZE=32
 CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=32

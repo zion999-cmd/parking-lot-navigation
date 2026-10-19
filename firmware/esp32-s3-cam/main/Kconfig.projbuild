@@ -420,7 +420,7 @@ menu "Barrier Gate (servo + contact switch)"
     config GATE_START_PULSE_US
         int "First position commanded at boot (us)"
         range 500 2600
-        default 1500
+        default 1945
         help
             There is no position feedback on a servo: whatever pulse arrives first
             is a command, and the arm travels to it. Until the arm has been
@@ -438,7 +438,7 @@ menu "Barrier Gate (servo + contact switch)"
     config GATE_PULSE_CLOSED_US
         int "Closed position, pulse width (us)"
         range 500 2600
-        default 1000
+        default 1945
         help
             The arm's down position, in microseconds of pulse width. 1500 us is
             the usual electrical centre; 1000 and 2000 are a 90 degree swing
@@ -453,7 +453,7 @@ menu "Barrier Gate (servo + contact switch)"
     config GATE_PULSE_OPEN_US
         int "Open position, pulse width (us)"
         range 500 2600
-        default 2000
+        default 1055
         help
             The arm's up position. Must differ from GATE_PULSE_CLOSED_US.
 

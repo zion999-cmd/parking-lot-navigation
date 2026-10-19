@@ -45,7 +45,7 @@ void display_show_provisioning(const char *ap_ssid, const char *ap_url);
 void display_show_wifi_connecting(const char *ssid);
 
 /** Normal running state. 'ip' is the important bit - keep it readable. */
-void display_show_ready(const char *ip);
+void display_show_ready(const char *ip, const char *version);
 
 void display_show_camera_error(void);
 

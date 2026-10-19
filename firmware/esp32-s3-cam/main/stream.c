@@ -529,6 +529,30 @@ static void stream_task(void *arg)
 static esp_err_t stream_handler(httpd_req_t *req)
 {
     /*
+     * One viewer at a time.
+     *
+     * Every client that reaches this point calls esp_camera_fb_get() for its own
+     * copy of each frame, and the camera has a single frame queue (cam_hal.c:709).
+     * A second viewer therefore does not get its own stream - it takes half of the
+     * first one's frames. Measured on this board: one client 11-14 get/s, two
+     * clients 11-13 get/s TOTAL, i.e. the frames were divided, not multiplied.
+     *
+     * Refusing the second client is the honest behaviour: the viewer already
+     * watching keeps its full rate, and the newcomer is told why instead of both
+     * silently degrading. httpd runs these handlers from one task, so the check and
+     * the s_clients++ below cannot interleave.
+     */
+    if (s_clients > 0) {
+        ESP_LOGW(TAG, "refusing /stream: %d client(s) already watching - one frame queue, "
+                      "so a second viewer would only split the frames", s_clients);
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "one viewer at a time: this camera's frames cannot be shared\n",
+                        HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+
+    /*
      * Hand the request to a dedicated task and return immediately. The HTTP
      * server worker is then free to serve the status page (and further stream
      * clients) while this task pushes frames. This is the pattern used by the

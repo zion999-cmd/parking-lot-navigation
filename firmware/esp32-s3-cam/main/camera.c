@@ -1,5 +1,7 @@
 #include "camera.h"
+#include "camera_diag.h"
 #include "sccb.h"
+#include "driver/gpio.h"
 
 #include <stdio.h>
 
@@ -194,6 +196,7 @@ esp_err_t camera_init(void)
     sensor->set_vflip(sensor, CAM_VFLIP);
 
     s_ready = true;
+    ESP_ERROR_CHECK(camera_diag_start(CAM_PIN_VSYNC));
 
     ESP_LOGI(TAG, "Camera sensor: %s (PID=0x%04x, SCCB addr=0x%02x)",
              s_sensor_name, sensor->id.PID, sensor->slv_addr);
@@ -237,6 +240,68 @@ uint8_t camera_peek_reg(uint16_t reg)
         return 0xFF;
     }
     return SCCB_Read16(s->slv_addr, reg);
+}
+
+/*
+ * VSYNC edge counter - measurement only.
+ *
+ * The OV5640 drives VSYNC through GPIO 6 in this board's DVP wiring (CAM_PIN_VSYNC above, taken from
+ * the same pin config the camera driver uses - not guessed). One pulse per frame, so counting RISING
+ * edges counts frames; counting both edges would double it.
+ *
+ * The camera driver takes this pin into the LCD_CAM peripheral, but a GPIO interrupt can watch the
+ * same input at the same time. At 11-30 Hz it costs nothing.
+ *
+ * Comparing this against esp_camera_fb_get() separates "the sensor is producing 11 fps" from "the
+ * sensor produces 20-30 and the capture/DMA/framebuffer path drops them".
+ */
+static volatile uint32_t s_vsync_edges = 0;
+static bool s_vsync_ready = false;
+
+static void IRAM_ATTR vsync_isr(void *arg)
+{
+    (void)arg;
+    s_vsync_edges++;
+}
+
+void camera_vsync_start(void)
+{
+    if (s_vsync_ready) {
+        return;
+    }
+    gpio_config_t io = {
+        .pin_bit_mask = 1ULL << CAM_PIN_VSYNC,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_POSEDGE,          /* rising edge only: one per frame */
+    };
+    if (gpio_config(&io) != ESP_OK) {
+        ESP_LOGW(TAG, "vsync: gpio_config failed");
+        return;
+    }
+    /* The driver may already own the ISR service; either way is fine. */
+    esp_err_t err = gpio_install_isr_service(0);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "vsync: install_isr_service: %s", esp_err_to_name(err));
+        return;
+    }
+    if (gpio_isr_handler_add(CAM_PIN_VSYNC, vsync_isr, NULL) != ESP_OK) {
+        ESP_LOGW(TAG, "vsync: isr_handler_add failed");
+        return;
+    }
+    s_vsync_ready = true;
+    ESP_LOGI(TAG, "vsync counter started on GPIO %d (rising edge)", CAM_PIN_VSYNC);
+}
+
+uint32_t camera_vsync_count(void)
+{
+    return s_vsync_edges;
+}
+
+bool camera_vsync_running(void)
+{
+    return s_vsync_ready;
 }
 
 int camera_jpeg_quality(void)

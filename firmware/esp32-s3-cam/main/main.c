@@ -19,6 +19,7 @@
 #include "ota.h"
 #include "provisioning.h"
 #include "stream.h"
+#include "esp_wifi.h"
 #include "wifi.h"
 
 static const char *TAG = "app";
@@ -148,7 +149,7 @@ static void network_task(void *arg)
 
         ESP_LOGI(TAG, "Status page : http://%s/", wifi_ip_string());
         ESP_LOGI(TAG, "MJPEG stream: http://%s%s", wifi_ip_string(), STREAM_PATH);
-        display_show_ready(wifi_ip_string());
+        display_show_ready(wifi_ip_string(), ota_running_version());
 
         /* Drop any stale disconnect signal from the association phase. */
         xSemaphoreTake(s_disconnected_sem, 0);
@@ -163,9 +164,58 @@ static void diagnostics_task(void *arg)
     (void)arg;
     const TickType_t period = pdMS_TO_TICKS(DIAGNOSTICS_PERIOD_MS);
     TickType_t last_wake = xTaskGetTickCount();
+    bool stats_dumped = false;
+    int stats_window = 0;
 
     while (true) {
         vTaskDelayUntil(&last_wake, period);
+
+        /*
+         * One-shot, first tick only: print the driver's own statistics.
+         *
+         * esp_wifi_statis_dump() is the official ESP-IDF API for this; nothing is
+         * hooked, replaced or reconfigured. It is called exactly once per boot so
+         * the log contains one unmodified dump, and no counter is disturbed.
+         */
+        /*
+         * Two measurement windows for the RTT comparison, first tick only:
+         * dumps at uptime ~60 s, ~90 s and ~120 s give window 1 (60-90 s) and
+         * window 2 (90-120 s). The host pings continuously across both and splits
+         * its samples at these markers. Same official call, no new instrumentation.
+         */
+        if (stats_dumped && stats_window < 3) {
+            const int64_t up_s = esp_timer_get_time() / 1000000;
+            if (up_s >= 60 + 30 * stats_window) {
+                stats_window++;
+                esp_log_level_set("wifi", ESP_LOG_VERBOSE);
+                ESP_LOGI(TAG, "=== STATS WINDOW %d BEGIN (uptime %lld s) ===",
+                         stats_window, (long long)up_s);
+                esp_err_t win_err = esp_wifi_statis_dump(WIFI_STATIS_ALL);
+                esp_log_level_set("wifi", ESP_LOG_INFO);
+                ESP_LOGI(TAG, "=== STATS WINDOW %d END (%s) ===",
+                         stats_window, esp_err_to_name(win_err));
+            }
+        }
+
+        if (!stats_dumped) {
+            stats_dumped = true;
+            /*
+             * One-shot, first tick only: the driver's own statistics.
+             *
+             * The dump produced no output at the default tag level, which is what
+             * ESP-IDF's internal dumps usually look like, so the "wifi" tag is
+             * raised to VERBOSE for the call and put straight back afterwards.
+             * Only the log level is touched - no Wi-Fi/TCP/camera/task/buffer
+             * setting is changed, and nothing is hooked or replaced.
+             */
+            const esp_log_level_t wifi_level_before = esp_log_level_get("wifi");
+            esp_log_level_set("wifi", ESP_LOG_VERBOSE);
+            ESP_LOGI(TAG, "=== wifi stats BEGIN (level %d -> verbose) ===", (int)wifi_level_before);
+            esp_err_t stats_err = esp_wifi_statis_dump(WIFI_STATIS_ALL);
+            ESP_LOGI(TAG, "=== wifi stats dump returned %s ===", esp_err_to_name(stats_err));
+            esp_log_level_set("wifi", wifi_level_before);
+            ESP_LOGI(TAG, "=== wifi stats END (level restored to %d) ===", (int)wifi_level_before);
+        }
 
         /*
          * One line, every 10 s, with everything the stability test asks for:

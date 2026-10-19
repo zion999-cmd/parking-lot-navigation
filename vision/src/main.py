@@ -560,7 +560,7 @@ def run_edit_mode(get_frame, config_path: str, template_path: Optional[str],
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Fixed-ROI parking occupancy (PoC).")
-    ap.add_argument("--source", default="http://192.168.3.199/stream")
+    ap.add_argument("--source", default="http://192.168.3.118/stream")
     ap.add_argument("--backend", default="auto", choices=("auto", "opencv", "mjpeg"))
     ap.add_argument("--config", default=os.path.join(ROOT, "config", "parking_spots.json"))
     ap.add_argument("--reference", default=os.path.join(ROOT, "data", "reference", "reference.jpg"))

@@ -30,5 +30,10 @@ int camera_jpeg_quality(void);
 /** One sensor register, read-only (diagnostics). */
 uint8_t camera_peek_reg(uint16_t reg);
 
+/** VSYNC rising-edge counter (measurement only; see camera.c). */
+void camera_vsync_start(void);
+uint32_t camera_vsync_count(void);
+bool camera_vsync_running(void);
+
 /** AEC exposure in lines, and AGC gain - diagnostics for the frame-rate work. */
 

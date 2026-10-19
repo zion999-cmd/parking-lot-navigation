@@ -407,7 +407,8 @@ static void render(const disp_msg_t *m)
 
     case MSG_READY: {
         snprintf(line_a, sizeof(line_a), "IP: %s", m->a);
-        const char *all[] = { "Camera Ready", "", "Wi-Fi: Connected", line_a, "", "/stream" };
+        snprintf(line_b, sizeof(line_b), "v%s  /stream", m->b[0] ? m->b : "?");
+        const char *all[] = { "Camera Ready", "", "Wi-Fi: Connected", line_a, "", line_b };
         const uint16_t cols[] = { COL_FG, COL_BG, COL_FG, COL_ACCENT, COL_BG, COL_DIM };
         fill(COL_BG);
         draw_block(all, cols, 6);
@@ -676,10 +677,11 @@ void display_show_wifi_connecting(const char *ssid)
     post(&m);
 }
 
-void display_show_ready(const char *ip)
+void display_show_ready(const char *ip, const char *version)
 {
     disp_msg_t m = make_msg(MSG_READY);
     snprintf(m.a, sizeof(m.a), "%s", ip ? ip : "0.0.0.0");
+    snprintf(m.b, sizeof(m.b), "%s", version ? version : "?");
     post(&m);
 }
 
