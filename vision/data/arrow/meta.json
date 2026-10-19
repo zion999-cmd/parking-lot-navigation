@@ -1,11 +1,11 @@
 {
-  "source": "printed marker 3.5 cm, cropped from a live frame 2026-10-20",
+  "source": "printed marker 3.5 cm, 36x36 crop of the marker only (2 px outside the black frame)",
   "bbox": [
-    177,
-    200,
-    50,
-    50
+    183,
+    206,
+    38,
+    38
   ],
   "reference_angle_deg": 0.0,
-  "note": "打印标记（黑墨白纸 + 黑框 + 尾部白槽）贴 3.5cm；模板取自实时帧，含白静区与少量车顶做上下文。标记本身在帧里约 34x34 px。"
+  "note": "只用标记本身，不带车顶。实测：34x34/36x36 模板在车转 180° 后仍得 0.897 ✓；带车顶的 50x50 反而只有 0.757 ✗，因为斜视时车顶的透视会随朝向改变。"
 }
