@@ -311,13 +311,43 @@ done:
     return ok;
 }
 
-/* Turn a manifest-relative firmware_url into an absolute one. */
-static void make_firmware_url(const char *base_manifest_url, const char *rel,
+/* scheme://host[:port] of a URL, without the path. */
+static void url_origin(const char *url, char *out, size_t out_len)
+{
+    const char *sep = strstr(url, "://");
+    const char *host = sep ? sep + 3 : url;
+    const char *slash = strchr(host, '/');
+    size_t n = slash ? (size_t)(slash - url) : strlen(url);
+    if (n >= out_len) {
+        n = out_len - 1;
+    }
+    memcpy(out, url, n);
+    out[n] = '\0';
+}
+
+/*
+ * Turn a manifest-relative firmware_url into an absolute one.
+ *
+ * An absolute URL is accepted only from the same origin as the manifest. The manifest
+ * and the image are fetched over plain HTTP on this sandbox, and the SHA256 that
+ * "verifies" the image comes from the manifest itself - so letting the manifest point
+ * the download at another host would let one document hand the device an image from
+ * somewhere else entirely, with no second opinion to catch it.
+ */
+static bool make_firmware_url(const char *base_manifest_url, const char *rel,
                               char *out, size_t out_len)
 {
     if (strncmp(rel, "http://", 7) == 0 || strncmp(rel, "https://", 8) == 0) {
+        char want[160], got[160];
+        url_origin(base_manifest_url, want, sizeof(want));
+        url_origin(rel, got, sizeof(got));
+        if (strcmp(want, got) != 0) {
+            ESP_LOGE(TAG, "refusing firmware_url %s: origin %s differs from manifest %s",
+                     rel, got, want);
+            return false;
+        }
         snprintf(out, out_len, "%s", rel);
-        return;
+        return true;
     }
 
     /* base is scheme://host[:port]/manifest.json -> keep up to the third '/' */
@@ -327,6 +357,7 @@ static void make_firmware_url(const char *base_manifest_url, const char *rel,
     size_t prefix = slash ? (size_t)(slash - base_manifest_url) : strlen(base_manifest_url);
 
     snprintf(out, out_len, "%.*s%s", (int)prefix, base_manifest_url, rel);
+    return true;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -514,7 +545,10 @@ static void check_once(void)
     char url[256];
     /* Relative firmware_url resolves against whichever manifest was fetched, so
      * the download lands on the same machine the manifest came from. */
-    make_firmware_url(manifest_url, manifest.firmware_url, url, sizeof(url));
+    if (!make_firmware_url(manifest_url, manifest.firmware_url, url, sizeof(url))) {
+        set_result("manifest: firmware_url is on a different origin - refused");
+        goto done;
+    }
 
     if (download_and_flash(url, &manifest)) {
         display_show_ota_result(true);

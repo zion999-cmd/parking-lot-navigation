@@ -1,0 +1,172 @@
+--- a/driver/private_include/cam_hal.h
++++ b/driver/private_include/cam_hal.h
+@@ -65,3 +65,17 @@
+ #ifdef __cplusplus
+ }
+ #endif
++
++/* Diagnostic counters only. No capture or sensor settings are changed. */
++typedef enum {
++    CAM_DIAG_VSYNC_ISR, CAM_DIAG_DMA_ISR,
++    CAM_DIAG_VSYNC_QUEUE_OVERFLOW, CAM_DIAG_DMA_QUEUE_OVERFLOW,
++    CAM_DIAG_CAPTURE_START, CAM_DIAG_START_FAILED,
++    CAM_DIAG_FRAME_COMPLETE, CAM_DIAG_EMPTY_VSYNC,
++    CAM_DIAG_FB_OVERFLOW, CAM_DIAG_DMA_OVERFLOW,
++    CAM_DIAG_BAD_SOI, CAM_DIAG_BAD_EOI,
++    CAM_DIAG_QUEUE_REPLACED, CAM_DIAG_QUEUE_ERROR,
++    CAM_DIAG_DELIVERED, CAM_DIAG_TAKE_TIMEOUT, CAM_DIAG_NULL_DMA,
++    CAM_DIAG_COUNT
++} cam_diag_counter_t;
++void cam_diag_snapshot(uint32_t counts[CAM_DIAG_COUNT]);
+--- a/driver/cam_hal.c
++++ b/driver/cam_hal.c
+@@ -55,6 +55,20 @@
+ 
+ static const char *TAG = "cam_hal";
+ static cam_obj_t *cam_obj = NULL;
++static DRAM_ATTR uint32_t diag_counts[CAM_DIAG_COUNT];
++static portMUX_TYPE diag_mux = portMUX_INITIALIZER_UNLOCKED;
++static void IRAM_ATTR diag_note(cam_diag_counter_t counter)
++{
++    portENTER_CRITICAL_ISR(&diag_mux);
++    diag_counts[counter]++;
++    portEXIT_CRITICAL_ISR(&diag_mux);
++}
++void cam_diag_snapshot(uint32_t counts[CAM_DIAG_COUNT])
++{
++    portENTER_CRITICAL(&diag_mux);
++    memcpy(counts, diag_counts, sizeof(diag_counts));
++    portEXIT_CRITICAL(&diag_mux);
++}
+ #if defined(CONFIG_CAMERA_PSRAM_DMA)
+ #define CAMERA_PSRAM_DMA_ENABLED CONFIG_CAMERA_PSRAM_DMA
+ #else
+@@ -236,6 +250,7 @@
+ {
+     if (cam_get_next_frame(frame_pos)) {
+         if(ll_cam_start(cam_obj, *frame_pos)){
++            diag_note(CAM_DIAG_CAPTURE_START);
+             // Vsync the frame manually
+             ll_cam_do_vsync(cam_obj);
+             uint64_t us = (uint64_t)esp_timer_get_time();
+@@ -244,12 +259,15 @@
+             return true;
+         }
+     }
++    diag_note(CAM_DIAG_START_FAILED);
+     return false;
+ }
+ 
+ void IRAM_ATTR ll_cam_send_event(cam_obj_t *cam, cam_event_t cam_event, BaseType_t * HPTaskAwoken)
+ {
++    diag_note(cam_event == CAM_VSYNC_EVENT ? CAM_DIAG_VSYNC_ISR : CAM_DIAG_DMA_ISR);
+     if (xQueueSendFromISR(cam->event_queue, (void *)&cam_event, HPTaskAwoken) != pdTRUE) {
++        diag_note(cam_event == CAM_VSYNC_EVENT ? CAM_DIAG_VSYNC_QUEUE_OVERFLOW : CAM_DIAG_DMA_QUEUE_OVERFLOW);
+         ll_cam_stop(cam);
+         cam->state = CAM_STATE_IDLE;
+ #if CAM_LOG_SPAM_EVERY_FRAME
+@@ -296,6 +314,7 @@
+                 if (cam_event == CAM_IN_SUC_EOF_EVENT) {
+                     if(!cam_obj->psram_mode){
+                         if (cam_obj->fb_size < (frame_buffer_event->len + pixels_per_dma)) {
++                            diag_note(CAM_DIAG_FB_OVERFLOW);
+                             ESP_CAMERA_ETS_PRINTF(DRAM_STR("cam_hal: FB-OVF\r\n"));
+                             ll_cam_stop(cam_obj);
+                             continue;
+@@ -311,6 +330,7 @@
+                         // by one DMA operation, as we can't predict here, if the next
+                         // cam event will be a VSYNC
+                         if (cnt + 1 >= cam_obj->frame_copy_cnt) {
++                            diag_note(CAM_DIAG_DMA_OVERFLOW);
+                             ESP_CAMERA_ETS_PRINTF(DRAM_STR("cam_hal: DMA overflow\r\n"));
+                             ll_cam_stop(cam_obj);
+                             cam_obj->state = CAM_STATE_IDLE;
+@@ -334,6 +354,7 @@
+                             memcpy(soi_probe, frame_buffer_event->buf, probe_len);
+                             int soi_off = cam_verify_jpeg_soi(soi_probe, probe_len);
+                             if (soi_off != 0) {
++                                diag_note(CAM_DIAG_BAD_SOI);
+                                 static uint16_t warn_psram_soi_cnt = 0;
+                                 if (soi_off > 0) {
+                                     CAM_WARN_THROTTLE(warn_psram_soi_cnt,
+@@ -349,6 +370,7 @@
+                         } else {
+                             int soi_off = cam_verify_jpeg_soi(frame_buffer_event->buf, frame_buffer_event->len);
+                             if (soi_off != 0) {
++                                diag_note(CAM_DIAG_BAD_SOI);
+                                 static uint16_t warn_soi_bad_cnt = 0;
+                                 if (soi_off > 0) {
+                                     CAM_WARN_THROTTLE(warn_soi_bad_cnt,
+@@ -370,11 +392,14 @@
+                     //DBG_PIN_SET(1);
+                     ll_cam_stop(cam_obj);
+ 
++                    if (!(cnt || !cam_obj->jpeg_mode || cam_obj->psram_mode)) diag_note(CAM_DIAG_EMPTY_VSYNC);
+                     if (cnt || !cam_obj->jpeg_mode || cam_obj->psram_mode) {
++                        diag_note(CAM_DIAG_FRAME_COMPLETE);
+                         if (cam_obj->jpeg_mode) {
+                             if (!cam_obj->psram_mode) {
+                                 if (cam_obj->fb_size < (frame_buffer_event->len + pixels_per_dma)) {
+-                                    ESP_CAMERA_ETS_PRINTF(DRAM_STR("cam_hal: FB-OVF\r\n"));
++                                    diag_note(CAM_DIAG_FB_OVERFLOW);
++                                    ESP_CAMERA_ETS_PRINTF(DRAM_STR("cam_hal: FB-OVF\r\n"));
+                                     cnt--;
+                                 } else {
+                                     frame_buffer_event->len += ll_cam_memcpy(cam_obj,
+@@ -405,9 +430,11 @@
+                             //pop frame buffer from the queue
+                             camera_fb_t * fb2 = NULL;
+                             if(xQueueReceive(cam_obj->frame_buffer_queue, &fb2, 0) == pdTRUE) {
++                                diag_note(CAM_DIAG_QUEUE_REPLACED);
+                                 //push the new frame to the end of the queue
+                                 if (xQueueSend(cam_obj->frame_buffer_queue, (void *)&frame_buffer_event, 0) != pdTRUE) {
+                                     cam_obj->frames[frame_pos].en = 1;
++                                    diag_note(CAM_DIAG_QUEUE_ERROR);
+                                     ESP_CAMERA_ETS_PRINTF(DRAM_STR("cam_hal: FBQ-SND\r\n"));
+                                 }
+                                 //free the popped buffer
+@@ -415,6 +442,7 @@
+                             } else {
+                                 //queue is full and we could not pop a frame from it
+                                 cam_obj->frames[frame_pos].en = 1;
++                                diag_note(CAM_DIAG_QUEUE_ERROR);
+                                 ESP_CAMERA_ETS_PRINTF(DRAM_STR("cam_hal: FBQ-RCV\r\n"));
+                             }
+                         }
+@@ -701,6 +729,7 @@
+     {
+         TickType_t elapsed = xTaskGetTickCount() - start; /* TickType_t is unsigned so rollover is safe */
+         if (elapsed >= timeout) {
++            diag_note(CAM_DIAG_TAKE_TIMEOUT);
+             ESP_LOGW(TAG, "Failed to get frame: timeout");
+             return NULL;
+         }
+@@ -711,6 +740,7 @@
+         }
+ 
+         if (!dma_buffer) {
++            diag_note(CAM_DIAG_NULL_DMA);
+             /* Work-around for ESP32-S3 GDMA freeze when Wi-Fi STA starts.
+              * See esp32-camera commit 984999f (issue #620). */
+ #if CONFIG_IDF_TARGET_ESP32S3
+@@ -761,10 +791,12 @@
+                     /* DMA may bypass cache, ensure full frame is visible */
+                     cam_drop_psram_cache(dma_buffer->buf, dma_buffer->len);
+                 }
++                diag_note(CAM_DIAG_DELIVERED);
+                 return dma_buffer;
+             }
+ 
+ skip_eoi_check:
++            diag_note(CAM_DIAG_BAD_EOI);
+ 
+             CAM_WARN_THROTTLE(warn_eoi_miss_cnt,
+                               "NO-EOI - JPEG end marker missing");
+@@ -781,6 +813,7 @@
+             cam_drop_psram_cache(dma_buffer->buf, dma_buffer->len);
+         }
+ 
++        diag_note(CAM_DIAG_DELIVERED);
+         return dma_buffer;
+     }
+ }

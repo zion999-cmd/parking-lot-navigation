@@ -150,7 +150,7 @@ static volatile led_status_t s_status = LED_DISABLED;
 /* Hardware                                                                   */
 /* ------------------------------------------------------------------------- */
 
-static void led_init_hw(void)
+static bool led_init_hw(void)
 {
     rmt_tx_channel_config_t tx_cfg = {
         .clk_src = RMT_CLK_SRC_DEFAULT,
@@ -159,7 +159,15 @@ static void led_init_hw(void)
         .resolution_hz = RMT_RESOLUTION_HZ,
         .trans_queue_depth = 4,
     };
-    ESP_ERROR_CHECK(rmt_new_tx_channel(&tx_cfg, &s_rmt));
+    /* The strip is best effort - main.c says a missing strip never stops the camera node.
+     * ESP_ERROR_CHECK would abort() the whole device on a bad DIN wire or a taken RMT
+     * channel, which is the opposite of that promise. */
+    esp_err_t err = rmt_new_tx_channel(&tx_cfg, &s_rmt);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "rmt_new_tx_channel failed: %s", esp_err_to_name(err));
+        s_rmt = NULL;
+        return false;
+    }
 
     rmt_bytes_encoder_config_t enc_cfg = {
         .bit0 = { .level0 = 1, .duration0 = T0H_TICKS,
@@ -168,15 +176,43 @@ static void led_init_hw(void)
                   .level1 = 0, .duration1 = T1L_TICKS },
         .flags = { .msb_first = 1 },
     };
-    ESP_ERROR_CHECK(rmt_new_bytes_encoder(&enc_cfg, &s_encoder));
-    ESP_ERROR_CHECK(rmt_enable(s_rmt));
+    err = rmt_new_bytes_encoder(&enc_cfg, &s_encoder);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "rmt_new_bytes_encoder failed: %s", esp_err_to_name(err));
+        s_encoder = NULL;
+        return false;
+    }
+    err = rmt_enable(s_rmt);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "rmt_enable failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    return true;
 }
 
 static void led_show(void)
 {
+    if (s_rmt == NULL || s_encoder == NULL) {
+        return;                      /* led_start() already reported why */
+    }
+    static bool reported = false;
     rmt_transmit_config_t cfg = { .loop_count = 0 };
-    ESP_ERROR_CHECK(rmt_transmit(s_rmt, s_encoder, s_frame, sizeof(s_frame), &cfg));
-    ESP_ERROR_CHECK(rmt_tx_wait_all_done(s_rmt, -1));
+    esp_err_t err = rmt_transmit(s_rmt, s_encoder, s_frame, sizeof(s_frame), &cfg);
+    if (err == ESP_OK) {
+        err = rmt_tx_wait_all_done(s_rmt, -1);
+    }
+    if (err != ESP_OK) {
+        /* One line, not one per poll: a disconnected strip is polled every CONFIG_LED_POLL_MS. */
+        if (!reported) {
+            ESP_LOGW(TAG, "strip transmit failed (%s) - colours will not update", esp_err_to_name(err));
+            reported = true;
+        }
+        return;
+    }
+    if (reported) {
+        ESP_LOGI(TAG, "strip is transmitting again");
+        reported = false;
+    }
     esp_rom_delay_us(RESET_US);
 
     for (int i = 0; i < CONFIG_LED_COUNT; i++) {
@@ -767,7 +803,11 @@ bool led_start(void)
                  url);
     }
 
-    led_init_hw();
+    if (!led_init_hw()) {
+        ESP_LOGE(TAG, "bay lights unavailable - the camera node continues without them");
+        s_status = LED_DISABLED;
+        return false;
+    }
     frame_all_dark();
     led_show();                     /* start dark, not undefined */
     s_status = LED_NO_DATA;

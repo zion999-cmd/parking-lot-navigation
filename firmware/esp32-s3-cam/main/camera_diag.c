@@ -1,7 +1,11 @@
 /* Passive diagnostic taps. Do not change sensor registers or capture settings. */
 #include "camera_diag.h"
 #include "camera.h"
+/* The private driver header is only guaranteed to be reachable when the camera component
+ * is present; the build still has to work (without counters) if it is not. */
+#if __has_include("cam_hal.h")
 #include "cam_hal.h"
+#endif
 #include "driver/gpio.h"
 #include "esp_timer.h"
 #include "esp_app_desc.h"
@@ -9,6 +13,22 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+
+/*
+ * CAM_DIAG_COUNT and cam_diag_snapshot() are added by
+ * patches/camera-diagnostics.patch. main/CMakeLists.txt applies the patch when it can and
+ * defines CAM_DIAG_PATCHED when the symbols are there. Without them the endpoint still
+ * works and reports zeros, instead of the whole firmware failing to compile on a clean
+ * clone.
+ */
+#if !defined(CAM_DIAG_PATCHED)
+#define CAM_DIAG_COUNT 18
+static void cam_diag_snapshot(uint32_t counts[CAM_DIAG_COUNT])
+{
+    memset(counts, 0, sizeof(uint32_t) * CAM_DIAG_COUNT);
+}
+#endif
 
 static portMUX_TYPE edge_mux = portMUX_INITIALIZER_UNLOCKED;
 static struct {
@@ -56,7 +76,10 @@ static esp_err_t diagnostic_handler(httpd_req_t *req)
     portENTER_CRITICAL(&edge_mux);
     typeof(edges) e = edges;
     portEXIT_CRITICAL(&edge_mux);
-    const char *names[CAM_DIAG_COUNT] = {
+    /* CAM_DIAG_COUNT includes the trailing COUNT enumerator, so it is one more than the
+     * number of names. Sizing the array by the count left a NULL last entry that the loop
+     * handed to cJSON. */
+    const char *names[] = {
         "vsync_isr", "dma_isr", "vsync_queue_overflow", "dma_queue_overflow",
         "capture_start", "start_failed", "frame_complete", "empty_vsync",
         "fb_overflow", "dma_overflow", "bad_soi", "bad_eoi",
@@ -74,7 +97,9 @@ static esp_err_t diagnostic_handler(httpd_req_t *req)
     cJSON_AddNumberToObject(root, "gpio_min_interval_us", e.min_us);
     cJSON_AddNumberToObject(root, "gpio_max_interval_us", e.max_us);
     cJSON *driver = cJSON_AddObjectToObject(root, "driver");
-    for (int i = 0; i < CAM_DIAG_COUNT; i++) cJSON_AddNumberToObject(driver, names[i], counts[i]);
+    for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        cJSON_AddNumberToObject(driver, names[i], counts[i]);
+    }
     /* Sequential SCCB reads, not an atomic frame snapshot. -1 remains a read error. */
     const uint16_t regs[] = {
         0x3000,0x3001,0x3002,0x3003,0x3004,0x3005,0x3006,0x3007,

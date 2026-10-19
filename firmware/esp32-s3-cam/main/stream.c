@@ -83,6 +83,17 @@ static int64_t s_last_grab_us = 0;
 static volatile int s_clients = 0;
 
 /*
+ * Guards the client count and the shutdown flag.
+ *
+ * s_clients used to be a plain int, and that was fine only because httpd runs all
+ * handlers from one task. stream_server_stop() runs from another task (the provisioning
+ * hook), so the check that makes stopping safe needs a critical section rather than an
+ * implicit "there is only one writer" assumption.
+ */
+static portMUX_TYPE s_clients_mux = portMUX_INITIALIZER_UNLOCKED;
+static volatile bool s_stopping = false;
+
+/*
  * Diagnostics only - nothing here changes what the stream does.
  *
  * The question is whether N clients share one frame source or each drive their own capture. The
@@ -393,7 +404,7 @@ static void stream_task(void *arg)
     size_t jpeg_sum = 0, jpeg_min = 0, jpeg_max = 0;
     int64_t window_start_us = esp_timer_get_time();
 
-    while (res == ESP_OK) {
+    while (res == ESP_OK && !s_stopping) {
         /*
          * Pacing: the uplink is the scarce resource here, not the camera. Measured on this
          * rig, 800x600 at 24-27 fps is about 1 MB/s - far more than the vision service uses
@@ -518,7 +529,9 @@ static void stream_task(void *arg)
         free(scratch);
     }
 
+    portENTER_CRITICAL(&s_clients_mux);
     s_clients--;
+    portEXIT_CRITICAL(&s_clients_mux);
     s_last_frame_us = 0;
     s_last_grab_us = 0;
     s_fps = 0.0f;
@@ -542,7 +555,26 @@ static esp_err_t stream_handler(httpd_req_t *req)
      * silently degrading. httpd runs these handlers from one task, so the check and
      * the s_clients++ below cannot interleave.
      */
-    if (s_clients > 0) {
+    bool stopping;
+    bool busy;
+    portENTER_CRITICAL(&s_clients_mux);
+    stopping = s_stopping;
+    busy = s_clients > 0;
+    if (!stopping && !busy) {
+        s_clients++;
+    }
+    portEXIT_CRITICAL(&s_clients_mux);
+
+    if (stopping) {
+        /* httpd_stop() is either imminent or already running: a request accepted now
+         * would outlive the server and touch freed memory. */
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "the stream server is shutting down\n",
+                        HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+    if (busy) {
         ESP_LOGW(TAG, "refusing /stream: %d client(s) already watching - one frame queue, "
                       "so a second viewer would only split the frames", s_clients);
         httpd_resp_set_status(req, "409 Conflict");
@@ -561,15 +593,18 @@ static esp_err_t stream_handler(httpd_req_t *req)
     httpd_req_t *copy = NULL;
     esp_err_t res = httpd_req_async_handler_begin(req, &copy);
     if (res != ESP_OK) {
+        portENTER_CRITICAL(&s_clients_mux);
+        s_clients--;
+        portEXIT_CRITICAL(&s_clients_mux);
         ESP_LOGE(TAG, "httpd_req_async_handler_begin failed: %s", esp_err_to_name(res));
         return res;
     }
 
-    s_clients++;
-
     if (xTaskCreatePinnedToCore(stream_task, "mjpeg_stream", STREAM_TASK_STACK,
                                 copy, STREAM_TASK_PRIO, NULL, tskNO_AFFINITY) != pdPASS) {
+        portENTER_CRITICAL(&s_clients_mux);
         s_clients--;
+        portEXIT_CRITICAL(&s_clients_mux);
         ESP_LOGE(TAG, "failed to create stream task");
         httpd_resp_send_err(copy, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
         httpd_req_async_handler_complete(copy);
@@ -588,6 +623,12 @@ esp_err_t stream_server_start(void)
     if (s_server != NULL) {
         return ESP_OK;
     }
+
+    /* A previous stop left this set so a straggling task kept exiting. Starting again is
+     * the point at which new clients are wanted. */
+    portENTER_CRITICAL(&s_clients_mux);
+    s_stopping = false;
+    portEXIT_CRITICAL(&s_clients_mux);
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
@@ -649,12 +690,52 @@ void stream_server_stop(void)
         return;
     }
 
+    /*
+     * Stop accepting clients first, then let the existing one finish before the server is
+     * freed.
+     *
+     * httpd_stop() closes every session and calls httpd_delete(), which frees the server's
+     * request/aux structures. The MJPEG task is *not* an httpd worker: it owns an async
+     * request and calls httpd_resp_send_chunk() / httpd_req_async_handler_complete() on it
+     * from its own task. Calling httpd_stop() while that task is alive therefore frees the
+     * objects it is about to dereference (use-after-free), and it is reachable from the
+     * provisioning hook: `clearwifi` over serial, or a stale-credentials connect timeout
+     * falling back to the portal, while somebody is watching /stream.
+     *
+     * The flag also closes the race with a request that has entered stream_handler but not
+     * yet incremented s_clients: the check and the increment are one critical section.
+     */
+    portENTER_CRITICAL(&s_clients_mux);
+    s_stopping = true;
+    portEXIT_CRITICAL(&s_clients_mux);
+
     ESP_LOGW(TAG, "Stopping stream server to release port 80 for the portal");
+    /*
+     * The stream task's blocking calls are bounded: send_wait_timeout is 3 s and the frame
+     * pacing wait is at most one frame interval, so this waits far longer than it takes a
+     * healthy task to notice s_stopping and complete its request. If it still has not
+     * finished, do not pretend otherwise: stopping the server anyway keeps the portal (and
+     * therefore the device) recoverable, and the log says the unsafe case was reached.
+     */
+    const TickType_t step = pdMS_TO_TICKS(50);
+    const int max_steps = 200;                 /* 10 s */
+    int steps = 0;
+    while (stream_client_count() > 0 && steps < max_steps) {
+        vTaskDelay(step);
+        steps++;
+    }
+    if (stream_client_count() > 0) {
+        ESP_LOGE(TAG, "stream task still running after 10 s - stopping the server anyway; "
+                      "this can free a request the task still holds");
+    }
+
     httpd_stop(s_server);
     s_server = NULL;
     s_fps = 0.0f;
     s_last_frame_us = 0;
     s_last_grab_us = 0;
+    /* s_stopping stays set until the next start: if the wait above timed out, the remaining
+     * stream task must keep seeing "stop", not resume against a freed server. */
 }
 
 bool stream_server_is_running(void)

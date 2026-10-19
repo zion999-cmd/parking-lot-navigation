@@ -196,7 +196,12 @@ esp_err_t camera_init(void)
     sensor->set_vflip(sensor, CAM_VFLIP);
 
     s_ready = true;
-    ESP_ERROR_CHECK(camera_diag_start(CAM_PIN_VSYNC));
+    /* Passive diagnostics only: a GPIO ISR that cannot be installed must not take the
+     * camera down with it. */
+    esp_err_t diag_err = camera_diag_start(CAM_PIN_VSYNC);
+    if (diag_err != ESP_OK) {
+        ESP_LOGW(TAG, "camera diagnostics disabled: %s", esp_err_to_name(diag_err));
+    }
 
     ESP_LOGI(TAG, "Camera sensor: %s (PID=0x%04x, SCCB addr=0x%02x)",
              s_sensor_name, sensor->id.PID, sensor->slv_addr);

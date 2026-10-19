@@ -518,7 +518,13 @@ static void backlight_init(void)
     timer.timer_num = BL_LEDC_TIMER;
     timer.freq_hz = 5000;
     timer.clk_cfg = LEDC_AUTO_CLK;
-    ESP_ERROR_CHECK(ledc_timer_config(&timer));
+    /* The backlight is not the panel: if it cannot be driven the screen is still
+     * readable in ambient light, so warn rather than abort the camera node. */
+    esp_err_t err = ledc_timer_config(&timer);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "backlight timer config failed: %s", esp_err_to_name(err));
+        return;
+    }
 
     ledc_channel_config_t ch = {};
     ch.gpio_num = LCD_PIN_BL;
@@ -527,18 +533,29 @@ static void backlight_init(void)
     ch.timer_sel = BL_LEDC_TIMER;
     ch.duty = 0;
     ch.hpoint = 0;
-    ESP_ERROR_CHECK(ledc_channel_config(&ch));
+    err = ledc_channel_config(&ch);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "backlight channel config failed: %s", esp_err_to_name(err));
+        return;
+    }
 
     /* DISPLAY_BACKLIGHT_OUTPUT_INVERT is false in the reference config, so a
      * higher duty means brighter. */
-    ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, BL_LEDC_CHANNEL,
-                                  (1023 * BL_DUTY_PERCENT) / 100));
-    ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, BL_LEDC_CHANNEL));
+    err = ledc_set_duty(LEDC_LOW_SPEED_MODE, BL_LEDC_CHANNEL,
+                        (1023 * BL_DUTY_PERCENT) / 100);
+    if (err == ESP_OK) {
+        err = ledc_update_duty(LEDC_LOW_SPEED_MODE, BL_LEDC_CHANNEL);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "backlight duty could not be set: %s", esp_err_to_name(err));
+    }
 }
 
 bool display_init(void)
 {
-#if defined(CONFIG_DISPLAY_ENABLE) && !CONFIG_DISPLAY_ENABLE
+    /* Kconfig bools are defined only when 'y'. The old test (defined && !value) was
+     * therefore true in neither configuration, so disabling the display did nothing. */
+#if !defined(CONFIG_DISPLAY_ENABLE)
     ESP_LOGI(TAG, "Status display disabled at build time (CONFIG_DISPLAY_ENABLE=n)");
     return false;
 #else
@@ -597,17 +614,25 @@ bool display_init(void)
         return false;
     }
 
-    /* Same sequence as the proven reference implementation. */
-    ESP_ERROR_CHECK(esp_lcd_panel_reset(s_panel));
-    ESP_ERROR_CHECK(esp_lcd_panel_init(s_panel));
-    ESP_ERROR_CHECK(esp_lcd_panel_invert_color(s_panel, true));   /* 240x240 variant */
-    ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(s_panel, false));
-    ESP_ERROR_CHECK(esp_lcd_panel_mirror(s_panel, false, false));
+    /* Same sequence as the proven reference implementation. A panel that does not answer
+     * is a missing display, not a reason to abort() the whole camera node. */
+    err = esp_lcd_panel_reset(s_panel);
+    if (err == ESP_OK) err = esp_lcd_panel_init(s_panel);
+    if (err == ESP_OK) err = esp_lcd_panel_invert_color(s_panel, true);  /* 240x240 */
+    if (err == ESP_OK) err = esp_lcd_panel_swap_xy(s_panel, false);
+    if (err == ESP_OK) err = esp_lcd_panel_mirror(s_panel, false, false);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "panel init failed: %s - continuing without a display",
+                 esp_err_to_name(err));
+        return false;
+    }
     err = esp_lcd_panel_disp_on_off(s_panel, true);
     if (err == ESP_ERR_NOT_SUPPORTED) {
         ESP_LOGW(TAG, "panel does not support disp_on_off; assuming on");
-    } else {
-        ESP_ERROR_CHECK(err);
+    } else if (err != ESP_OK) {
+        ESP_LOGE(TAG, "panel disp_on_off failed: %s - continuing without a display",
+                 esp_err_to_name(err));
+        return false;
     }
 
     /* Frame buffer in PSRAM: 240*240*2 = 112.5 KB. */
