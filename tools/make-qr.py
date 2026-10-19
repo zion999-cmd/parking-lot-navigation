@@ -57,15 +57,20 @@ def main() -> int:
         rows.append(bits)
 
     per_row = (n + 7) // 8
+    # The payload is pasted into a C string literal and a comment. Escape it so a quote,
+    # backslash, newline or "*/" in the URL cannot produce invalid (or injected) source.
+    c_payload = (payload.replace("\\", "\\\\").replace('"', '\\"')
+                 .replace("\n", "\\n").replace("\r", "\\r"))
+    shown_payload = payload.replace("*/", "* /").replace("\n", " ").replace("\r", " ")
     print("/*")
     print(" * QR code for the gate panel - GENERATED, do not edit by hand.")
     print(" *")
-    print(f' *   payload : "{payload}" ({len(payload)} characters)')
+    print(f' *   payload : "{shown_payload}" ({len(payload)} characters)')
     print(f" *   version : {(n - 17) // 4}  ({n} x {n} modules)")
     print(" *   ECC     : L")
     print(" *")
     print(" * Regenerate with:")
-    print(f' *     python3 tools/make-qr.py "{payload}" \\')
+    print(f' *     python3 tools/make-qr.py "{shown_payload}" \\')
     print(" *         > firmware/esp32-s3-cam/main/qr_code.h")
     print(" *")
     print(" * One bit per module, bit 0 = leftmost column of that row, which is what")
@@ -73,7 +78,7 @@ def main() -> int:
     print(" */")
     print("#pragma once")
     print()
-    print(f"#define QR_PAYLOAD \"{payload}\"")
+    print(f"#define QR_PAYLOAD \"{c_payload}\"")
     print(f"#define QR_SIZE    {n}")
     print(f"#define QR_ROW_BYTES {per_row}")
     print()

@@ -43,9 +43,12 @@ if [ ! -f "$BIN" ]; then
     exit 1
 fi
 
-case "$VERSION" in
-    *[!0-9.]*) echo "error: version must look like major.minor.patch" >&2; exit 1 ;;
-esac
+# Numeric components separated by dots: rejects "", ".", "..", "1..2" and anything else
+# that would escape firmware/<version>/ or produce a manifest the device cannot compare.
+if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+(\.[0-9]+)+$'; then
+    echo "error: version must look like major.minor.patch (got '$VERSION')" >&2
+    exit 1
+fi
 
 # The app version lives in esp_app_desc_t: 32 bytes at offset 0x30 of the image.
 BIN_VERSION="$(python3 -c '

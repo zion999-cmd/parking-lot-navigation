@@ -130,7 +130,7 @@ Tuned against the real camera on 2026-10-05 (saved frame and live stream agree):
 | setting | value | why |
 |---|---|---|
 | `--detect-method` | `profile` | the Hough/`segments` path reads the two edges of each white line as two dividers, so the lower row came back with a bogus 21 px pitch, and on a noise frame it chained 1367 segments into 204 "dividers" |
-| `--detect-orientation` | `vertical` | `auto` picked `horizontal` on one run and `vertical` on another for the same scene, which changed the result completely |
+| `--detect-orientation` | `both` (current default) | `vertical` was the value tuned on the 2026-10-05 framing; the current scene has rows in both directions, so both are merged. `auto` is still avoided: it picked `horizontal` on one run and `vertical` on another for the same scene |
 | `--band-threshold` | `0.05` | 0.30 missed the upper row of bays entirely |
 | periodicity confidence | autocorr >= 0.25 | measured: **0.53-0.67** on the real scene, 0.85 on a clean synthetic row, **0.068-0.128** on a noise-only frame — so the threshold sits a factor of two from both sides. This is what stops a random image producing ~100 bogus bays. |
 
@@ -170,7 +170,7 @@ Then tune, and repeat:
 |---|---|
 | `--detect-orientation vertical` / `horizontal` | **try this first.** `auto` picks whichever orientation yields more candidates, and on a busy scene that can flip between runs. The overlay makes the right answer obvious. |
 | `--max-width` / `--min-width` | bay size filter. `--detect-only` prints a suggestion derived from the measured pitch (`try --min-width 40 --max-width 142`). This is the single most effective knob. |
-| `--band-threshold` | 0.30 default. Lower it (0.15) if rows are missed because the dividers are faint; raise it (0.5) if unrelated bands appear. |
+| `--band-threshold` | 0.05 default. Raise it (0.3-0.5) if unrelated bands appear; the old 0.30 default is what missed the upper row entirely. |
 | `--grid-tolerance` | 0.18 default. Raise if real bays are not perfectly evenly spaced. |
 | `--min-width` | also the smallest pitch the periodicity search will consider. |
 
@@ -245,9 +245,9 @@ the drift against the reference frame and moves the *incoming frame* back onto i
 so the ROIs and the reference ROIs stay exactly where they were drawn:
 
 ```zsh
-$P src/main.py                       # --align translation is the default
+$P src/main.py                       # --align off is the default: the camera is bolted down
+$P src/main.py --align translation   # compensate a nudge (translation only)
 $P src/main.py --align euclidean     # if the camera also got rotated
-$P src/main.py --align off           # disable it entirely
 ```
 
 It re-estimates every `--align-every` frames (default 3) and logs the estimate.
@@ -322,7 +322,7 @@ empty reference ROI  ->  current ROI
 
 | knob | default | meaning |
 |---|---|---|
-| `--changed-ratio` | 0.15 | fraction of the inner area that must change |
+| `--changed-ratio` | 0.30 | fraction of the inner area that must change (the measured range is in `occupancy.py`) |
 | `--pixel-threshold` | 25 | per-pixel difference (0-255) that counts as changed |
 | `--blur` | 5 | pre-filter size |
 
@@ -346,7 +346,8 @@ $P src/main.py --headless --duration 20 --csv data/cases/case4_all_occupied.csv
 $P src/main.py --headless --duration 20 --csv data/cases/case5_removed.csv
 ```
 
-Each CSV is `t_seconds, spot_id, changed_ratio, state` per frame.
+Each CSV row is `t_seconds, spot_id, changed_ratio, state, align_ok, align_dx,
+align_dy, align_corr` (one row per spot per frame).
 
 Then describe what was physically true while each file was recorded:
 
@@ -405,17 +406,33 @@ vision/
 │   └── debug/                     frame.jpg, calibration_aid.png, snapshots
 ├── src/
 │   ├── camera.py                  video input: cv2.VideoCapture + MJPEG reader
+│   ├── zoom.py                    PC-side digital zoom (image only)
 │   ├── spot_config.py             bay polygons, inner-ROI maths, JSON I/O
-│   ├── occupancy.py               the difference algorithm (untouched by P0002.1)
+│   ├── occupancy.py               the difference algorithm
 │   ├── alignment.py               camera drift estimation (ECC) + guards
 │   ├── detector.py                geometric bay candidate detection (no AI)
+│   ├── arrow.py                   roof-arrow template match (position + heading)
+│   ├── vehicle.py                 hero-car pose, map location, tracker
 │   ├── spot_editor.py             editing model: drag/add/delete/rename/row/undo
+│   ├── road_editor.py             road drawing / editing model
+│   ├── road_network.py            road graph, bay access derivation, validation
+│   ├── map_document.py            two-layer map file, atomic read/write
 │   ├── calibration.py             the window, mouse and key map (+ --detect-only)
+│   ├── contract.py                parking_map/1 + parking_state/1 documents
+│   ├── emit_map.py                config -> out/parking_map.json
+│   ├── route.py                   Dijkstra planner + refusal codes
+│   ├── plan.py                    CLI: plan a route and write route.json
+│   ├── live_view.py               annotated / raw MJPEG relays
+│   ├── serve.py                   static pages + GET /api/route
 │   └── main.py                    live viewer / headless recorder
+├── web/                           board.html, navigation.html, index.html
+├── out/                           generated map/state/route documents
 └── tests/
     ├── test_occupancy.py          synthetic occupancy tests
     ├── test_detector.py           synthetic car park detection tests
     ├── test_editor.py             editing + GUI wiring tests
+    ├── test_api.py                real HTTP round-trips against serve.py
+    ├── test_navigation.py         page JS (extracted, run with node)
     └── fit_threshold.py           threshold from recorded cases
 ```
 

@@ -117,6 +117,14 @@
 </main>
 
 <script>
+// Labels come from a POST body and are stored server-side; the list is built with
+// innerHTML, so every field goes through this first. Without it a crafted label
+// status/from value executes in the operator's page.
+function esc(v) {
+  return String(v == null ? "" : v).replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[c]));
+}
 const img = document.getElementById("img");
 const cv  = document.getElementById("cv");
 const ctx = cv.getContext("2d");
@@ -526,9 +534,9 @@ async function loadList() {
   saved = j.labels || [];
   document.getElementById("count").textContent = saved.length ? "(" + saved.length + ")" : "";
   document.getElementById("list").innerHTML = saved.map(l =>
-    `<div data-id="${l.id}" data-image="${l.image}">
-       <span class="${l.status}">${l.id.slice(4)}</span>
-       <span class="hint">${l.status}</span>
+    `<div data-id="${esc(l.id)}" data-image="${esc(l.image)}">
+       <span class="${esc(l.status)}">${esc(String(l.id).slice(4))}</span>
+       <span class="hint">${esc(l.status)}</span>
      </div>`).join("") || '<span class="hint">还没有</span>';
   document.querySelectorAll("#list div").forEach(el => el.addEventListener("click", () => {
     const l = saved.find(s => s.id === el.dataset.id);

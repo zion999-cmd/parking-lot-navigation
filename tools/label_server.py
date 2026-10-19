@@ -54,6 +54,10 @@ SEED = os.path.join(LABELS, "seed")
 ANNOTATIONS = os.path.join(LABELS, "annotations.jsonl")
 UI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "label_ui.html")
 
+# Largest accepted POST body. A quad plus notes is well under a kilobyte; 64 KiB leaves
+# room for a long note without letting an unauthenticated client claim arbitrary memory.
+MAX_LABEL_BYTES = 64 * 1024
+
 DEFAULT_STREAM = "http://192.168.3.118/stream"
 
 
@@ -190,11 +194,23 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):                                               # noqa: N802
         if self.path != "/save":
             return self._send(404, b"not found", "text/plain")
-        length = int(self.headers.get("Content-Length", "0"))
+        # A label is a few hundred bytes. Without a ceiling, a request body is read into
+        # memory exactly as claimed by the client - and this endpoint has no auth.
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except (TypeError, ValueError):
+            return self._json(400, {"ok": False, "why": "bad Content-Length"})
+        if length <= 0:
+            return self._json(400, {"ok": False, "why": "empty body"})
+        if length > MAX_LABEL_BYTES:
+            return self._json(413, {"ok": False,
+                                    "why": f"body over {MAX_LABEL_BYTES} bytes"})
         try:
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
-        except ValueError as exc:
+        except (UnicodeDecodeError, ValueError) as exc:
             return self._json(400, {"ok": False, "why": f"bad json: {exc}"})
+        if not isinstance(payload, dict):
+            return self._json(400, {"ok": False, "why": "body must be a JSON object"})
 
         kind = str(payload.get("kind") or "quad")
 
@@ -202,14 +218,32 @@ class Handler(BaseHTTPRequestHandler):
         # it marks something ON the car (a roof marker, say), and its shape is whatever
         # the thing looks like. Three points is the minimum that can enclose an area.
         points = payload.get("points") or []
+        quad = payload.get("quad") or []
         if kind == "feature":
             if len(points) < 3:
                 return self._json(400, {"ok": False, "why": "a feature needs at least 3 points"})
         else:
-            quad = payload.get("quad") or []
             if len(quad) != 4:
                 return self._json(400, {"ok": False, "why": "need four corners"})
+
+        # Every coordinate below is indexed and rounded; validate the shape once here so a
+        # malformed body is a 400 instead of a KeyError/TypeError traceback.
+        try:
+            points = [[float(p[0]), float(p[1])] for p in points]
+            quad = [[float(p[0]), float(p[1])] for p in quad]
+            tip_raw = payload.get("tip")
+            tip = [float(tip_raw[0]), float(tip_raw[1])] if tip_raw else None
+            raw_quad = [[float(p[0]), float(p[1])]
+                        for p in (payload.get("raw_quad") or [])][:4]
+        except (TypeError, ValueError, IndexError):
+            return self._json(400, {"ok": False,
+                                    "why": "points/quad/tip must be [x, y] pairs"})
+
         status = payload.get("status", "ok")
+        if status not in ("ok", "skip", "bad"):
+            # It becomes a CSS class and is echoed back into the page; keep it to the
+            # three values the UI actually sends.
+            return self._json(400, {"ok": False, "why": f"unknown status: {status!r}"})
         source = str(payload.get("from") or "").strip()
 
         os.makedirs(LABELS, exist_ok=True)
@@ -264,10 +298,8 @@ class Handler(BaseHTTPRequestHandler):
             "quad": [[int(round(p[0])), int(round(p[1]))] for p in quad],   # clockwise, p0 at the nose
             # The quad is a fitted rectangle; raw_quad is what the hand actually clicked, kept
             # because a fit cannot be un-fitted later and the clicks cannot be recovered from it.
-            "raw_quad": [[int(round(p[0])), int(round(p[1]))]
-                         for p in (payload.get("raw_quad") or [])][:4],
-            "tip": [int(round(payload["tip"][0])), int(round(payload["tip"][1]))]
-            if payload.get("tip") else None,
+            "raw_quad": [[int(round(p[0])), int(round(p[1]))] for p in raw_quad],
+            "tip": [int(round(tip[0])), int(round(tip[1]))] if tip else None,
             "tip_source": str(payload.get("tip_source", ""))[:12],   # auto | manual
             "status": status,                    # ok | skip | invalid
             "notes": str(payload.get("notes", ""))[:200],

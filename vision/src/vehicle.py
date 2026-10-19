@@ -1,29 +1,20 @@
-"""Where the hero car is, and which way its axis runs.
+"""Where the hero car is, and which way it is pointing.
 
-Why colour and shape rather than a marker: the job is to know the car's position and
-heading. A marker gives that precisely, and also tells the front from the back - but at
-800x600 across a whole sandbox a marker has to be about half the car's width and flat towards
-the camera to be readable at all, and on this car that is physically unreasonable. Colour and
-shape need no hardware and no reference frame, which also makes them immune to the two things
-that were wrecking measurements here: lighting changes and sub-pixel shifts of the painted bay
-lines.
+The car is located by the arrow taped to its roof (src/arrow.py): a rotation sweep of a
+committed template over grayscale, searched first around a position predicted from the last
+two sightings and - when that misses - over the whole frame at most once every
+WIDE_SEARCH_MIN_S. The arrow states position and direction together, so this module no
+longer has to guess which end is the front from paint taper or which end is darker.
 
-Measured on the real thing, with the car parked and the camera still:
+The colour code below is still used by the labeller and the offline tools (`red_mask`), but
+the live pipeline does not consult the paint. The thresholds it documents were measured on
+the red car rather than chosen: hue 0..2 and 176..179 with S >= 90 and V >= 60, while the
+orange-red trim along the top of the enclosure sits at hue 11..15. The first attempt used
+hue <= 12 and turned that trim into the largest "red object" in the picture.
 
-    position   x +- 0.25 px, y +- 0.11 px      (a navigator needs +- 5 px)
-    heading    +- 0.8 deg                      (a navigator needs +- 15 deg)
-
-And it agrees with something it was never told: with the car left on a road, the heading
-reads 0.0 deg while that road segment runs at -0.17 deg.
-
-The honest limit is in the name of the field: `heading` is the *axis* of the car, in 0..180,
-with no front. A car pointing east and the same car pointing west both read 0.0. That is what
-a marker would buy, and nothing here can replace it.
-
-The thresholds below were measured from a frame rather than chosen: the red car sits at hue
-0..2 and 176..179 with S >= 90 and V >= 60, while the orange-red trim along the top of the
-enclosure sits at hue 11..15. The first attempt used hue <= 12 and turned that trim into the
-largest "red object" in the picture.
+The contract keeps the two facts separate: `heading` is the direction the arrow points
+(0..360), and `front_is_known` is true only when the arrow supplied it. `heading_pca` is the
+old shape-only axis (0..180) and is kept for diagnostics, not for navigation.
 """
 
 from __future__ import annotations
@@ -31,6 +22,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import sys
 import time
 from collections import deque
 from dataclasses import dataclass, replace
@@ -201,11 +193,6 @@ class VehiclePose:
         else:
             out["front_heading"] = None
         return out
-
-
-def _ellipse(radius: int):
-    size = max(1, 2 * radius + 1)
-    return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
 
 
 def _ellipse(radius: int):

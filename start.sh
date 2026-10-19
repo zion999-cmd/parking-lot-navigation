@@ -199,20 +199,63 @@ kill_pids() {
 SERVICE_SCRIPTS="tools/run-vision.sh vision/src/main.py src/main.py vision/src/serve.py src/serve.py tools/beacon.py tools/ota-server"
 TEST_SCRIPTS="tools/hero_lab tools/label_server.py vision/tests vision/src/calibration.py vision/src/emit_map.py vision/src/plan.py src/calibration.py src/emit_map.py src/plan.py tools/serial_capture.py tools/watch_device.py"
 
+# What a service's process command line must contain before this script will adopt or
+# kill it. Ports and pid files are not proof of identity: a recycled pid, or another
+# program that happens to hold :8000, used to be adopted and then killed by `stop`.
+script_for() {
+    case "$1" in
+        serve)  printf 'vision/src/serve.py' ;;
+        vision) printf 'run-vision.sh' ;;
+        beacon) printf 'tools/beacon.py' ;;
+        ota)    printf 'tools/ota-server/server.py' ;;
+        label)  printf 'tools/label_server.py' ;;
+        *)      printf '' ;;
+    esac
+}
+
+pid_matches() {                              # pid, expected script fragment
+    local pid="$1" expect="$2" cmd comm
+    [ -n "$pid" ] && [ -n "$expect" ] || return 1
+    cmd="$(ps -o command= -p "$pid" 2>/dev/null || true)"
+    [ -n "$cmd" ] || return 1
+    case "$cmd" in
+        *"$expect"*) ;;
+        *) return 1 ;;
+    esac
+    # The path alone is not proof: an editor with the file open also satisfies it.
+    comm="$(ps -o comm= -p "$pid" 2>/dev/null | sed 's#.*/##')"
+    case "$comm" in
+        python*|python3*|sh|bash|zsh|env) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 adopt() {                                   # remember a pid we did not start
-    local name="$1" pid="$2"
+    local name="$1" pid="$2" expect
+    expect="$(script_for "$name")"
+    if ! pid_matches "$pid" "$expect"; then
+        warn "$name: pid $pid is not this project's $name - not adopting it"
+        warn "      command: $(ps -o command= -p "$pid" 2>/dev/null || echo unknown)"
+        return 1
+    fi
     printf '%s' "$pid" > "$(pidfile "$name")"
     info "$name: already running (pid $pid, not started by this script - adopted)"
 }
 
 stop_one() {
-    local name="$1"
+    local name="$1" expect
     local pid
     if ! pid="$(pid_of "$name")"; then
         # A pid file that exists but is dead is worth cleaning up and saying so.
         if [ -f "$(pidfile "$name")" ]; then
             rm -f "$(pidfile "$name")"
         fi
+        return 0
+    fi
+    expect="$(script_for "$name")"
+    if ! pid_matches "$pid" "$expect"; then
+        warn "$name: pid $pid no longer looks like $name - removing the stale pid file"
+        rm -f "$(pidfile "$name")"
         return 0
     fi
     kill "$pid" 2>/dev/null || true
@@ -248,7 +291,7 @@ start_one() {
         cmd:*)  existing="$(pid_by_cmd  "${check#cmd:}")" ;;
     esac
     if [ -n "$existing" ]; then
-        adopt "$name" "$existing"
+        adopt "$name" "$existing" || return 1
         return 0
     fi
 
@@ -296,8 +339,10 @@ except Exception:
 }
 
 port_answers() {                            # ready-check for the HTTP services
-    # Silent, and never a failure: this is a question, and "no" is a valid answer.
-    curl -s --max-time 2 -o /dev/null "http://127.0.0.1:$1/" 2>/dev/null || true
+    # Silent, but the exit status is the answer: -f turns an HTTP error into failure too.
+    # Without -f this returned 0 for a closed port as well, so every readiness check and
+    # the "serve.py is not answering" warning were dead.
+    curl -sf --max-time 2 -o /dev/null "http://127.0.0.1:$1/" 2>/dev/null
 }
 
 # --------------------------------------------------------------------------
@@ -424,7 +469,7 @@ cmd_start() {
     # loop. The usage line always said "(only needed for upgrades)"; now the default agrees with it.
     # Start it with ./start.sh ota, or ./start.sh start --ota.
     if [ "${OPT_OTA:-0}" = "1" ] && [ "$OPT_NO_OTA" = "0" ]; then
-        start_one ota "$(port_answers "$OTA_PORT")" "port:$OTA_PORT" \
+        start_one ota "port_answers $OTA_PORT" "port:$OTA_PORT" \
             "$PY_SYS" -u "$ROOT/tools/ota-server/server.py" --port "$OTA_PORT" || true
     fi
 
@@ -441,7 +486,7 @@ cmd_start() {
     fi
 
     # serve.py must be on 0.0.0.0: the device and the phone are other machines.
-    start_one serve "$(port_answers "$VISION_PORT")" "port:$VISION_PORT" \
+    start_one serve "port_answers $VISION_PORT" "port:$VISION_PORT" \
         "$PY_SYS" -u "$ROOT/vision/src/serve.py" --host 0.0.0.0 --port "$VISION_PORT" || true
 
     local source="$OPT_SOURCE"
@@ -557,7 +602,7 @@ cmd_ota() {
         info "ota: already running (pid $pid)"
         return 0
     fi
-    start_one ota "$(port_answers "$OTA_PORT")" "port:$OTA_PORT" \
+    start_one ota "port_answers $OTA_PORT" "port:$OTA_PORT" \
         "$PY_SYS" -u "$ROOT/tools/ota-server/server.py" --port "$OTA_PORT" || true
     local mf="$ROOT/tools/ota-server/manifest.json"
     if [ -f "$mf" ]; then
@@ -727,7 +772,7 @@ cmd_logs() {
     local f
     f="$(logfile "$name")"
     if [ ! -f "$f" ]; then
-        warn "no log for '$name' (looked for $f); names are: serve vision beacon ota"
+        warn "no log for '$name' (looked for $f); names are: serve vision beacon ota label"
         return 1
     fi
     tail -f "$f"
@@ -742,9 +787,20 @@ usage() {
 # --------------------------------------------------------------------------
 
 cmd=""
+LOG_NAME=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        start|stop|restart|status|logs|label|edit) cmd="$1"; shift ;;
+        start|stop|restart|status|label|edit) cmd="$1"; shift ;;
+        # `logs` takes an optional service name. It used to consume the word and leave
+        # nothing for cmd_logs, so `./start.sh logs vision` was rejected as unknown.
+        logs)
+            cmd="logs"
+            shift
+            if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
+                LOG_NAME="$1"
+                shift
+            fi
+            ;;
         --all|-all) OPT_ALL=1; shift ;;
         --ota) OPT_OTA=1; shift ;;
         --beacon) OPT_BEACON=1; shift ;;
@@ -768,5 +824,5 @@ case "$cmd" in
     ota)     cmd_ota ;;
     beacon)  cmd_beacon ;;
     status)  cmd_status ;;
-    logs)    cmd_logs "${1:-}" ;;
+    logs)    cmd_logs "${LOG_NAME:-}" ;;
 esac
