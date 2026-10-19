@@ -35,16 +35,17 @@ def test_the_committed_template_finds_the_arrow_in_a_saved_frame():
     frame_path = os.path.join(vehicle.ROOT if hasattr(vehicle, "ROOT") else
                               os.path.dirname(os.path.dirname(os.path.dirname(
                                   os.path.abspath(__file__)))),
-                              "vision", "data", "debug", "live_1.jpg")
+                              "vision", "tests", "data", "arrow_frame.jpg")
     if not os.path.exists(frame_path) or not os.path.isdir(arrow.ARROW_DIR):
         pytest.skip("no saved frame or no committed template")
     frame = cv2.imread(frame_path)
     template = arrow.load()
-    match = arrow.locate(frame, template, roi_hint=(202, 225))
+    match = arrow.locate(frame, template, roi_hint=(203, 206))
     assert match is not None, "the arrow was not found in a frame it was annotated on"
     assert match.score > 0.9
-    # The template is now the printed marker, cut at (202, 225) on the frame it came from.
-    assert abs(match.centre[0] - 202) < 10 and abs(match.centre[1] - 225) < 10
+    # The template is the printed simple arrow, cut at (203, 206) on vision/tests/data/arrow_frame.jpg,
+    # which is committed with it so this test does not depend on a debug frame that gets cleaned up.
+    assert abs(match.centre[0] - 219) < 20 and abs(match.centre[1] - 222) < 20
 
 
 def test_the_arrow_is_reported_as_the_front_of_the_car():

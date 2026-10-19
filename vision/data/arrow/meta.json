@@ -1,11 +1,21 @@
 {
-  "source": "printed marker 3.5 cm, 36x36 crop of the marker only (2 px outside the black frame)",
+  "source": "printed simple arrow 35mm, 40x40 crop of a live frame (marker + white border)",
   "bbox": [
-    183,
-    206,
-    38,
-    38
+    187,
+    190,
+    40,
+    40
   ],
   "reference_angle_deg": 0.0,
-  "note": "只用标记本身，不带车顶。实测：34x34/36x36 模板在车转 180° 后仍得 0.897 ✓；带车顶的 50x50 反而只有 0.757 ✗，因为斜视时车顶的透视会随朝向改变。"
+  "measured": {
+    "rotation_sweep_1deg": {
+      "n": 360,
+      "min": 0.896,
+      "p10": 0.907,
+      "median": 0.934,
+      "max": 0.995,
+      "below_threshold": 0
+    },
+    "note": "标记转 θ 度，读数 = -θ；全部 360 个角度都在阈值 0.85 以上"
+  }
 }
