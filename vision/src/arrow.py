@@ -128,6 +128,7 @@ def find_in(grey: np.ndarray, template: _Template, origin: Tuple[int, int] = (0,
 
     # Refine around the coarse winner: rotations are not fine enough at 30 degrees.
     fine_best = best
+    fine_res = None
     d = best[1] - span
     while d <= best[1] + span:
         t, m = template.at(d)
@@ -136,12 +137,48 @@ def find_in(grey: np.ndarray, template: _Template, origin: Tuple[int, int] = (0,
             _, mx, _, loc = cv2.minMaxLoc(res)
             if mx > fine_best[0]:
                 fine_best = (float(mx), d, loc)
+                fine_res = res
         d += fine
     score, deg, loc = fine_best
+
+    # Sub-degree: the fine sweep is 5 degrees apart, so the reported heading used to jump in
+    # 5 degree steps and the drawn car stepped with it. The score curve near the peak is
+    # smooth, so a parabola through (deg-fine, deg, deg+fine) recovers the fraction. Cheap:
+    # two extra correlations.
+    if fine_res is not None:
+        below, _ = template.at(deg - fine)
+        above, _ = template.at(deg + fine)
+        if (below.shape[0] < img.shape[0] and below.shape[1] < img.shape[1]
+                and above.shape[0] < img.shape[0] and above.shape[1] < img.shape[1]):
+            s_below = cv2.minMaxLoc(cv2.matchTemplate(
+                img, below, cv2.TM_CCOEFF_NORMED, mask=template.at(deg - fine)[1]))[1]
+            s_above = cv2.minMaxLoc(cv2.matchTemplate(
+                img, above, cv2.TM_CCOEFF_NORMED, mask=template.at(deg + fine)[1]))[1]
+            den = s_below - 2.0 * score + s_above
+            if den != 0.0:
+                step = 0.5 * (s_below - s_above) / den
+                if abs(step) <= 0.5:
+                    deg += step * fine
     t, _m = template.at(deg)
     h, w = t.shape
-    cx = origin[0] + loc[0] + w / 2.0
-    cy = origin[1] + loc[1] + h / 2.0
+    # Sub-pixel: the match lands on an integer pixel, so the car advanced in 1 px steps
+    # even though the picture moved continuously. A parabola through the correlation peak
+    # and its two neighbours recovers the fraction, which is what makes the marker glide.
+    dx = dy = 0.0
+    if fine_res is not None:
+        px, py = loc
+        if 0 < px < fine_res.shape[1] - 1:
+            a, b, c = fine_res[py, px - 1], fine_res[py, px], fine_res[py, px + 1]
+            den = a - 2.0 * b + c
+            if den != 0.0:
+                dx = max(-0.5, min(0.5, 0.5 * (a - c) / den))
+        if 0 < py < fine_res.shape[0] - 1:
+            a, b, c = fine_res[py - 1, px], fine_res[py, px], fine_res[py + 1, px]
+            den = a - 2.0 * b + c
+            if den != 0.0:
+                dy = max(-0.5, min(0.5, 0.5 * (a - c) / den))
+    cx = origin[0] + loc[0] + dx + w / 2.0
+    cy = origin[1] + loc[1] + dy + h / 2.0
     # The template was cut with the arrow pointing along `reference_angle`; a match at
     # `deg` means the arrow is at reference - deg (OpenCV rotates counter-clockwise).
     heading = (template.reference_angle - deg) % 360.0
