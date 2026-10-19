@@ -199,6 +199,53 @@ static esp_err_t index_handler(httpd_req_t *req)
  *
  *   curl -X POST http://<board>/api/bench
  */
+/*
+ * Read-only snapshot of the registers that decide the frame rate. Nothing is written.
+ *
+ * Parsed alongside the raw hex because the interesting numbers are Hz-adjacent: HTS and VTS set the
+ * frame length, exposure is what the AEC has actually chosen (in lines), and the AEC max-exposure
+ * registers say whether the sensor is allowed to stretch the exposure past VTS - which is the
+ * difference between a fixed frame rate and one that drops in dim light.
+ */
+static void read_regs(char *out, size_t n)
+{
+    uint8_t r3034 = camera_peek_reg(0x3034), r3035 = camera_peek_reg(0x3035);
+    uint8_t r3036 = camera_peek_reg(0x3036), r3037 = camera_peek_reg(0x3037);
+    uint8_t r3108 = camera_peek_reg(0x3108), r3824 = camera_peek_reg(0x3824);
+    uint8_t r460c = camera_peek_reg(0x460c);
+    uint8_t hc = camera_peek_reg(0x380c), hl = camera_peek_reg(0x380d);
+    uint8_t vc = camera_peek_reg(0x380e), vl = camera_peek_reg(0x380f);
+    uint8_t e0 = camera_peek_reg(0x3500), e1 = camera_peek_reg(0x3501), e2 = camera_peek_reg(0x3502);
+    uint8_t man = camera_peek_reg(0x3503);
+    uint8_t g0 = camera_peek_reg(0x350a), g1 = camera_peek_reg(0x350b);
+    uint8_t a0 = camera_peek_reg(0x3a00);
+    uint8_t m0 = camera_peek_reg(0x3a02), m1 = camera_peek_reg(0x3a03);
+    uint8_t n0 = camera_peek_reg(0x3a14), n1 = camera_peek_reg(0x3a15);
+    uint8_t c0 = camera_peek_reg(0x3a18), c1 = camera_peek_reg(0x3a19);
+
+    int hts = (hc << 8) | hl;
+    int vts = (vc << 8) | vl;
+    int exposure = ((e0 & 0x0F) << 12) | (e1 << 4) | ((e2 >> 4) & 0x0F);
+    int gain = (g0 << 8) | g1;
+    int aec_max = (m0 << 8) | m1;
+    int aec_max_alt = (n0 << 8) | n1;
+    int gain_ceil = ((c0 & 0x03) << 8) | c1;
+
+    snprintf(out, n,
+        "{\"3034\":\"0x%02x\",\"3035\":\"0x%02x\",\"3036\":\"0x%02x\",\"3037\":\"0x%02x\","
+        "\"3108\":\"0x%02x\",\"3824\":\"0x%02x\",\"460c\":\"0x%02x\","
+        "\"380c_d\":\"0x%02x%02x\",\"380e_f\":\"0x%02x%02x\","
+        "\"3500_02\":\"0x%02x%02x%02x\",\"3503\":\"0x%02x\",\"350a_b\":\"0x%02x%02x\","
+        "\"3a00\":\"0x%02x\",\"3a02_03\":\"0x%02x%02x\",\"3a14_15\":\"0x%02x%02x\","
+        "\"3a18_19\":\"0x%02x%02x\","
+        "\"hts\":%d,\"vts\":%d,\"exposure\":%d,\"gain\":%d,"
+        "\"aec_max\":%d,\"aec_max_alt\":%d,\"gain_ceiling\":%d}",
+        r3034, r3035, r3036, r3037, r3108, r3824, r460c,
+        hc, hl, vc, vl, e0, e1, e2, man, g0, g1,
+        a0, m0, m1, n0, n1, c0, c1,
+        hts, vts, exposure, gain, aec_max, aec_max_alt, gain_ceil);
+}
+
 static esp_err_t bench_handler(httpd_req_t *req)
 {
     if (s_clients > 0) {
@@ -211,8 +258,16 @@ static esp_err_t bench_handler(httpd_req_t *req)
     unsigned long long bytes = 0, min_b = 0, max_b = 0;
     long long sum_get = 0, min_get = 0, max_get = 0;
 
+    static char regs_before[640], regs_during[640], regs_after[640];
+    read_regs(regs_before, sizeof(regs_before));
+    bool sampled = false;
+
     int64_t t0 = esp_timer_get_time();
     while (esp_timer_get_time() - t0 < (int64_t)seconds * 1000000) {
+        if (!sampled && esp_timer_get_time() - t0 >= (int64_t)seconds * 500000) {
+            read_regs(regs_during, sizeof(regs_during));
+            sampled = true;
+        }
         int64_t g0 = esp_timer_get_time();
         camera_fb_t *fb = esp_camera_fb_get();
         int64_t g1 = esp_timer_get_time();
@@ -231,17 +286,24 @@ static esp_err_t bench_handler(httpd_req_t *req)
     }
     int64_t elapsed = esp_timer_get_time() - t0;
 
-    char body[512];
+    read_regs(regs_after, sizeof(regs_after));
+
+    char body[2048];
     int n = snprintf(body, sizeof(body),
         "{\"mode\":\"camera_only\",\"seconds\":%d,\"elapsed_ms\":%lld,\"frames\":%u,"
         "\"fps\":%.2f,\"avg_frame_bytes\":%llu,\"min_frame_bytes\":%llu,"
         "\"max_frame_bytes\":%llu,\"avg_fb_get_us\":%.0f,"
-        "\"min_fb_get_us\":%lld,\"max_fb_get_us\":%lld,\"clients\":%d}\n",
+        "\"min_fb_get_us\":%lld,\"max_fb_get_us\":%lld,\"clients\":%d,\"uptime_s\":%u,"
+        "\"regs_before\":%s,\"regs_during\":%s,\"regs_after\":%s}\n",
         seconds, (long long)(elapsed / 1000), frames,
         frames > 0 ? (double)frames * 1000000.0 / (double)elapsed : 0.0,
         frames ? (unsigned long long)(bytes / frames) : 0ULL, min_b, max_b,
         frames ? (double)sum_get / (double)frames : 0.0,
-        (long long)min_get, (long long)max_get, (int)s_clients);
+        (long long)min_get, (long long)max_get, (int)s_clients,
+        (unsigned)(esp_timer_get_time() / 1000000),
+        regs_before[0] ? regs_before : "null",
+        regs_during[0] ? regs_during : "null",
+        regs_after[0] ? regs_after : "null");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, body, n);

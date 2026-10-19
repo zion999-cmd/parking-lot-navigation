@@ -13,6 +13,10 @@ idf_component_register(
         "wifi.cpp"
         "provisioning.cpp"
     INCLUDE_DIRS "."
+    # Read-only register peeks for the frame-rate investigation need the driver's SCCB header.
+    # Diagnostic only; nothing in the product calls camera_peek_reg().
+    PRIV_INCLUDE_DIRS "."
+                      "${CMAKE_SOURCE_DIR}/managed_components/espressif__esp32-camera/driver/private_include"
     PRIV_REQUIRES
         esp_wifi
         esp_netif

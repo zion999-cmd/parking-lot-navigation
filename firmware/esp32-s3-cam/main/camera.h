@@ -26,3 +26,9 @@ const char *camera_pixel_format_name(void);
 
 /** Configured JPEG quality (0-63, lower means better). */
 int camera_jpeg_quality(void);
+
+/** One sensor register, read-only (diagnostics). */
+uint8_t camera_peek_reg(uint16_t reg);
+
+/** AEC exposure in lines, and AGC gain - diagnostics for the frame-rate work. */
+

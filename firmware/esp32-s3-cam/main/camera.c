@@ -1,4 +1,5 @@
 #include "camera.h"
+#include "sccb.h"
 
 #include <stdio.h>
 
@@ -221,6 +222,21 @@ const char *camera_resolution_name(void)
 const char *camera_pixel_format_name(void)
 {
     return s_format;
+}
+
+/*
+ * Read one sensor register. Diagnostics only; nothing here writes a register.
+ *
+ * The public sensor_t has setters but no getters, so reading the AEC/PLL/timing registers back needs
+ * the driver's SCCB API. That is why main/CMakeLists.txt carries one private include path.
+ */
+uint8_t camera_peek_reg(uint16_t reg)
+{
+    sensor_t *s = esp_camera_sensor_get();
+    if (s == NULL) {
+        return 0xFF;
+    }
+    return SCCB_Read16(s->slv_addr, reg);
 }
 
 int camera_jpeg_quality(void)
