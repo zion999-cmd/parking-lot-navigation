@@ -903,6 +903,13 @@ def _shape(values: np.ndarray) -> np.ndarray:
 _ARROW_TEMPLATE = None
 
 
+# Where the arrow was last seen, and when the last wide search ran. The arrow moves a few
+# pixels per frame, so the next one is nearly always inside a 140 px window of the last.
+_last_centre: List[Optional[float]] = [None, None]
+_last_centre_us = 0.0
+WIDE_SEARCH_MIN_S = 2.0      # a whole-frame sweep is ~1 s, so not more often than this
+
+
 def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
                keep_border: bool = False,
                close_kernel: int = CLOSE_KERNEL) -> List[VehiclePose]:
@@ -930,17 +937,27 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
             print("  arrow template missing, hero detection is off: %s" % exc, file=sys.stderr)
             return []
 
-    hint = None
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    paint = red_mask(hsv, close_kernel)
-    count, labels, stats, centroids = cv2.connectedComponentsWithStats(paint, 8)
-    if count > 1:
-        biggest = max(range(1, count), key=lambda k: stats[k, cv2.CC_STAT_AREA])
-        hint = (float(centroids[biggest][0]), float(centroids[biggest][1]))
-
-    match = arrow.locate(frame, _ARROW_TEMPLATE, roi_hint=hint)
+    # No colour hint any more: the arrow is the only thing that decides where the car is.
+    #
+    # The yellow paint used to say "look around here", but the picture holds more than one
+    # yellow thing (a bay marker and the car took turns being the largest blob), so the hint
+    # flipped between them and the arrow was only found in half the frames - 0.921 where the
+    # hint was the car, 0.613 where it was not. Removing it also removes the last part of the
+    # car detector that depended on the paint.
+    #
+    # A whole-frame sweep costs about a second, so the search goes around the last place the
+    # arrow was; the wide search is the recovery path, rate-limited because it is expensive.
+    global _last_centre_us
+    match = None
+    if _last_centre[0] is not None:
+        match = arrow.locate(frame, _ARROW_TEMPLATE, roi_hint=_last_centre)
+    now_us = time.monotonic()
+    if match is None and now_us - _last_centre_us >= WIDE_SEARCH_MIN_S:
+        _last_centre_us = now_us
+        match = arrow.locate(frame, _ARROW_TEMPLATE, roi_hint=None)
     if match is None:
         return []
+    _last_centre[0], _last_centre[1] = match.centre[0], match.centre[1]
 
     xs = [c[0] for c in match.corners]
     ys = [c[1] for c in match.corners]
