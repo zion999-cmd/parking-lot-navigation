@@ -6,6 +6,7 @@
 #   ./start.sh status          one screen: what is up, and will the strip work
 #   ./start.sh stop            stop what this script started
 #   ./start.sh restart
+#   ./start.sh edit [--source URL]   open the bay editor (stops the stack, restarts it on exit)
 #   ./start.sh logs [name]     follow one log (serve, vision, beacon, ota, label)
 #   ./start.sh label           start the labelling page (:8030) as a managed service
 #   ./start.sh beacon          start the discovery beacon (UDP 9999) - NOT started by default: the
@@ -378,6 +379,40 @@ print_services() {
     say ""
 }
 
+# One command to fix the bays.
+#
+# The editor is the same main.py, but it needs a window to take keys ('e' to move
+# bays, 'r' for a reference). The background vision holds the camera's single
+# stream slot, so it has to step aside first - otherwise the editor would be the
+# second viewer and the board would (correctly) refuse it with 409.
+cmd_edit() {
+    local source="$OPT_SOURCE"
+    if [ -z "$source" ]; then
+        say "  finding the camera on the LAN ..."
+        source="$(find_camera)" || source=""
+        if [ -z "$source" ]; then
+            warn "no camera found. give it explicitly:  ./start.sh edit --source http://<ip>/stream"
+            return 1
+        fi
+    fi
+
+    cmd_stop 0 >/dev/null 2>&1 || true
+
+    say ""
+    say "  ---------------------------------------------------------------"
+    say "   editor window opening - it is the only viewer, so nothing is"
+    say "   being split. Keys:  e = move bays   r = capture reference"
+    say "                       a = auto-detect  q = quit"
+    say "   When you quit, the background stack restarts by itself."
+    say "  ---------------------------------------------------------------"
+    say ""
+    "$PY_VISION" -u "$ROOT/vision/src/main.py" --source "$source" || true
+
+    say ""
+    say "  editor closed - restarting the background stack"
+    cmd_start
+}
+
 cmd_start() {
     mkdir -p "$RUN"
     say "starting stack (logs in $RUN/)"
@@ -726,6 +761,7 @@ case "$cmd" in
     start)   cmd_start ;;
     stop)    cmd_stop "${OPT_ALL:-0}" ;;
     restart) cmd_stop "${OPT_ALL:-0}"; cmd_start ;;
+    edit)    cmd_edit ;;
     label)   cmd_label ;;
     ota)     cmd_ota ;;
     beacon)  cmd_beacon ;;
