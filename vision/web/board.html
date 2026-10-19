@@ -270,6 +270,25 @@ function heroAsLast() {
 }
 
 // ---------------------------------------------------------------- planning
+// Stop navigating. A route document is only ever written, never deleted, so the clear form is
+// how it says "there is no target any more" - which is also what turns the strip's yellow off.
+async function cancelNavigation() {
+  const mine = ++planSeq;
+  PICKED = null;
+  try {
+    const r = await fetch(`/api/route?clear=1&t=${Date.now()}`);
+    ROUTE = r.ok ? await r.json() : { ok: false, code: "cleared", nodes: [] };
+  } catch (err) {
+    ROUTE = { ok: false, code: "cleared", nodes: [] };
+  }
+  if (mine !== planSeq) return;
+  LAST = heroAsLast();
+  redraw();
+  const el = document.getElementById("message");
+  el.className = "";
+  el.textContent = "已取消导航（再点任意车位可以重新开始）";
+}
+
 async function planSpot(id, quiet) {
   const mine = ++planSeq;
   PICKED = String(id);
@@ -324,7 +343,8 @@ function stats() {
 // ---------------------------------------------------------------- interaction
 cv.addEventListener("click", evt => {
   const p = canvasPoint(evt), s = bayAt(p.x, p.y);
-  if (s) planSpot(s.id);
+    // Click a bay to route to it; click the same bay again to stop.
+    if (PICKED === String(s.id)) cancelNavigation(); else planSpot(s.id);
 });
 cv.addEventListener("mousemove", evt => {
   const p = canvasPoint(evt), s = bayAt(p.x, p.y);
