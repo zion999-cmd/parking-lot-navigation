@@ -30,5 +30,6 @@
   "front_is_the_painted_end": true,
   "paint_side_gap": 6,
   "paint_side_reach": 0,
-  "paint_side_min_drop": 40
+  "paint_side_min_drop": 40,
+  "_superseded": "The paint/attach/paint_side keys below belong to the detector that was replaced on 2026-10-20: the hero car is found by the roof arrow (src/arrow.py), and only red_mask() still uses this file, as the ROI hint for the arrow search. Kept rather than deleted because vehicle_config() still reads it and a running detector should not break because a config file changed shape. See project.md entries 22-24."
 }
