@@ -572,13 +572,15 @@ cmd_label() {
         info "label: already running (pid $pid) - http://127.0.0.1:$port"
         return 0
     fi
-    if port_answers "$VISION_PORT"; then
-        warn "the vision service is running and holds the camera stream"
-        say "     each extra client takes a share of the camera's frames (measured: 12 -> 3.5 fps)."
-        say "     ./start.sh stop          first, then ./start.sh label, then ./start.sh start"
+    # The labeller reads the PC-side RAW relay (:8021), not the board. The board has one
+    # frame queue and allows one viewer (vision); :8021 is vision re-serving the unannotated
+    # picture, so opening the labeller costs the board nothing and needs nothing stopped.
+    local lsrc="${OPT_SOURCE:-http://127.0.0.1:${RAW_PORT:-8021}/stream}"
+    if ! port_answers "${RAW_PORT:-8021}"; then
+        warn "no raw relay on :${RAW_PORT:-8021} - start the stack first: ./start.sh start"
     fi
     start_one label "" "cmd:tools/label_server.py" \
-        "$PY_VISION" "$ROOT/tools/label_server.py" --port "$port" || true
+        "$PY_VISION" "$ROOT/tools/label_server.py" --port "$port" --source "$lsrc" || true
     say "  open: http://127.0.0.1:$port"
 }
 

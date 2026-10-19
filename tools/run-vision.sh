@@ -25,6 +25,8 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PY_VISION="${PY_VISION:-/usr/local/Caskroom/miniconda/base/envs/vision-dev/bin/python}"
 ANNOTATED_PORT="${ANNOTATED_PORT:-8020}"
+# The unannotated picture, refanned-out on this PC so the board keeps its single viewer.
+RAW_PORT="${RAW_PORT:-8021}"
 SOURCE="${1:?usage: run-vision.sh http://<camera>/stream}"
 
 child=""
@@ -40,7 +42,8 @@ while true; do
     attempt=$((attempt + 1))
     started=$(date +%s)
     "$PY_VISION" -u "$ROOT/vision/src/main.py" \
-        --source "$SOURCE" --annotated-port "$ANNOTATED_PORT" &
+        --source "$SOURCE" --annotated-port "$ANNOTATED_PORT" \
+        --raw-port "$RAW_PORT" &
     child=$!
     wait "$child"
     rc=$?

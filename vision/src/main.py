@@ -633,6 +633,11 @@ def main() -> int:
                     help="do not re-emit out/parking_map.json at startup. It is emitted by default "
                          "so that the pages, which click the emitted map, cannot end up describing "
                          "a different car park from the picture drawn here")
+    ap.add_argument("--raw-port", type=int, default=0,
+                    help="also serve the UNANNOTATED picture on this port, so browsers and the "
+                         "labeller read from this PC instead of the board. The board has one frame "
+                         "queue and therefore allows one viewer; this is how N people look without "
+                         "splitting its frames.")
     ap.add_argument("--annotated-port", type=int, default=0,
                     help="serve the analysed picture as an MJPEG stream on this port (0 = off). "
                          "The board page shows this instead of the camera's own /stream, so the "
@@ -798,6 +803,10 @@ def main() -> int:
     look_for_car = not args.no_vehicle
     show_car = True
     live = None
+    raw_view = None
+    if args.raw_port:
+        raw_view = live_view.LiveView(args.raw_port, quality=args.annotated_quality)
+        print(f"raw stream   : {raw_view.url}   <- 原始画面（无标注），给标注工具/浏览器用")
     if args.annotated_port:
         live = live_view.LiveView(args.annotated_port, quality=args.annotated_quality)
         print(f"analysed stream: {live.url}")
@@ -809,6 +818,8 @@ def main() -> int:
             print(f"      {sys.executable} src/calibration.py --frame data/reference/reference.jpg")
             print("  （要这个进程自己开窗，加 --window）")
         live.start()
+    if raw_view is not None:
+        raw_view.start()
     # Smooths the readings: the car does not turn instantly, and a single frame's shape is
     # noisy enough to make the front appear and disappear. See vehicle.VehicleTracker.
     car_tracker = vehicle.VehicleTracker()
@@ -979,6 +990,8 @@ def main() -> int:
                                   pose if show_car else None, location)
                 if live is not None:
                     live.publish(canvas)      # before the HUD: the board writes its own labels
+                    if raw_view is not None:
+                        raw_view.publish(frame)   # unannotated: what the labeller traces
             if not args.headless:
                 if aligner is None:
                     align_text = "align off"
@@ -1106,6 +1119,8 @@ def main() -> int:
         print("\ninterrupted")
     finally:
         if live is not None:
+            if raw_view is not None:
+                raw_view.stop()
             live.stop()
         if csv_fh:
             csv_fh.close()
