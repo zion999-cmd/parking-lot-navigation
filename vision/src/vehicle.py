@@ -888,6 +888,19 @@ def _shape(values: np.ndarray) -> np.ndarray:
     return v / spread if spread > 1e-9 else v
 
 
+# Where the hero marker can be trusted, measured rather than assumed.
+#
+# Six hand annotations, one per position, scored against each other: the marker's own
+# template finds it at 1.000 in the middle of the table and at 0.5-0.6 near the right edge,
+# where the same marker measures 453 in Laplacian variance against 1764 in the middle - four
+# times blurrier - and 25% darker. Two crops of the same marker correlate only 0.242 there.
+# That is the lens's depth of field, not the algorithm, so above TRUST_MAX_X the answer is
+# "not visible here" rather than a guess.
+TRUST_MIN_X = 60
+TRUST_MAX_X = 700
+TRUST_MIN_Y = 80
+TRUST_MAX_Y = 540
+
 _ARROW_TEMPLATE = None
 
 
@@ -976,6 +989,12 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
         return []
     _prev_centre[0], _prev_centre[1] = _last_centre[0], _last_centre[1]
     _last_centre[0], _last_centre[1] = match.centre[0], match.centre[1]
+
+    if not (TRUST_MIN_X <= match.centre[0] <= TRUST_MAX_X
+            and TRUST_MIN_Y <= match.centre[1] <= TRUST_MAX_Y):
+        # Outside the region where the template was measured to work. Saying "not visible"
+        # is honest; a 0.5 match blown up by the wrong landmark is not.
+        return []
 
     xs = [c[0] for c in match.corners]
     ys = [c[1] for c in match.corners]

@@ -40,12 +40,12 @@ def test_the_committed_template_finds_the_arrow_in_a_saved_frame():
         pytest.skip("no saved frame or no committed template")
     frame = cv2.imread(frame_path)
     template = arrow.load()
-    match = arrow.locate(frame, template, roi_hint=(203, 206))
+    match = arrow.locate(frame, template, roi_hint=(209, 217))
     assert match is not None, "the arrow was not found in a frame it was annotated on"
     assert match.score > 0.9
     # The template is the printed simple arrow, cut at (203, 206) on vision/tests/data/arrow_frame.jpg,
     # which is committed with it so this test does not depend on a debug frame that gets cleaned up.
-    assert abs(match.centre[0] - 219) < 20 and abs(match.centre[1] - 222) < 20
+    assert abs(match.centre[0] - 209) < 12 and abs(match.centre[1] - 217) < 12
 
 
 def test_the_arrow_is_reported_as_the_front_of_the_car():
