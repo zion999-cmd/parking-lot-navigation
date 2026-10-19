@@ -1,11 +1,11 @@
 {
-  "source": "ann-20261020-002624",
+  "source": "printed marker 3.5 cm, cropped from a live frame 2026-10-20",
   "bbox": [
-    132,
-    478,
-    43,
-    35
+    177,
+    200,
+    50,
+    50
   ],
   "reference_angle_deg": 0.0,
-  "note": "\u8f66\u5934\u671d\u53f3\u65f6\u6807\u6ce8\u3002\u5339\u914d\u89d2\u5ea6 = \u6a21\u677f\u989d\u5916\u65cb\u8f6c\u89d2; \u8f66\u5934\u671d\u5411 = reference_angle - \u5339\u914d\u89d2"
+  "note": "打印标记（黑墨白纸 + 黑框 + 尾部白槽）贴 3.5cm；模板取自实时帧，含白静区与少量车顶做上下文。标记本身在帧里约 34x34 px。"
 }
