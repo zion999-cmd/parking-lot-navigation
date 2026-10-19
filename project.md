@@ -2,8 +2,9 @@
 
 **状态 / 工具层 / 使用方法**三件事都在这一页。
 深入细节看 `README.md`（硬件证据链、设计取舍、踩坑全过程）和 `vision/README.md`。
+代码审计记录：`docs/audit-2026-10-20.md`（含结构总结、修复清单与剩余风险）。
 
-当前固件版本：**0.2.11**　｜　车位标定：**48 个**（`vision/config/parking_spots.json`）
+当前固件版本：**0.2.55**　｜　车位标定：**48 个**（`vision/config/parking_spots.json`）
 
 ---
 
