@@ -742,7 +742,7 @@ usage() {
 cmd=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        start|stop|restart|status|logs|label) cmd="$1"; shift ;;
+        start|stop|restart|status|logs|label|edit) cmd="$1"; shift ;;
         --all|-all) OPT_ALL=1; shift ;;
         --ota) OPT_OTA=1; shift ;;
         --beacon) OPT_BEACON=1; shift ;;
