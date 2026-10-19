@@ -95,3 +95,24 @@ def test_with_no_map_the_location_is_unknown_not_a_guess():
     pose = vehicle.VehiclePose(x=1.0, y=1.0, heading=0.0, area=10, elongation=1.0,
                                fill=1.0, bbox=(0, 0, 5, 5))
     assert vehicle.location_of(pose, None)["kind"] == "unknown"
+
+
+def test_red_mask_still_accepts_every_argument_combination():
+    """The paint mask is still the arrow search's ROI hint, and it has branches.
+
+    This exists because a dead-code sweep deleted helpers that red_mask still called
+    (paint_side, _ellipse) and nothing failed: the tests only ever called it with its
+    default arguments, while main.py reaches the open_kernel branch and vision then
+    crashed on the first frame. Calling every combination is the cheap fix for that.
+    """
+    import numpy as np
+
+    frame = np.full((60, 80, 3), 40, np.uint8)
+    cv2.rectangle(frame, (10, 10), (70, 50), (40, 200, 230), -1)   # BGR of a yellow blob
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+    for kwargs in ({}, {"open_kernel": 5}, {"close_kernel": None},
+                   {"close_kernel": None, "open_kernel": 3}):
+        mask = vehicle.red_mask(hsv, **kwargs)
+        assert mask.shape == frame.shape[:2]
+        assert mask.sum() > 0, "red_mask returned nothing for %s" % kwargs

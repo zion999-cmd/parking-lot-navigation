@@ -115,6 +115,11 @@ RED_HUE_RANGES: Tuple[Tuple[Tuple[int, int, int], Tuple[int, int, int]], ...] = 
     ((176, 90, 60), (180, 255, 255)),
 )
 
+# How much wider one end has to be before the front is claimed at all. Measured on this car
+# either side of a 180 degree turn: +0.17 and -0.15, with a frame-to-frame spread of +-0.05.
+# Below this the honest answer is "front unknown" rather than a coin flip.
+MIN_TAPER = 0.04
+
 # Below this a red blob is a sticker or a reflection, not a car.
 DEFAULT_MIN_AREA = 80
 
@@ -196,6 +201,16 @@ class VehiclePose:
         else:
             out["front_heading"] = None
         return out
+
+
+def _ellipse(radius: int):
+    size = max(1, 2 * radius + 1)
+    return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
+
+
+def _ellipse(radius: int):
+    size = max(1, 2 * radius + 1)
+    return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
 
 
 def merge_near_components(mask: np.ndarray, gap_fraction: float = 0.9,
@@ -280,6 +295,246 @@ def merge_near_components(mask: np.ndarray, gap_fraction: float = 0.9,
         for (ax,ay),(bx,by) in zip(chain,chain[1:]):
             cv2.line(out,(int(ax),int(ay)),(int(bx),int(by)),255,3,cv2.LINE_AA)
     return out
+
+
+# How much bigger than the paint the attached region may be before it is treated as a failure.
+# 6.6x is a good attachment on the real car; 22.7x is the same car leaking into the road.
+ATTACH_MAX_GROWTH = 8.0
+
+
+def _reach_for(reach: int, w: int, h: int) -> int:
+    """How far past the paint to look, in pixels. 0 means "as far as the car could be".
+
+    A fixed 45 px was the first value and it cut the cabin in half: the paint is 41 px long and
+    the cabin reaches 90 px past it, so the mask stopped mid-cabin and the reading came out at the
+    nose's centre plus a bit. The car is one paint plus roughly one cabin, so 2.2x the paint's
+    longer side covers it with room.
+    """
+    return reach if reach > 0 else int(2.2 * max(w, h)) + 1
+
+
+def _largest_component(mask: np.ndarray) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
+    """The biggest blob in a mask and its bounding box.
+
+    Not np.nonzero(mask) over the whole thing: a mask can hold more than one yellow object - a
+    bay marking, a reflection - and the bounding box of their union is not the car's. Measured on
+    a live frame: the paint's own bbox is 29x31, the union's was x0..460 y144..442, which put
+    every one of the four sample boxes somewhere else entirely.
+    """
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    if count <= 1:
+        return np.zeros_like(mask), (0, 0, 0, 0)
+    i = 1 + int(np.argmax(stats[1:, 4]))
+    x, y, w, h = (int(stats[i, 0]), int(stats[i, 1]), int(stats[i, 2]), int(stats[i, 3]))
+    return (np.where(labels == i, 255, 0).astype(mask.dtype), (x, y, x + w - 1, y + h - 1))
+
+
+def _paint_half_width(blob: np.ndarray) -> float:
+    """Half the width of the paint, in a way that does not change when the car is turned.
+
+    The first attempt used half the bounding box diagonal and the rotation sweep caught it: a
+    41x41 paint turned 45 degrees has a 58x58 bounding box, so the corridor came out 115 px wide
+    on a car 40 px across and swallowed the road (area 12,586 px against the car's 5,495) - the
+    blob went square and lost its axis at every angle. Half the square root of the area is the
+    same number at any rotation, and is the true half-width when the paint is square.
+    """
+    return 0.5 * math.sqrt(max(float(np.count_nonzero(blob)), 1.0))
+
+
+# The directions sampled around the paint: every 22.5 degrees, so a car at any angle has one ray
+# pointing down its own long axis. Four axis-aligned boxes were the first version, and a rotation
+# sweep - the acceptance test written before the code - showed they only work when the car is
+# level: at 15, 30, 45 degrees the cabin is beyond a corner, none of the four boxes reached it and
+# the mask fell back to the paint alone (1,947 px against 5,495 level). Measured, not guessed.
+_RAY_COUNT = 16
+# Rays outside this cone are treated as "the road" when judging how dark the darkest ray is.
+# Wide enough that the cabin, which spans two or three rays, cannot be counted as the reference.
+_RAY_CONE_DEG = 40.0
+
+
+def _ray_mask(shape, cx, cy, angle_deg, gap, reach, half_width):
+    """The pixels on a ray: a rectangle `gap` px out from (cx, cy), `reach` long, 2*half wide."""
+    radians = math.radians(angle_deg)
+    ux, uy = math.cos(radians), math.sin(radians)
+    nx, ny = -uy, ux                                     # perpendicular
+    ends = []
+    for distance in (gap, gap + reach):
+        bx, by = cx + ux * distance, cy + uy * distance
+        ends.append((bx + nx * half_width, by + ny * half_width))
+        ends.append((bx - nx * half_width, by - ny * half_width))
+    quad = np.array([ends[0], ends[1], ends[3], ends[2]], np.int32)
+    out = np.zeros(shape, np.uint8)
+    cv2.fillPoly(out, [quad], 255)
+    return out
+
+
+def paint_side(mask: np.ndarray, value: np.ndarray, gap: int = 6, reach: int = 0,
+               min_drop: int = 40) -> Optional[float]:
+    """The direction of the dark side of the paint - the cabin - or None if there is none.
+
+    Four attempts to find this car's black cabin failed by asking a global question: where is
+    everything dark (the road is full of dark patches), or how dark is the cabin relative to the
+    road (the answer moved between frames). This asks a local one instead: **the paint is one end
+    of the car, so which way from the paint is it dark?**
+
+    Measured on the real car, level, one frame: right V=78, above 181, left 178, below 173, road
+    186. A 20:1 separation that did not move with the threshold (20, 30 and 40 levels all gave the
+    same answer). That is what the earlier attempts lacked.
+
+    The answer is an angle in 0..360, not one of four names, because a car can be parked at any
+    angle and the four-name version only worked when it was level.
+    """
+    blob, _ = _largest_component(mask)
+    ys, xs = np.nonzero(blob)
+    if ys.size == 0:
+        return None
+    cx, cy = float(xs.mean()), float(ys.mean())
+    # The ray is as wide as the paint is, so it cannot swallow the road on either side of the car.
+    half = _paint_half_width(blob)
+    reach = _reach_for(reach, int(xs.max() - xs.min()), int(ys.max() - ys.min()))
+
+    levels = {}
+    for k in range(_RAY_COUNT):
+        angle = 360.0 * k / _RAY_COUNT
+        ray = _ray_mask(value.shape, cx, cy, angle, gap, reach, half)
+        sample = value[(ray > 0) & (blob == 0)]
+        if sample.size >= 50:
+            levels[angle] = float(np.median(sample))
+
+    if len(levels) < _RAY_COUNT // 2:
+        return None
+
+    best = min(levels, key=lambda a: levels[a])
+    others = [v for a, v in levels.items() if _ray_gap(a, best) > _RAY_CONE_DEG]
+    if not others:
+        return None
+    reference = float(np.median(others))
+    if reference - levels[best] < min_drop:
+        return None                          # no direction is dark enough: this is just the paint
+    return best
+
+
+def _ray_gap(a: float, b: float) -> float:
+    """Angular distance between two ray directions, 0..180."""
+    return abs((a - b + 180.0) % 360.0 - 180.0)
+
+
+def attach_paint_side(mask: np.ndarray, value: np.ndarray, angle: float, gap: int = 6,
+                      reach: int = 0, min_drop: int = 40) -> np.ndarray:
+    """The paint plus the dark region beyond it in direction `angle`, kept to the car's own width.
+
+    Two passes, because one is not enough and the measurements say so:
+
+    Pass one looks in a generous probe, wide enough that the 22.5-degree quantisation of the rays
+    cannot miss the cabin even if the car is diagonal and the cabin drifts sideways over the
+    length of the probe. That probe is deliberately too wide to use as the answer: on the saved
+    frame it came out 36.6 px across on a car 31 px tall, swallowed the road above and below the
+    car, and the box went from 91x31 to 84x38 - shorter and stubbier, elongation 2.99 down to
+    1.94. That is the regression this function exists to undo.
+
+    Pass two measures the car's own axis - the direction from the paint to the centroid of what
+    pass one found - and re-cuts the region to a band of the paint's own width along that axis.
+    The shadow lies along the car, not across it, so this is what removes it.
+    """
+    blob, _ = _largest_component(mask)
+    ys, xs = np.nonzero(blob)
+    if ys.size == 0:
+        return mask
+    cx, cy = float(xs.mean()), float(ys.mean())
+    half = _paint_half_width(blob)
+    reach = _reach_for(reach, int(xs.max() - xs.min()), int(ys.max() - ys.min()))
+    paint_v = float(np.median(value[blob > 0]))
+
+    # Pass one: the direction says where to look, this probe is only for finding the dark region.
+    probe = _ray_mask(value.shape, cx, cy, angle, gap, reach, half * 1.5)
+    here = (probe > 0) & (blob == 0)
+    if not here.any():
+        return mask
+    cut = 0.5 * (paint_v + float(np.median(value[here])))
+    dark = here & (value <= cut)
+    if not dark.any():
+        return mask
+
+    # The car's own axis: paint's centroid to the dark region's centroid.
+    dark_ys, dark_xs = np.nonzero(dark)
+    axis = math.degrees(math.atan2(float(dark_ys.mean()) - cy, float(dark_xs.mean()) - cx))
+
+    # Pass two: a band of the paint's width along that axis. A little slack, because the car is a
+    # hand-held toy and the paint is not perfectly square.
+    band = _ray_mask(value.shape, cx, cy, axis, gap, reach, half * 1.15)
+    keep = dark & (band > 0)
+    if not keep.any():
+        return mask
+
+    # Only what touches the paint. Scattered dark patches on the road do not, the cabin does -
+    # this is the constraint that the four earlier attempts never used.
+    near = cv2.dilate(blob, np.ones((7, 7), np.uint8))
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(keep.astype(np.uint8) * 255, 8)
+    touching = None
+    for i in range(1, count):
+        component = labels == i
+        if (component & (near > 0)).any():
+            if touching is None or stats[i, 4] > stats[touching, 4]:
+                touching = i
+    if touching is None:
+        return mask                       # nothing touching: do not invent a car body
+
+    grown = np.zeros_like(value)
+    grown[labels == touching] = 255
+    return cv2.bitwise_or(mask, grown)
+
+
+def attach_dark(mask: np.ndarray, hsv: np.ndarray, margin_v: int, max_s: int,
+                max_px: int = 60, ring_px: int = 25) -> np.ndarray:
+    """Grow `mask` into the dark part of the car that its paint colour does not cover.
+
+    For a car painted at one end only - a yellow nose with a black cabin. The colour mask finds
+    the nose; this walks outward from it through pixels that are darker than the road around the
+    car, which is where the cabin is.
+
+    Why not a plain dark range in hue_ranges: on this frame the dark, unsaturated pixels are one
+    63,000 px component spanning the whole picture, so "largest blob" would return the
+    background.
+
+    Why not an absolute V threshold either, which is what the first version used: the black part
+    of a glossy toy car is a mirror. Measured on two frames of the same car in different places,
+    the cabin reads V=98 in one and V=147 in the other, while the adjacent road reads 150 and
+    183. The absolute threshold that worked on the first frame (110) caught nothing at all on
+    the second. What holds across both is the *contrast*: the cabin is 52 and 36 levels darker
+    than the road beside the car. So the reference is local, measured from a ring around the
+    paint, and `margin_v` is how many levels below it counts as the car.
+
+    max_px bounds the growth, because a shadow cast by the car is also darker than the road and
+    would otherwise be absorbed. It is a distance cap, not a stopping rule.
+    """
+    if margin_v <= 0 or mask.max() == 0:
+        return mask
+
+    # The road around the car, from a ring that does not touch it.
+    k = np.ones((2 * ring_px + 1, 2 * ring_px + 1), np.uint8)
+    ring = cv2.bitwise_and(cv2.dilate(mask, k), cv2.bitwise_not(mask))
+    if not ring.any():
+        return mask
+    # The 80th percentile, not the median: the ring is only 25 px out, so the thing being
+    # attached - the cabin - is itself inside it on the side where the car extends, and a median
+    # then measures a mixture of road and cabin. Measured: with the median, `allowed` came out
+    # below the cabin (V 147 against a reference of ~165) and the attachment added 6 px of
+    # nothing. The road is the brighter part of the ring, so take that end of it.
+    ref_v = float(np.percentile(hsv[:, :, 2][ring > 0], 80))
+
+    # 255, not 1: the mask this is combined with holds 0/255, and bitwise_and of 255 with 1
+    # gives 1 - so a grown region came back in a different unit from the one it started in, and
+    # every area comparison afterwards was between two different scales.
+    allowed = (((hsv[:, :, 2] <= ref_v - margin_v) & (hsv[:, :, 1] <= max_s)) * 255).astype(np.uint8)
+    kernel = np.ones((3, 3), np.uint8)
+    grown = mask.copy()
+    for _ in range(max_px):
+        nxt = cv2.bitwise_or(grown, cv2.bitwise_and(cv2.dilate(grown, kernel), allowed))
+        if np.array_equal(nxt, grown):
+            break
+        grown = nxt
+
+    return grown
 
 
 def red_mask(hsv: np.ndarray, close_kernel: Optional[int] = None,
