@@ -33,7 +33,6 @@ import numpy as np
 
 import arrow            # the printed arrow template; see src/arrow.py
 import aruco_hero       # an ArUco marker, which also reports the direction
-import white_arrow      # a white arrow on the black roof, read as a shape
 # Car-specific but data-driven, so the hero car can be swapped without editing source. The file
 # holds the HSV target colour plus the morphology sizes; built-in values below are the fallback.
 VEHICLE_CONFIG_PATH = os.path.join(
@@ -918,20 +917,6 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
     """
     if frame is None or frame.size == 0:
         return []
-
-    # A white arrow on the black roof first: it is read as a shape (Hu moments + PCA), so the
-    # perspective that broke the flat template - 1.000 where it was cut, 0.784 three hundred
-    # pixels away - does not affect it. 53 ms, and no rotation sweep.
-    arrow_hit = white_arrow.detect(frame)
-    if arrow_hit is not None:
-        x, y, w, h = arrow_hit.bbox
-        heading = float(arrow_hit.heading % 360.0)
-        return [VehiclePose(
-            x=float(arrow_hit.centre[0]), y=float(arrow_hit.centre[1]), heading=heading,
-            area=int(arrow_hit.area), elongation=max(w, h) / max(min(w, h), 1.0), fill=1.0,
-            bbox=(int(x), int(y), int(w), int(h)), heading_pca=heading,
-            forward_score=float(1.0 - arrow_hit.shape_distance), heading_from_arrow=True,
-            front_heading=heading, front_is_known=True)]
 
     # An ArUco marker first, when one is on the roof. It detects through rotation, scale and
     # perspective and its corner order states the heading outright, which is everything the
