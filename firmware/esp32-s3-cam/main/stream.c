@@ -82,6 +82,38 @@ static int64_t s_last_frame_us = 0;
 static int64_t s_last_grab_us = 0;
 static volatile int s_clients = 0;
 
+/*
+ * Diagnostics only - nothing here changes what the stream does.
+ *
+ * The question is whether N clients share one frame source or each drive their own capture. The
+ * driver's esp_camera_fb_get() pops from cam_obj->frame_buffer_queue (cam_hal.c:709), which is one
+ * queue for the whole camera, so the theory is that the produced frames are divided. This counter
+ * proves it either way: if camera_get/s stays at the camera's rate as clients are added, the frames
+ * are being shared; if it multiplies with the client count, each handler is provoking its own grab.
+ */
+static volatile unsigned s_fb_get_total = 0;
+static volatile float s_get_rate = 0.0f;
+static int64_t s_rate_start_us = 0;
+static unsigned s_rate_count = 0;
+static volatile int s_client_seq = 0;
+
+static void note_fb_get(void)
+{
+    s_fb_get_total++;
+    s_rate_count++;
+    int64_t now = esp_timer_get_time();
+    if (s_rate_start_us == 0) {
+        s_rate_start_us = now;
+        return;
+    }
+    int64_t elapsed = now - s_rate_start_us;
+    if (elapsed >= 2000000) {                  /* a two second window: get/s over recent frames */
+        s_get_rate = (float)s_rate_count * 1000000.0f / (float)elapsed;
+        s_rate_count = 0;
+        s_rate_start_us = now;
+    }
+}
+
 /* ------------------------------------------------------------------------- */
 /* Status page                                                                */
 /* ------------------------------------------------------------------------- */
@@ -110,7 +142,7 @@ static esp_err_t index_handler(httpd_req_t *req)
         "<tr><td>Stream</td><td><a href=\"%s\">%s</a></td></tr>\n"
         "<tr><td>FPS</td><td>%.1f</td></tr>\n"
         "<tr><td>Uptime</td><td>%u s</td></tr>\n"
-        "<tr><td>Clients</td><td>%d</td></tr>\n"
+        "<tr><td>Clients</td><td>%d (%d get/s)</td></tr>\n"
         "<tr><td>WiFi</td><td>%s, RSSI %d dBm</td></tr>\n"
         "<tr><td>Firmware</td><td>%s (slot %s)</td></tr>\n"
         "<tr><td>Net state</td><td>%s</td></tr>\n"
@@ -129,6 +161,7 @@ static esp_err_t index_handler(httpd_req_t *req)
         (double)stream_fps(),
         (unsigned)(esp_timer_get_time() / 1000000),
         s_clients,
+        (int)(s_get_rate + 0.5f),
         wifi_ssid(),
         wifi_rssi(),
         esp_app_get_description()->version, running->label,
@@ -153,6 +186,66 @@ static esp_err_t index_handler(httpd_req_t *req)
 /* ------------------------------------------------------------------------- */
 /* Manual OTA trigger                                                         */
 /* ------------------------------------------------------------------------- */
+
+/*
+ * Camera-only benchmark: the same camera, the same configuration, no HTTP video, no Wi-Fi stream.
+ *
+ * It exists to answer one question and nothing else: what frame rate does the OV5640 actually
+ * produce through esp32-camera into the framebuffer queue? If that number is ~11 fps, the ceiling is
+ * upstream of HTTP and the stream path is innocent; if it is ~30, the loss is in the HTTP/TCP/Wi-Fi
+ * path. Nothing here changes the camera - it calls the same esp_camera_fb_get() the stream handler
+ * does, and it refuses to run while a /stream client is attached, because two consumers would split
+ * the frames and make the number meaningless.
+ *
+ *   curl -X POST http://<board>/api/bench
+ */
+static esp_err_t bench_handler(httpd_req_t *req)
+{
+    if (s_clients > 0) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "a /stream client is attached; disconnect it first");
+    }
+
+    const int seconds = 20;
+    unsigned frames = 0;
+    unsigned long long bytes = 0, min_b = 0, max_b = 0;
+    long long sum_get = 0, min_get = 0, max_get = 0;
+
+    int64_t t0 = esp_timer_get_time();
+    while (esp_timer_get_time() - t0 < (int64_t)seconds * 1000000) {
+        int64_t g0 = esp_timer_get_time();
+        camera_fb_t *fb = esp_camera_fb_get();
+        int64_t g1 = esp_timer_get_time();
+        if (fb == NULL) {
+            continue;
+        }
+        frames++;
+        bytes += fb->len;
+        if (min_b == 0 || fb->len < min_b) min_b = fb->len;
+        if (fb->len > max_b) max_b = fb->len;
+        long long d = g1 - g0;
+        sum_get += d;
+        if (min_get == 0 || d < min_get) min_get = d;
+        if (d > max_get) max_get = d;
+        esp_camera_fb_return(fb);
+    }
+    int64_t elapsed = esp_timer_get_time() - t0;
+
+    char body[512];
+    int n = snprintf(body, sizeof(body),
+        "{\"mode\":\"camera_only\",\"seconds\":%d,\"elapsed_ms\":%lld,\"frames\":%u,"
+        "\"fps\":%.2f,\"avg_frame_bytes\":%llu,\"min_frame_bytes\":%llu,"
+        "\"max_frame_bytes\":%llu,\"avg_fb_get_us\":%.0f,"
+        "\"min_fb_get_us\":%lld,\"max_fb_get_us\":%lld,\"clients\":%d}\n",
+        seconds, (long long)(elapsed / 1000), frames,
+        frames > 0 ? (double)frames * 1000000.0 / (double)elapsed : 0.0,
+        frames ? (unsigned long long)(bytes / frames) : 0ULL, min_b, max_b,
+        frames ? (double)sum_get / (double)frames : 0.0,
+        (long long)min_get, (long long)max_get, (int)s_clients);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, body, n);
+}
 
 static esp_err_t ota_check_handler(httpd_req_t *req)
 {
@@ -258,6 +351,7 @@ static void stream_task(void *arg)
         int64_t t_grab0 = esp_timer_get_time();
         camera_fb_t *fb = esp_camera_fb_get();
         int64_t t_grab1 = esp_timer_get_time();
+        note_fb_get();
         if (fb == NULL) {
             ESP_LOGE(TAG, "esp_camera_fb_get() failed, closing stream");
             res = ESP_FAIL;
@@ -448,6 +542,14 @@ esp_err_t stream_server_start(void)
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &index_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &stream_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &ota_uri));
+
+    httpd_uri_t bench_uri = {
+        .uri = STREAM_BENCH_PATH,
+        .method = HTTP_POST,
+        .handler = bench_handler,
+        .user_ctx = NULL,
+    };
+    ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &bench_uri));
 
     ESP_LOGI(TAG, "Stream server started");
     ESP_LOGI(TAG, "Stream server listening on port 80");

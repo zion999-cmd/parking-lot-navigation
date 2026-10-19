@@ -10,6 +10,9 @@
 /** Path that asks the OTA client to check for an update right now. */
 #define STREAM_OTA_CHECK_PATH "/api/ota/check"
 
+/** Camera-only benchmark: takes no video path at all, only fb_get/fb_return. */
+#define STREAM_BENCH_PATH "/api/bench"
+
 /** Start the HTTP server: "/" status page and STREAM_PATH MJPEG stream. */
 esp_err_t stream_server_start(void);
 
