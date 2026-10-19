@@ -66,11 +66,19 @@ def _annotate(points, config):
     vehicle._VEHICLE_CONFIG_CACHE = config
     try:
         frame = _frame(points)
-        poses = vehicle.locate_all(frame)
-        assert poses, "the synthetic car was not detected at all"
-        canvas = m.annotate(frame, SPOTS, {}, False, False, poses[0], None)
+        # These tests are about the drawing, and the only detector now is the roof arrow,
+        # which a flat colour patch is not. So the pose is built from the polygon that was
+        # drawn: same shape, same numbers, no detector in the way.
+        poly = np.array(points, np.float32)
+        (cx, cy), (rw, rh), angle = cv2.minAreaRect(poly)
+        long_side, short_side = max(rw, rh), max(min(rw, rh), 1e-6)
+        pose = vehicle.VehiclePose(x=float(cx), y=float(cy), heading=float(angle % 180.0),
+                                   area=int(cv2.contourArea(poly)),
+                                   elongation=long_side / short_side, fill=1.0,
+                                   bbox=cv2.boundingRect(poly.reshape(-1, 1, 2)))
+        canvas = m.annotate(frame, SPOTS, {}, False, False, pose, None)
         assert canvas.shape == (H, W, 3)
-        return poses[0], canvas
+        return pose, canvas
     finally:
         vehicle._VEHICLE_CONFIG_CACHE = previous
 

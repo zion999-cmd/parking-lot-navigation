@@ -83,7 +83,7 @@ def annotate(frame: np.ndarray, spots: List[Spot], results: Dict[str, SpotResult
         x, y, w, h = pose.bbox
         cv2.rectangle(canvas, (x, y), (x + w, y + h), COL_CAR, 2)
         length = max(w, h) * 0.7
-        if pose.elongation >= vehicle.AXIS_MIN_ELONGATION:
+        if (pose.heading_from_arrow or pose.elongation >= vehicle.AXIS_MIN_ELONGATION):
             # Only draw an axis when there is one. A line through a square is a claim the mask
             # cannot support, and on screen it reads as confidently as a real one.
             rad = math.radians(pose.heading)
@@ -103,7 +103,7 @@ def annotate(frame: np.ndarray, spots: List[Spot], results: Dict[str, SpotResult
                     int(pose.y - half * math.sin(facing)))
             cv2.circle(canvas, fx, 7, COL_CAR, -1)      # filled = the front
             cv2.circle(canvas, rear, 7, COL_CAR, 2)     # hollow = the back
-        elif pose.elongation >= vehicle.AXIS_MIN_ELONGATION:
+        elif (pose.heading_from_arrow or pose.elongation >= vehicle.AXIS_MIN_ELONGATION):
             # No front known: both ends get a ring, so the drawing does not claim a direction it
             # does not have. Which needs an axis to put them on: with no axis there are no ends
             # to mark, and dx/dy above were never computed - wrapping the axis line in the same
@@ -130,7 +130,7 @@ def annotate(frame: np.ndarray, spots: List[Spot], results: Dict[str, SpotResult
             text = (f"car ({pose.x:.0f},{pose.y:.0f}) FRONT {pose.front_heading:.0f}deg"
                     f"  (axis {pose.heading:.0f}){where}")
         else:
-            axis_txt = (f"{pose.heading:.0f}deg" if pose.elongation >= vehicle.AXIS_MIN_ELONGATION
+            axis_txt = (f"{pose.heading:.0f}deg" if (pose.heading_from_arrow or pose.elongation >= vehicle.AXIS_MIN_ELONGATION)
                         else "unknown")
             text = (f"car ({pose.x:.0f},{pose.y:.0f}) axis {axis_txt}"
                     f"  front unknown{where}")

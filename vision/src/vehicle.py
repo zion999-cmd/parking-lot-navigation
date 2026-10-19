@@ -39,11 +39,7 @@ from typing import List, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 
-# The sign template, sampled from the real car: tests/capture_vehicle_profile.py builds it.
-# 24 brightness bins read rear -> front (bin 0 at the boot, bin 23 at the nose).
-PROFILE_TEMPLATE_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "config", "vehicle_profile.json")
+import arrow            # the roof arrow; see src/arrow.py
 # Car-specific but data-driven, so the hero car can be swapped without editing source. The file
 # holds the HSV target colour plus the morphology sizes; built-in values below are the fallback.
 VEHICLE_CONFIG_PATH = os.path.join(
@@ -119,18 +115,6 @@ RED_HUE_RANGES: Tuple[Tuple[Tuple[int, int, int], Tuple[int, int, int]], ...] = 
     ((176, 90, 60), (180, 255, 255)),
 )
 
-# ---------------------------------------------------------------------------
-# Which end of the car is the front.
-#
-# Decided by the user looking at an annotated frame: the end marked green was the front, and
-# the green marker was on the *wider* end. Nothing here can work that out on its own - it is a
-# fact about a particular toy car, not about pixels - so it is stated once and used thereafter.
-#
-# It cross-checks with the other asymmetric cue: the dark band (the windscreen, presumably)
-# sits near the wider end in both orientations, which is why there is really only one cue here
-# rather than two independent ones.
-FRONT_IS_THE_WIDER_END = True
-
 # How much wider one end has to be before the front is claimed at all. Measured on this car
 # either side of a 180 degree turn: +0.17 and -0.15, with a frame-to-frame spread of +-0.05.
 # Below this the honest answer is "front unknown" rather than a coin flip.
@@ -148,8 +132,6 @@ AXIS_MIN_ELONGATION = 1.6
 # wherever a dark band crosses it, and a centroid that jumps between two halves is not a
 # position.
 CLOSE_KERNEL = 21
-# A blob that runs into the edge of the picture is the enclosure, not a car.
-BORDER_MARGIN = 2
 
 
 @dataclass
@@ -193,6 +175,10 @@ class VehiclePose:
     front_evidence: Optional[float] = None
     front_heading: Optional[float] = None
     front_is_known: bool = False
+    # True when the heading came from the roof arrow rather than from the shape's long
+    # axis. The arrow states the direction, so this heading has a front and is not an
+    # axis with two indistinguishable ends.
+    heading_from_arrow: bool = False
 
     @property
     def centre(self) -> Tuple[float, float]:
@@ -203,11 +189,11 @@ class VehiclePose:
         # number is kept on the dataclass because the overlay and the diagnostic tools print it
         # next to "NO CLEAR AXIS", but the contract is what a consumer acts on, and a consumer
         # cannot tell a meaningless 87.6 from a real one.
-        axis_known = self.elongation >= AXIS_MIN_ELONGATION
+        axis_known = self.heading_from_arrow or self.elongation >= AXIS_MIN_ELONGATION
         out = {"id": "hero", "x": round(self.x, 1), "y": round(self.y, 1),
                "heading": round(self.heading, 1) if axis_known else None,
                "visible": True,
-               "heading_is_axis_only": bool(axis_known),
+                 "heading_is_axis_only": bool(axis_known and not self.heading_from_arrow),
                "front_is_known": bool(self.front_is_known)}
         if self.front_is_known and self.front_heading is not None:
             # The axis, plus the one fact a person had to tell us: which end is the front.
@@ -314,19 +300,6 @@ def merge_near_components(mask: np.ndarray, gap_fraction: float = 0.9,
 # How much bigger than the paint the attached region may be before it is treated as a failure.
 # 6.6x is a good attachment on the real car; 22.7x is the same car leaking into the road.
 ATTACH_MAX_GROWTH = 8.0
-
-
-def _circular_mean(angles: List[float]) -> Optional[float]:
-    """The mean of directions on the circle, in 0..360. None for an empty list.
-
-    Averaging angles as plain numbers is what breaks at the wrap: 359 and 1 average to 180, the
-    opposite direction. The same reason the axis heading is doubled before it is averaged.
-    """
-    if not angles:
-        return None
-    radians = np.radians(np.asarray(angles, np.float64))
-    return float(np.degrees(np.arctan2(float(np.sin(radians).mean()),
-                                      float(np.cos(radians).mean())))) % 360.0
 
 
 def _reach_for(reach: int, w: int, h: int) -> int:
@@ -636,51 +609,6 @@ def red_mask(hsv: np.ndarray, close_kernel: Optional[int] = None,
     if full.sum() > ATTACH_MAX_GROWTH * paint_area:
         return paint_only
     return full
-
-
-def touches_border(bbox: Sequence[int], shape: Sequence[int],
-                   margin: int = BORDER_MARGIN) -> bool:
-    x, y, w, h = bbox
-    return (x <= margin or y <= margin
-            or x + w >= shape[1] - margin or y + h >= shape[0] - margin)
-
-
-# ---------------------------------------------------------------------------
-# Which end is the front.
-#
-# Two cues, and the weaker one turned out to be the one that was used first.
-#
-#   the dark band    the windscreen, presumably. Measured on this car at 65% along the axis
-#                    with 45 grey levels of contrast and a spread of 2%. On the other car it
-#                    sat at 30% or 67% depending on which way round it was.
-#   the taper        how much wider one end of the silhouette is. -0.10 to -0.17 on the first
-#                    car, but +0.012 on the car measured now, where the two ends differ by one
-#                    pixel. Silhouettes are easy to make symmetric by accident: a shadow across
-#                    one end, or simply looking at the car from a slightly different angle.
-#
-# So the band leads and the taper is the fallback. Both are expressed as a signed "evidence"
-# in -1..1 pointing along the axis, normalised by how strong that cue usually gets, so one set
-# of thresholds works for either.
-# The ends of the car, which is the cue that works.
-#
-# The car is red, black, red, black from front to rear - bonnet, front glass, roof, rear glass.
-# That is why the previous cue failed: such a pattern has *two* dark bands, so "where is the
-# darkest band" picks whichever of the two happens to be darker at that moment. Tilting the car
-# or pushing it into different light swaps which one that is, the band position jumps from one
-# end to the other, and the front flips - although the car's front has not moved at all.
-#
-# The two ends do not swap: red at the front against black at the rear. Measured on the real
-# car, 13.8 grey levels apart with 0.3 to 0.6 of frame-to-frame noise, and the brighter end is
-# the front.
-#
-# A lighting gradient across the car would also make one end look brighter than the other, so
-# the profile's linear trend is removed first. What is compared is each end's tone *relative to
-# that trend* - the pattern rather than the lighting.
-ENDS_MIN_GREY = 4.0          # grey levels; below this there is no usable end-to-end difference
-ENDS_SCALE = 12.0            # ...and what counts as fully convincing
-BAND_MIN_CONTRAST = 15.0     # only used to report the band now; it no longer decides anything
-BAND_SCALE = 0.5
-TAPER_SCALE = 0.20           # fallback cue, for a car with no usable pattern
 KEEP_EVIDENCE = 0.25         # below this, do not claim a front at all
 FLIP_EVIDENCE = 0.60         # to change an established front, this much the other way...
 
@@ -788,6 +716,16 @@ class VehicleTracker:
                 self.reset()
             return None
         self._misses = 0
+
+        # The arrow already states the direction, and its heading is 0..360 rather than the
+        # 0..180 axis this tracker was built around. Handing it to the axis maths below
+        # would be wrong twice over: the doubled-angle average cannot tell 5 degrees from
+        # 185, and the front vote would be deciding something that is no longer a guess.
+        # The detector is already steady frame to frame (0.993 score at the same pixel on
+        # four consecutive frames), so there is nothing here for a filter to do.
+        if getattr(pose, "heading_from_arrow", False):
+            self._x, self._y = pose.x, pose.y
+            return pose
 
         # Motion guard: remember the raw axis heading, trim the window by count and by age.
         self._heading_history.append((float(pose.heading), time.monotonic()))
@@ -953,32 +891,6 @@ class VehicleTracker:
 # Real car frames measure ~0.9, flat synthetic blobs ~0.
 SCORE_USE_MIN = 0.2
 
-_TEMPLATE_CACHE = "unloaded"
-# Measured, not chosen: the correct-vs-reverse margin on 60 frames of the real car is 0.875, so a
-# confident frame maps to evidence near 1.0 and an uncertain one scales down. Re-measured any time
-# by tests/capture_vehicle_profile.py --build; the number belongs to this car, not to the code.
-MARGIN_SCALE = 0.9
-
-
-def vehicle_template(path: str = PROFILE_TEMPLATE_PATH):
-    """The sampled sign template, loaded once. None when it has not been finalized.
-
-    Two channels chosen by measuring both orientations: saturation (glass low, paint high;
-    separation 0.94) and red_fraction (where the enclosed windows are; 0.81). The cache is a dict
-    of arrays, not one vector. The sentinel uses isinstance: comparing an ndarray to the string
-    "unloaded" gives an element-wise boolean array rather than one bool.
-    """
-    global _TEMPLATE_CACHE
-    if isinstance(_TEMPLATE_CACHE, str):
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                values = json.load(fh).get("template", {})
-            _TEMPLATE_CACHE = {k: np.asarray(v, dtype=np.float64)
-                               for k, v in values.items()}
-        except (OSError, ValueError):
-            _TEMPLATE_CACHE = None
-    return None if isinstance(_TEMPLATE_CACHE, str) else _TEMPLATE_CACHE
-
 
 def _shape(values: np.ndarray) -> np.ndarray:
     """Zero-mean, unit-spread: compare the pattern shape, not the lighting level."""
@@ -988,256 +900,72 @@ def _shape(values: np.ndarray) -> np.ndarray:
     return v / spread if spread > 1e-9 else v
 
 
-def _correlate(a: np.ndarray, b: np.ndarray) -> float:
-    """Pearson correlation of two equal-length profile shapes, in -1..1."""
-    return float(np.dot(_shape(a), _shape(b)) / len(a))
-
-
-def binned(index, values, bins: int = 24) -> np.ndarray:
-    """Mean value per axis bin; NaN where a bin has no pixels (profile_of aborts instead)."""
-    out = np.full(bins, np.nan)
-    values = np.asarray(values, dtype=np.float64)
-    for b in range(bins):
-        m = index == b
-        if m.any():
-            out[b] = values[m].mean()
-    return out
-
-
-def _z_finite(values):
-    """Zero-mean unit-spread over the finite bins, zero elsewhere, plus the finite mask."""
-    values = np.asarray(values, dtype=np.float64)
-    finite = np.isfinite(values)
-    v = values[finite] - values[finite].mean()
-    spread = v.std()
-    out = np.zeros_like(values)
-    out[finite] = v / spread if spread > 1e-9 else v
-    return out, finite
-
-
-def _corr_finite(a, b) -> float:
-    """Pearson over the bins finite in both, in -1..1 (0 if nothing overlaps)."""
-    za, fa = _z_finite(a); zb, fb = _z_finite(b); m = fa & fb
-    den = math.sqrt((za[m] ** 2).sum() * (zb[m] ** 2).sum())
-    return float((za[m] * zb[m]).sum() / den) if den > 1e-9 else 0.0
-
-
-def score_sign(sat_profile, redfraction_profile, template):
-    """Match the two robust channels against the template both directions.
-
-    The template reads rear->front. A forward (rear->front along +axis) win means the front is at
-    the high-projection end: front_is_plus. The gray brightness that failed is not used.
-    """
-    ts, tr = template["saturation"], template["red_fraction"]
-    forward = (_corr_finite(sat_profile, ts)
-               + _corr_finite(redfraction_profile, tr)) / 2.0
-    reverse = (_corr_finite(sat_profile, ts[::-1])
-               + _corr_finite(redfraction_profile, tr[::-1])) / 2.0
-    margin = forward - reverse
-    return forward, reverse, margin, margin > 0
-
-
-def profile_of(along: np.ndarray, tones: np.ndarray, bins: int = 24
-               ) -> Optional[np.ndarray]:
-    """The brightness profile along the car's axis: one mean tone per slice.
-
-    No rotation needed - the pixels are projected onto the axis and their grey values averaged
-    per slice, which is the same as measuring an aligned crop for a fraction of the cost.
-    """
-    if len(along) < 30:
-        return None
-    lo, hi = float(along.min()), float(along.max())
-    if hi - lo < 12:
-        return None
-    index = np.clip(((along - lo) / (hi - lo) * bins).astype(int), 0, bins - 1)
-    sums = np.bincount(index, weights=tones, minlength=bins)
-    counts = np.bincount(index, minlength=bins)
-    if not counts.all():
-        return None
-    return sums / counts
-
-
-def ends_of(profile: np.ndarray, fraction: int = 4
-            ) -> Tuple[float, float]:
-    """The tone at the two ends, each relative to the profile's linear trend.
-
-    Returns (plus_end - minus_end, magnitude) in grey levels. Positive means the end in the
-    +axis direction is brighter. Removing the trend is what makes this a measurement of the
-    car's pattern rather than of how the light happens to fall across it.
-    """
-    bins = len(profile)
-    trend = np.polyval(np.polyfit(np.arange(bins, dtype=float), profile, 1),
-                       np.arange(bins, dtype=float))
-    detrended = profile - trend
-    difference = float(detrended[-fraction:].mean() - detrended[:fraction].mean())
-    return difference, abs(difference)
-
-
-def band_of(profile: np.ndarray) -> Tuple[float, float]:
-    """Where the darkest stretch sits along the axis, and its contrast. Reported, not used."""
-    return float((int(np.argmin(profile)) + 0.5) / len(profile)), \
-        float(profile.max() - profile.min())
-
-
-def taper_of(points: np.ndarray, heading: float, bins: int = 12) -> float:
-    """How much wider one end of a blob is than the other, along its own axis.
-
-    Positive means the end in the +heading direction is wider. This is the cue that says
-    which end of an otherwise symmetric car is the front, and it needs no rotation: the
-    pixels are projected onto the axis and onto the perpendicular, and the width is the
-    perpendicular extent within each slice along the axis.
-    """
-    if len(points) < 20:
-        return 0.0
-    radians = np.radians(heading)
-    along = points[:, 0] * np.cos(radians) + points[:, 1] * np.sin(radians)
-    across = -points[:, 0] * np.sin(radians) + points[:, 1] * np.cos(radians)
-    lo, hi = float(along.min()), float(along.max())
-    if hi - lo < 8:
-        return 0.0
-    widths = []
-    for i in range(bins):
-        a = lo + (hi - lo) * i / bins
-        b = lo + (hi - lo) * (i + 1) / bins
-        band = across[(along >= a) & (along < b)]
-        widths.append(float(band.max() - band.min()) if len(band) else 0.0)
-    n = max(bins // 4, 1)
-    first, last = float(np.mean(widths[:n])), float(np.mean(widths[-n:]))
-    return (last - first) / max(last + first, 1e-6)
+_ARROW_TEMPLATE = None
 
 
 def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
                keep_border: bool = False,
                close_kernel: int = CLOSE_KERNEL) -> List[VehiclePose]:
-    """Every red thing big enough to be the car, largest first."""
+    """The car, found by the arrow taped to its roof.
+
+    `min_area`, `keep_border` and `close_kernel` are kept so that callers and the command
+    line flags still work; the arrow detector does not use them, because it is not looking
+    for a colour region of any particular size.
+
+    The yellow paint is no longer what identifies the car, but it is still the cheapest
+    "the car is around here" hint, and it is what keeps a frame at 27 ms instead of the
+    921 ms a whole-frame sweep costs. If the paint hint is absent the search falls back to
+    the whole frame, which is slow but correct.
+
+    See src/arrow.py for why this replaced the paint pipeline and for the measurements.
+    """
     if frame is None or frame.size == 0:
         return []
-    hsv_full = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    mask = red_mask(hsv_full, close_kernel)
-    # Paint without the hole fill, so the dark bands stay visible as gaps: the per-bin paint
-    # fraction says where the cabin/glass is. Read from the config, not from RED_HUE_RANGES:
-    # that constant is red, and a yellow car measured identically zero on this channel for the
-    # whole recording, which silently halved score_sign(). The template key is still called
-    # red_fraction - a legacy name from when the only car was red.
-    raw_paint = np.zeros(frame.shape[:2], np.uint8)
-    for _lo, _hi in vehicle_config()["hue_ranges"]:
-        raw_paint |= cv2.inRange(hsv_full, np.array(_lo, np.uint8), np.array(_hi, np.uint8))
-    raw_paint = cv2.morphologyEx(
-        raw_paint, cv2.MORPH_OPEN,
-        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
-    gray_image = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
-    out: List[VehiclePose] = []
-    for i in range(1, count):
-        area = int(stats[i, 4])
-        if area < min_area:
-            continue
-        x, y, w, h = (int(stats[i, 0]), int(stats[i, 1]),
-                      int(stats[i, 2]), int(stats[i, 3]))
-        if not keep_border and touches_border((x, y, w, h), frame.shape):
-            continue
-        ys, xs = np.where(labels == i)
-        points = np.column_stack([xs, ys]).astype(np.float32)
-        gray_values = gray_image[ys, xs].astype(np.float64)
-        sat_values = hsv_full[ys, xs, 1].astype(np.float64)
-        is_raw_paint = (raw_paint[ys, xs] > 0).astype(np.float64)
-        centre = points.mean(axis=0)
-        values, vectors = np.linalg.eigh(np.cov((points - centre).T))
-        major = vectors[:, int(np.argmax(values))]
-        heading_pca = float(np.degrees(np.arctan2(major[1], major[0]))) % 180.0
-        elongation = float(np.sqrt(max(values) / max(min(values), 1e-6)))
-        rect = cv2.minAreaRect(points)
-        (_, _), (rw, rh), angle = rect
-        # Long axis of the fitted rectangle. Steadier than PCA on a blob whose outline
-        # flickers, because the rectangle depends on the extremes rather than every pixel.
-        heading = (angle if rw >= rh else angle + 90.0) % 180.0
-        taper = taper_of(points, heading)
-        radians = np.radians(heading)
-        along = points[:, 0] * np.cos(radians) + points[:, 1] * np.sin(radians)
-        profile = profile_of(along, gray_values)
-        band_pos: Optional[float] = None
-        band_contrast = 0.0
-        if profile is not None:
-            band_pos, band_contrast = band_of(profile)
-        # Bins by position along the axis (0..1), so the profiles align even when the blob is a
-        # pixel longer or shorter frame to frame.
-        _lo, _hi = float(along.min()), float(along.max())
-        axis_index = None
-        if _hi - _lo >= 12:
-            axis_index = np.clip((((along - _lo) / (_hi - _lo)) * 24).astype(int), 0, 23)
-        sat_profile = redfraction_profile = None
-        if axis_index is not None:
-            sat_profile = binned(axis_index, sat_values)
-            redfraction_profile = binned(axis_index, is_raw_paint)
 
-        # Which end the front is on, as signed evidence along the axis: +1 means the +axis end.
-        #
-        # The order of the cues is the order of their authority. First a stated fact: if the car is
-        # painted at one end, the painted end is the front - the same category as
-        # front_is_the_wider_end, something a person told us about this car and not something the
-        # pixels can work out. Then the sampled pattern, and last the silhouette's taper.
-        evidence: Optional[float] = None
-        painted = is_raw_paint > 0
-        paint_is_front = False
-        if vehicle_config().get("front_is_the_painted_end") and axis_index is not None:
-            if painted.any():
-                # Only when the paint covers one END of the car rather than all of it. A car
-                # painted along its whole length - which the previous one was, red at both ends -
-                # has no painted end to point at, and this rule would have handed it an arbitrary
-                # front. Two tests caught exactly that.
-                span_total = float(along.max() - along.min())
-                span_paint = float(along[painted].max() - along[painted].min())
-                if span_total > 0 and span_paint / span_total < 0.8:
-                    # Where the paint sits along the axis, relative to the whole blob.
-                    evidence = 1.0 if along[painted].mean() > along.mean() else -1.0
-                    paint_is_front = True
-        ends_grey = 0.0
-        forward_score = reverse_score = score_margin = None
-        if profile is not None:
-            difference, _ = ends_of(profile)
-            ends_grey = difference                  # kept for the HUD, no longer the sign
-        template = vehicle_template()
-        if evidence is None and template is not None and sat_profile is not None:
-            forward_score, reverse_score, score_margin, _plus = \
-                score_sign(sat_profile, redfraction_profile, template)
-            # Margin ~0 is the template abstaining - leave evidence None so the silhouette
-            # taper below still gets used, instead of a dead 0 that disables the fallback.
-            if abs(score_margin) >= SCORE_USE_MIN:
-                evidence = float(np.clip(score_margin / MARGIN_SCALE, -1.0, 1.0))
-        if evidence is None and abs(taper) >= MIN_TAPER:
-            wider_is_front = bool(vehicle_config().get("front_is_the_wider_end", True))
-            signed = taper if wider_is_front else -taper
-            evidence = float(np.clip(signed / TAPER_SCALE, -1.0, 1.0))
-        if elongation < AXIS_MIN_ELONGATION:
-            evidence = None          # a blob with no axis cannot have a front either
+    global _ARROW_TEMPLATE
+    if _ARROW_TEMPLATE is None:
+        try:
+            _ARROW_TEMPLATE = arrow.load()
+        except FileNotFoundError as exc:
+            print("  arrow template missing, hero detection is off: %s" % exc, file=sys.stderr)
+            return []
 
-        front_heading = None
-        front_known = False
-        if evidence is not None and abs(evidence) >= KEEP_EVIDENCE:
-            # The painted end is the nose, so the front is the direction from the car's centre
-            # towards the paint. A direction in its own right - 0..360, needing no reconstruction
-            # afterwards - which is what makes it immune to the 180-degree flip described in
-            # Sweeper.update(). Reconstructing it from the axis (`heading` or `heading + 180`)
-            # cannot work in general, because the axis is only defined in 0..180.
-            if paint_is_front:
-                front_heading = math.degrees(math.atan2(float(ys[painted].mean()) - centre[1],
-                                                        float(xs[painted].mean()) - centre[0])) % 360.0
-            else:
-                front_heading = heading if evidence > 0 else (heading + 180.0) % 360.0
-            front_known = True
-        out.append(VehiclePose(x=float(centre[0]), y=float(centre[1]), heading=heading,
-                               area=area, elongation=elongation,
-                               fill=area / max(w * h, 1), bbox=(x, y, w, h),
-                               heading_pca=heading_pca, taper=taper,
-                               band_pos=band_pos, band_contrast=band_contrast,
-                               ends_grey=ends_grey,
-                               forward_score=forward_score,
-                               reverse_score=reverse_score,
-                               score_margin=score_margin,
-                               front_evidence=evidence,
-                               front_heading=front_heading, front_is_known=front_known))
-    out.sort(key=lambda p: -p.area)
-    return out
+    hint = None
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    paint = red_mask(hsv, close_kernel)
+    count, labels, stats, centroids = cv2.connectedComponentsWithStats(paint, 8)
+    if count > 1:
+        biggest = max(range(1, count), key=lambda k: stats[k, cv2.CC_STAT_AREA])
+        hint = (float(centroids[biggest][0]), float(centroids[biggest][1]))
+
+    match = arrow.locate(frame, _ARROW_TEMPLATE, roi_hint=hint)
+    if match is None:
+        return []
+
+    xs = [c[0] for c in match.corners]
+    ys = [c[1] for c in match.corners]
+    w = float(max(xs) - min(xs))
+    h = float(max(ys) - min(ys))
+    long_side = max(w, h, 1.0)
+    short_side = max(min(w, h), 1.0)
+    heading = float(match.heading % 360.0)
+    return [VehiclePose(
+        x=float(match.centre[0]),
+        y=float(match.centre[1]),
+        heading=heading,
+        area=int(round(w * h)),
+        elongation=long_side / short_side,
+        fill=1.0,
+        bbox=(int(min(xs)), int(min(ys)), int(w), int(h)),
+        heading_pca=heading,
+        # The match score is the only evidence there is now, so it goes where the old
+        # pipeline kept its confidence: forward_score.
+        forward_score=float(match.score),
+        heading_from_arrow=True,
+        front_heading=heading,
+        front_is_known=True,
+    )]
+
 
 
 def locate(frame: np.ndarray, **kwargs) -> Optional[VehiclePose]:

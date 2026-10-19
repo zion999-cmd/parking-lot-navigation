@@ -1,0 +1,11 @@
+{
+  "source": "ann-20261020-002624",
+  "bbox": [
+    132,
+    478,
+    43,
+    35
+  ],
+  "reference_angle_deg": 0.0,
+  "note": "\u8f66\u5934\u671d\u53f3\u65f6\u6807\u6ce8\u3002\u5339\u914d\u89d2\u5ea6 = \u6a21\u677f\u989d\u5916\u65cb\u8f6c\u89d2; \u8f66\u5934\u671d\u5411 = reference_angle - \u5339\u914d\u89d2"
+}
