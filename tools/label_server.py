@@ -196,9 +196,19 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as exc:
             return self._json(400, {"ok": False, "why": f"bad json: {exc}"})
 
-        quad = payload.get("quad") or []
-        if len(quad) != 4:
-            return self._json(400, {"ok": False, "why": "need four corners"})
+        kind = str(payload.get("kind") or "quad")
+
+        # A feature patch is a free polygon the human clicked, not a fitted rectangle:
+        # it marks something ON the car (a roof marker, say), and its shape is whatever
+        # the thing looks like. Three points is the minimum that can enclose an area.
+        points = payload.get("points") or []
+        if kind == "feature":
+            if len(points) < 3:
+                return self._json(400, {"ok": False, "why": "a feature needs at least 3 points"})
+        else:
+            quad = payload.get("quad") or []
+            if len(quad) != 4:
+                return self._json(400, {"ok": False, "why": "need four corners"})
         status = payload.get("status", "ok")
         source = str(payload.get("from") or "").strip()
 
@@ -228,11 +238,29 @@ class Handler(BaseHTTPRequestHandler):
         with open(os.path.join(LABELS, image_name), "wb") as fh:
             fh.write(blob)
 
+        if kind == "feature":
+            record = {
+                "id": label_id,
+                "image": image_name,
+                "from": origin,
+                "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "kind": "feature",
+                "name": str(payload.get("name") or "feature")[:40],
+                "points": [[int(round(p[0])), int(round(p[1]))] for p in points],
+                "closed": bool(payload.get("closed", True)),
+                "status": status,
+                "notes": str(payload.get("notes", ""))[:200],
+            }
+            with open(ANNOTATIONS, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+            return self._json(200, {"ok": True, "saved": image_name, "record": record})
+
         record = {
             "id": label_id,
             "image": image_name,
             "from": origin,
             "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "kind": "quad",
             "quad": [[int(round(p[0])), int(round(p[1]))] for p in quad],   # clockwise, p0 at the nose
             # The quad is a fitted rectangle; raw_quad is what the hand actually clicked, kept
             # because a fit cannot be un-fitted later and the clicks cannot be recovered from it.

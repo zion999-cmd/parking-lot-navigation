@@ -50,6 +50,11 @@
   <label>帧来源
     <select id="source"><option value="">实时画面</option></select>
   </label>
+  <select id="mode" title="车框：点四个角 | 特征块：随意点，右键闭合">
+    <option value="car">车框（4 角）</option>
+    <option value="feature">特征块（自由多边形）</option>
+  </select>
+  <input type="text" id="fname" value="arrow" placeholder="特征名" style="width:80px">
   <button id="next">下一帧 / 刷新 (N)</button>
   <span class="hint" id="step">① 点车的<b>右前角</b>（然后顺时针点其余三个角）</span>
 </header>
@@ -122,6 +127,10 @@ let mouse = null;       // 鼠标在图上的位置（画橡皮筋用）
 let natural = { w: 0, h: 0 };
 let currentFrom = "";   // "" = 实时；否则是磁盘上的文件名
 let saved = [];
+/* 特征块模式：mode=feature 时 fpts 记录自由点击的顶点，右键闭合 */
+let mode = "car";
+let fpts = [];
+let fclosed = false;
 
 const K = (a,b) => [a,b];
 
@@ -139,8 +148,31 @@ function scale() {
   return r.width && natural.w ? natural.w / r.width : 1;
 }
 
+function drawFeature() {
+  if (mode !== "feature" || !fpts.length) return;
+  const s = 1 / scale();
+  const p = fpts.map(q => [q[0] * s, q[1] * s]);
+  ctx.save();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = "#ff5151";
+  ctx.fillStyle = "rgba(255,81,81,0.18)";
+  ctx.beginPath();
+  ctx.moveTo(p[0][0], p[0][1]);
+  for (let i = 1; i < p.length; i++) ctx.lineTo(p[i][0], p[i][1]);
+  if (fclosed) { ctx.closePath(); ctx.fill(); }
+  ctx.stroke();
+  p.forEach((q, i) => {
+    ctx.fillStyle = "#ff5151";
+    ctx.beginPath(); ctx.arc(q[0], q[1], 3.5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#fff";
+    ctx.fillText(String(i), q[0] + 5, q[1] - 5);
+  });
+  ctx.restore();
+}
+
 function draw() {
   ctx.clearRect(0, 0, cv.width, cv.height);
+  drawFeature();
   const s = 1 / scale();
   const p = quad.map(q => [q[0] * s, q[1] * s]);
   if (p.length) {
@@ -374,12 +406,26 @@ function toImage(ev) {
 cv.addEventListener("click", ev => {
   if (!natural.w) return;
   const p = toImage(ev);
+  if (mode === "feature") {
+    if (fclosed) { fpts = []; fclosed = false; }    // 闭合后再点 = 开始新的一块
+    fpts.push(p);
+    draw(); info();
+    return;
+  }
   if (clicks.length < 4) {
     clicks.push(p);
     quad = snapRect(clicks);                      // 每点一下都重算，矩形始终精确
   } else {
     tip = p;                                      // 第 5 次点击 = 手动修正车头方向
   }                                   // 第 5 次点击 = 车头方向
+  draw(); info();
+});
+cv.addEventListener("contextmenu", ev => {
+  if (mode !== "feature") return;                   // 车框模式不动浏览器默认行为
+  ev.preventDefault();
+  if (fpts.length < 3) { msg("至少要 3 个点才能闭合", true); return; }
+  fclosed = true;
+  document.getElementById("step").innerHTML = "✔ 已闭合，按 S 保存";
   draw(); info();
 });
 cv.addEventListener("mousemove", ev => {
@@ -405,6 +451,23 @@ function status() {
 }
 
 async function save(kind) {
+  if (mode === "feature") {
+    if (kind === "ok" && fpts.length < 3) { msg("至少要 3 个点", true); return; }
+    const fbody = { kind: "feature", name: document.getElementById("fname").value || "feature",
+                    points: fpts, closed: fclosed, status: kind,
+                    notes: document.getElementById("notes").value, from: currentFrom };
+    const fr = await fetch("/save", { method: "POST",
+                                      headers: { "Content-Type": "application/json" },
+                                      body: JSON.stringify(fbody) });
+    const fj = await fr.json();
+    if (!fj.ok) { msg("保存失败: " + fj.why, true); return; }
+    msg(kind === "ok" ? "已保存 " + fj.saved : "已保存（" + kind + "）");
+    document.getElementById("notes").value = "";
+    resetPoints();
+    await loadList();
+    if (kind === "ok") await next();
+    return;
+  }
   if (kind === "ok" && !status()) return;
   if (kind === "ok" && !shownTip()) { msg("需要先点满四个角", true); return; }
   const body = { quad, raw_quad: clicks, tip: shownTip(), tip_source: tip ? "manual" : "auto",
@@ -422,7 +485,7 @@ async function save(kind) {
   if (kind === "ok") await next();               // 实时帧下自动取新的一帧，连续标注
 }
 
-function resetPoints() { clicks = []; quad = []; tip = null; draw(); info(); }
+function resetPoints() { clicks = []; quad = []; tip = null; fpts = []; fclosed = false; draw(); info(); }
 
 async function loadFrames() {
   const j = await (await fetch("/frames")).json();
@@ -479,6 +542,14 @@ async function loadList() {
 }
 
 /* ---------- 快捷键 ---------- */
+document.getElementById("mode").addEventListener("change", ev => {
+  mode = ev.target.value;
+  resetPoints();
+  document.getElementById("step").innerHTML = (mode === "feature")
+    ? "① 随意点箭头轮廓的顶点  ② <b>右键</b>闭合  ③ 按 S 保存"
+    : "① 点车的<b>右前角</b>（然后顺时针点其余三个角）";
+});
+
 document.addEventListener("keydown", ev => {
   if (ev.target.tagName === "INPUT") return;
   const k = ev.key.toLowerCase();
