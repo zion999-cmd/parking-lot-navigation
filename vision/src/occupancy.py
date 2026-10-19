@@ -45,21 +45,27 @@ class OccupancyParams:
     pixel_threshold: int = 25
     # Fraction of the inner area that must change for the bay to count occupied.
     #
-    # Raised from 0.15 to 0.40 on request: 0.15 was firing on bays that were only marginally
-    # different, and the strip showed them occupied.
+    # Three values so far, each decided by looking at the ratio a real bay produced:
+    #   0.15  the first guess. Fired on bays that were only marginally different, so a
+    #         parked car read EMPTY one frame and OCCUPIED the next.
+    #   0.40  the conservative answer, asked for after that: no false positives at all,
+    #         but bays 25 (0.369), B1 (0.335) and 50 (0.276) then read EMPTY with a car
+    #         in them. Too blunt the other way.
+    #   0.30  current. Halfway between those two measured failures: above the 0.15 noise
+    #         and below the 0.276 that a real occupied bay produced. The numbers are in
+    #         the section below; nothing else in the code has its own copy of this.
     #
     # Measured on 5 live frames against the production reference (10 October, still good inside the
     # bays - the whole-frame difference of 36% is the road and the lights, not the bays):
     #
     #     threshold 0.15   occupied  3/48   ratio median 0.009   max 0.293
-    #     threshold 0.40   occupied  0/48
+    #     threshold 0.40   occupied  0/48   bays 25 0.369, B1 0.335, 50 0.276 hidden
+    #     threshold 0.30   the point between them
     #
-    # so the three bays reading 0.15-0.29 (32, 43, 44 on the day) now read EMPTY. If those are
-    # genuinely occupied, this threshold hides them; if they are the flicker that prompted the
-    # change, it is the right trade. A reference captured at 11:53 measured *worse* inside the bays
-    # (median 0.071, 15 bays over 0.15) and must not be promoted - a fresher reference is not
-    # automatically a better one, and the whole-frame difference says nothing about the bays.
-    changed_ratio_threshold: float = 0.40
+    # A reference captured at 11:53 measured *worse* inside the bays (median 0.071, 15 bays over
+    # 0.15) and must not be promoted - a fresher reference is not automatically a better one, and
+    # the whole-frame difference says nothing about the bays.
+    changed_ratio_threshold: float = 0.30
     # Morphology: remove speckle, then join nearby changed regions.
     open_ksize: int = 3
     close_ksize: int = 5
