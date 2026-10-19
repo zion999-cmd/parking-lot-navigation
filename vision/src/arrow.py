@@ -41,7 +41,7 @@ MIN_SCORE = 0.85
 
 # Search window around the paint blob, in pixels. The arrow sits on the car, and the
 # paint blob is on the car, so this only has to be larger than the car.
-ROI_HALF = 70
+ROI_HALF = 95
 
 # Coarse sweep, then refine. 30 degrees is coarse enough to fit the budget and fine
 # enough that the true angle is never more than 15 degrees away.

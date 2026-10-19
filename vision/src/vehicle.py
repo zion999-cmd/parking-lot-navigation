@@ -906,6 +906,7 @@ _ARROW_TEMPLATE = None
 # Where the arrow was last seen, and when the last wide search ran. The arrow moves a few
 # pixels per frame, so the next one is nearly always inside a 140 px window of the last.
 _last_centre: List[Optional[float]] = [None, None]
+_prev_centre: List[Optional[float]] = [None, None]
 _last_centre_us = 0.0
 WIDE_SEARCH_MIN_S = 2.0      # a whole-frame sweep is ~1 s, so not more often than this
 
@@ -949,14 +950,25 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
     # arrow was; the wide search is the recovery path, rate-limited because it is expensive.
     global _last_centre_us
     match = None
+    # Predict where the arrow will be: a car that is driving moves between frames, and the
+    # window is only so wide. With the last two sightings the velocity is known, so the search
+    # is centred on where it is going rather than where it was.
+    hint = None
     if _last_centre[0] is not None:
-        match = arrow.locate(frame, _ARROW_TEMPLATE, roi_hint=_last_centre)
+        px, py = _last_centre[0], _last_centre[1]
+        if _prev_centre[0] is not None:
+            px += 1.5 * (_last_centre[0] - _prev_centre[0])
+            py += 1.5 * (_last_centre[1] - _prev_centre[1])
+        hint = (px, py)
+    if hint is not None:
+        match = arrow.locate(frame, _ARROW_TEMPLATE, roi_hint=hint)
     now_us = time.monotonic()
     if match is None and now_us - _last_centre_us >= WIDE_SEARCH_MIN_S:
         _last_centre_us = now_us
         match = arrow.locate(frame, _ARROW_TEMPLATE, roi_hint=None)
     if match is None:
         return []
+    _prev_centre[0], _prev_centre[1] = _last_centre[0], _last_centre[1]
     _last_centre[0], _last_centre[1] = match.centre[0], match.centre[1]
 
     xs = [c[0] for c in match.corners]
