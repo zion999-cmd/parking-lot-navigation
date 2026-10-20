@@ -53,6 +53,7 @@
   <select id="mode" title="车框：点四个角 | 特征块：随意点，右键闭合">
     <option value="car">车框（4 角）</option>
     <option value="feature">特征块（自由多边形）</option>
+    <option value="hero">英雄车框（HOG 数据集）</option>
   </select>
   <input type="text" id="fname" value="arrow" placeholder="特征名" style="width:80px">
   <button id="next">下一帧 / 刷新 (N)</button>
@@ -157,7 +158,7 @@ function scale() {
 }
 
 function drawFeature() {
-  if (mode !== "feature" || !fpts.length) return;
+  if ((mode !== "feature" && mode !== "hero") || !fpts.length) return;
   const s = 1 / scale();
   const p = fpts.map(q => [q[0] * s, q[1] * s]);
   ctx.save();
@@ -414,7 +415,7 @@ function toImage(ev) {
 cv.addEventListener("click", ev => {
   if (!natural.w) return;
   const p = toImage(ev);
-  if (mode === "feature") {
+  if (mode === "feature" || mode === "hero") {
     if (fclosed) { fpts = []; fclosed = false; }    // 闭合后再点 = 开始新的一块
     fpts.push(p);
     draw(); info();
@@ -459,9 +460,10 @@ function status() {
 }
 
 async function save(kind) {
-  if (mode === "feature") {
+  if (mode === "feature" || mode === "hero") {
     if (kind === "ok" && fpts.length < 3) { msg("至少要 3 个点", true); return; }
-    const fbody = { kind: "feature", name: document.getElementById("fname").value || "feature",
+    const fbody = { kind: mode === "hero" ? "hero" : "feature",
+                    name: document.getElementById("fname").value || "feature",
                     points: fpts, closed: fclosed, status: kind,
                     notes: document.getElementById("notes").value, from: currentFrom };
     const fr = await fetch("/save", { method: "POST",
@@ -553,7 +555,9 @@ async function loadList() {
 document.getElementById("mode").addEventListener("change", ev => {
   mode = ev.target.value;
   resetPoints();
-  document.getElementById("step").innerHTML = (mode === "feature")
+  document.getElementById("step").innerHTML = (mode === "hero")
+    ? "① 框住<b>整辆英雄车</b>（含车顶标记）② 右键闭合 ③ 在备注里写<b>采集批次</b>（如 sess1）④ 按 S 保存"
+    : (mode === "feature")
     ? "① 随意点箭头轮廓的顶点  ② <b>右键</b>闭合  ③ 按 S 保存"
     : "① 点车的<b>右前角</b>（然后顺时针点其余三个角）";
 });
