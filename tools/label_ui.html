@@ -140,6 +140,8 @@ let saved = [];
 let mode = "car";
 let fpts = [];
 let fclosed = false;
+let heroBox = null;      // 英雄车模式：按住拖出的矩形 [x0,y0,x1,y1]
+let dragging = null;
 
 const K = (a,b) => [a,b];
 
@@ -155,6 +157,20 @@ window.addEventListener("resize", fit);
 function scale() {
   const r = img.getBoundingClientRect();
   return r.width && natural.w ? natural.w / r.width : 1;
+}
+
+function drawHeroBox() {
+  if (mode !== "hero") return;
+  const s = 1 / scale();
+  const b = dragging
+    ? [Math.min(dragging.x0, dragging.x1), Math.min(dragging.y0, dragging.y1),
+       Math.max(dragging.x0, dragging.x1), Math.max(dragging.y0, dragging.y1)]
+    : heroBox;
+  if (!b) return;
+  ctx.save();
+  ctx.lineWidth = 2; ctx.strokeStyle = "#ffd43b";
+  ctx.strokeRect(b[0] * s, b[1] * s, (b[2] - b[0]) * s, (b[3] - b[1]) * s);
+  ctx.restore();
 }
 
 function drawFeature() {
@@ -182,6 +198,7 @@ function drawFeature() {
 function draw() {
   ctx.clearRect(0, 0, cv.width, cv.height);
   drawFeature();
+  drawHeroBox();
   const s = 1 / scale();
   const p = quad.map(q => [q[0] * s, q[1] * s]);
   if (p.length) {
@@ -415,7 +432,8 @@ function toImage(ev) {
 cv.addEventListener("click", ev => {
   if (!natural.w) return;
   const p = toImage(ev);
-  if (mode === "feature" || mode === "hero") {
+  if (mode === "hero") { return; }        // 英雄车用拖拽，不用点击
+  if (mode === "feature") {
     if (fclosed) { fpts = []; fclosed = false; }    // 闭合后再点 = 开始新的一块
     fpts.push(p);
     draw(); info();
@@ -429,6 +447,33 @@ cv.addEventListener("click", ev => {
   }                                   // 第 5 次点击 = 车头方向
   draw(); info();
 });
+// 英雄车模式：按住拖一个矩形，松开即成。这个模式不关心方向，也不需要多边形。
+cv.addEventListener("mousedown", ev => {
+  if (mode !== "hero" || !natural.w) return;
+  const p = toImage(ev);
+  dragging = { x0: p[0], y0: p[1], x1: p[0], y1: p[1] };
+  heroBox = null;
+  draw();
+});
+cv.addEventListener("mousemove", ev => {
+  if (mode !== "hero" || !dragging) return;
+  const p = toImage(ev);
+  dragging.x1 = p[0]; dragging.y1 = p[1];
+  draw();
+});
+cv.addEventListener("mouseup", ev => {
+  if (mode !== "hero" || !dragging) return;
+  const b = dragging;
+  dragging = null;
+  const x0 = Math.min(b.x0, b.x1), x1 = Math.max(b.x0, b.x1);
+  const y0 = Math.min(b.y0, b.y1), y1 = Math.max(b.y0, b.y1);
+  if (x1 - x0 < 12 || y1 - y0 < 12) { heroBox = null; msg("框太小了，重新拖一次", true); draw(); return; }
+  heroBox = [x0, y0, x1, y1];
+  document.getElementById("step").innerHTML =
+    `已框住 ${Math.round(x1 - x0)}×${Math.round(y1 - y0)} px　→　备注写<b>采集批次</b>，按 S 保存`;
+  draw();
+});
+
 cv.addEventListener("contextmenu", ev => {
   if (mode !== "feature") return;                   // 车框模式不动浏览器默认行为
   ev.preventDefault();
@@ -460,7 +505,26 @@ function status() {
 }
 
 async function save(kind) {
-  if (mode === "feature" || mode === "hero") {
+  if (mode === "hero") {
+    if (kind === "ok" && !heroBox) { msg("先拖一个框把车框住", true); return; }
+    const pts = heroBox
+      ? [[heroBox[0], heroBox[1]], [heroBox[2], heroBox[1]],
+         [heroBox[2], heroBox[3]], [heroBox[0], heroBox[3]]]
+      : [[0,0],[1,0],[1,1],[0,1]];
+    const hbody = { kind: "hero", points: pts, closed: true, status: kind,
+                    notes: document.getElementById("notes").value, from: currentFrom };
+    const hr = await fetch("/save", { method: "POST",
+                                      headers: { "Content-Type": "application/json" },
+                                      body: JSON.stringify(hbody) });
+    const hj = await hr.json();
+    if (!hj.ok) { msg("保存失败: " + hj.why, true); return; }
+    msg(kind === "ok" ? "已保存 " + hj.saved : "已保存（" + kind + "）");
+    heroBox = null; draw();
+    await loadList();
+    if (kind === "ok") await next();
+    return;
+  }
+  if (mode === "feature") {
     if (kind === "ok" && fpts.length < 3) { msg("至少要 3 个点", true); return; }
     const fbody = { kind: mode === "hero" ? "hero" : "feature",
                     name: document.getElementById("fname").value || "feature",
@@ -495,7 +559,8 @@ async function save(kind) {
   if (kind === "ok") await next();               // 实时帧下自动取新的一帧，连续标注
 }
 
-function resetPoints() { clicks = []; quad = []; tip = null; fpts = []; fclosed = false; draw(); info(); }
+function resetPoints() { clicks = []; quad = []; tip = null; fpts = []; fclosed = false;
+                         heroBox = null; dragging = null; draw(); info(); }
 
 async function loadFrames() {
   const j = await (await fetch("/frames")).json();
@@ -556,7 +621,7 @@ document.getElementById("mode").addEventListener("change", ev => {
   mode = ev.target.value;
   resetPoints();
   document.getElementById("step").innerHTML = (mode === "hero")
-    ? "① 框住<b>整辆英雄车</b>（含车顶标记）② 右键闭合 ③ 在备注里写<b>采集批次</b>（如 sess1）④ 按 S 保存"
+    ? "① <b>按住鼠标拖一个框</b>把整辆英雄车框住（松手即成）② 备注写<b>采集批次</b>（如 sess1）③ 按 S 保存"
     : (mode === "feature")
     ? "① 随意点箭头轮廓的顶点  ② <b>右键</b>闭合  ③ 按 S 保存"
     : "① 点车的<b>右前角</b>（然后顺时针点其余三个角）";
