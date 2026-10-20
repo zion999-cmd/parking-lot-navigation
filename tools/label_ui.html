@@ -142,6 +142,7 @@ let fpts = [];
 let fclosed = false;
 let heroBox = null;      // 英雄车模式：按住拖出的矩形 [x0,y0,x1,y1]
 let dragging = null;
+let heroSaved = 0;       // 本次会话保存了几个英雄框
 
 const K = (a,b) => [a,b];
 
@@ -518,10 +519,13 @@ async function save(kind) {
                                       body: JSON.stringify(hbody) });
     const hj = await hr.json();
     if (!hj.ok) { msg("保存失败: " + hj.why, true); return; }
-    msg(kind === "ok" ? "已保存 " + hj.saved : "已保存（" + kind + "）");
+    heroSaved += (kind === "ok") ? 1 : 0;
+    msg(kind === "ok" ? "已保存第 " + heroSaved + " 个英雄框 ✓（位置 " + hj.record.bbox.join(",") + "）"
+                      : "已保存（" + kind + "）");
+    document.getElementById("step").innerHTML =
+      "本次已保存 <b>" + heroSaved + "</b> 个英雄框　→　继续拖框标下一个，或按 N 换帧";
     heroBox = null; draw();
     await loadList();
-    if (kind === "ok") await next();
     return;
   }
   if (mode === "feature") {
@@ -597,6 +601,19 @@ function prev() {
 }
 
 async function loadList() {
+  // 英雄车模式的记录写在 tools/hero_lab/data/boxes.jsonl，不是 annotations.jsonl
+  if (mode === "hero") {
+    const j = await (await fetch("/boxes?t=" + Date.now())).json();
+    const rows = j.boxes || [];
+    document.getElementById("count").textContent = rows.length ? "(" + rows.length + ")" : "";
+    document.getElementById("list").innerHTML = rows.slice(0, 40).map(b => {
+      const [x,y,w,h] = b.bbox || [0,0,0,0];
+      return `<div><b>${String(b.frame).replace(/[<>&]/g,"")}</b>`
+           + `<span class="k">${x},${y} ${w}×${h}</span>`
+           + `<span class="k">${String(b.note||"").replace(/[<>&]/g,"")}</span></div>`;
+    }).join("");
+    return;
+  }
   const j = await (await fetch("/list")).json();
   saved = j.labels || [];
   document.getElementById("count").textContent = saved.length ? "(" + saved.length + ")" : "";
@@ -620,6 +637,8 @@ async function loadList() {
 document.getElementById("mode").addEventListener("change", ev => {
   mode = ev.target.value;
   resetPoints();
+  heroSaved = 0;
+  loadList();
   document.getElementById("step").innerHTML = (mode === "hero")
     ? "① <b>按住鼠标拖一个框</b>把整辆英雄车框住（松手即成）② 备注写<b>采集批次</b>（如 sess1）③ 按 S 保存"
     : (mode === "feature")

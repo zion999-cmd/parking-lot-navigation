@@ -45,6 +45,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import cv2
+import numpy as np
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 sys.path.insert(0, os.path.join(ROOT, "vision", "src"))
@@ -178,6 +179,20 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(503, (error or "no frame yet").encode("utf-8"), "text/plain")
             return self._send(200, data, "image/jpeg")
 
+        if path == "/boxes":
+            # The HOG dataset's own index, so the page can list what hero mode has saved.
+            hero = os.path.join(ROOT, "tools", "hero_lab", "data", "boxes.jsonl")
+            rows = []
+            if os.path.exists(hero):
+                with open(hero, encoding="utf-8") as fh:
+                    for line in fh:
+                        if line.strip():
+                            try:
+                                rows.append(json.loads(line))
+                            except ValueError:
+                                pass
+            return self._json(200, {"boxes": list(reversed(rows))})
+
         if path == "/list":
             return self._json(200, {"labels": list(reversed(read_annotations()))})
 
@@ -219,54 +234,6 @@ class Handler(BaseHTTPRequestHandler):
         # the thing looks like. Three points is the minimum that can enclose an area.
         points = payload.get("points") or []
         quad = payload.get("quad") or []
-        if kind == "hero":
-            # A hero box for the HOG/SVM dataset, saved straight into tools/hero_lab/data:
-            # the frame, the bbox, a 64x64 positive crop and automatic negatives from the
-            # same frame. The `notes` field carries the capture session, which is what
-            # train_hog.py splits train/validation on - so two frames from the same minute
-            # cannot end up on both sides.
-            import sys as _sys
-            _sys.path.insert(0, os.path.join(ROOT, "tools", "hero_lab"))
-            import hero_capture as _hero
-
-            pts = [[float(p[0]), float(p[1])] for p in points]
-            if len(pts) < 3:
-                return self._json(400, {"ok": False, "why": "a hero box needs at least 3 points"})
-            xs = [p[0] for p in pts]
-            ys = [p[1] for p in pts]
-            bbox = [int(min(xs)), int(min(ys)), int(max(xs) - min(xs)), int(max(ys) - min(ys))]
-            if bbox[2] < 12 or bbox[3] < 12:
-                return self._json(400, {"ok": False, "why": "hero box too small"})
-
-            frame = cv2.imdecode(np.frombuffer(blob, np.uint8), cv2.IMREAD_COLOR)
-            if frame is None:
-                return self._json(400, {"ok": False, "why": "could not decode the frame"})
-
-            for d in (_hero.FRAMES, _hero.POS, _hero.NEG):
-                os.makedirs(d, exist_ok=True)
-            stem = label_id.replace("ann-", "")
-            cv2.imwrite(os.path.join(_hero.FRAMES, stem + ".jpg"), frame)
-            x, y, w, h = bbox
-            crop = frame[y:y + h, x:x + w]
-            if crop.size:
-                cv2.imwrite(os.path.join(_hero.POS, stem + ".jpg"),
-                            cv2.resize(crop, (_hero.WIN_W, _hero.WIN_H),
-                                       interpolation=cv2.INTER_AREA))
-            negatives = _hero.auto_negatives(frame, (x, y, w, h), _hero.NEG_PER_FRAME)
-            for k, (nx, ny, nw, nh) in enumerate(negatives):
-                cv2.imwrite(os.path.join(_hero.NEG, "%s_%d.jpg" % (stem, k)),
-                            cv2.resize(frame[ny:ny + nh, nx:nx + nw],
-                                       (_hero.WIN_W, _hero.WIN_H),
-                                       interpolation=cv2.INTER_AREA))
-            with open(_hero.BOXES, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps({"frame": stem, "bbox": bbox, "negatives": negatives,
-                                     "note": str(payload.get("notes", "")).strip() or "default",
-                                     "at": time.strftime("%Y-%m-%dT%H:%M:%S")}) + "\n")
-            record = {"id": label_id, "image": image_name, "kind": "hero", "bbox": bbox,
-                      "negatives": len(negatives), "note": str(payload.get("notes", "")),
-                      "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
-            return self._json(200, {"ok": True, "saved": image_name, "record": record})
-
 
         if kind in ("feature", "hero"):
             if len(points) < 3:
@@ -320,6 +287,54 @@ class Handler(BaseHTTPRequestHandler):
 
         with open(os.path.join(LABELS, image_name), "wb") as fh:
             fh.write(blob)
+
+        if kind == "hero":
+            # A hero box for the HOG/SVM dataset, saved straight into tools/hero_lab/data:
+            # the frame, the bbox, a 64x64 positive crop and automatic negatives from the
+            # same frame. The `notes` field carries the capture session, which is what
+            # train_hog.py splits train/validation on - so two frames from the same minute
+            # cannot end up on both sides.
+            import sys as _sys
+            _sys.path.insert(0, os.path.join(ROOT, "tools", "hero_lab"))
+            import hero_capture as _hero
+
+            pts = [[float(p[0]), float(p[1])] for p in points]
+            if len(pts) < 3:
+                return self._json(400, {"ok": False, "why": "a hero box needs at least 3 points"})
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            bbox = [int(min(xs)), int(min(ys)), int(max(xs) - min(xs)), int(max(ys) - min(ys))]
+            if bbox[2] < 12 or bbox[3] < 12:
+                return self._json(400, {"ok": False, "why": "hero box too small"})
+
+            frame = cv2.imdecode(np.frombuffer(blob, np.uint8), cv2.IMREAD_COLOR)
+            if frame is None:
+                return self._json(400, {"ok": False, "why": "could not decode the frame"})
+
+            for d in (_hero.FRAMES, _hero.POS, _hero.NEG):
+                os.makedirs(d, exist_ok=True)
+            stem = label_id.replace("ann-", "")
+            cv2.imwrite(os.path.join(_hero.FRAMES, stem + ".jpg"), frame)
+            x, y, w, h = bbox
+            crop = frame[y:y + h, x:x + w]
+            if crop.size:
+                cv2.imwrite(os.path.join(_hero.POS, stem + ".jpg"),
+                            cv2.resize(crop, (_hero.WIN_W, _hero.WIN_H),
+                                       interpolation=cv2.INTER_AREA))
+            negatives = _hero.auto_negatives(frame, (x, y, w, h), _hero.NEG_PER_FRAME)
+            for k, (nx, ny, nw, nh) in enumerate(negatives):
+                cv2.imwrite(os.path.join(_hero.NEG, "%s_%d.jpg" % (stem, k)),
+                            cv2.resize(frame[ny:ny + nh, nx:nx + nw],
+                                       (_hero.WIN_W, _hero.WIN_H),
+                                       interpolation=cv2.INTER_AREA))
+            with open(_hero.BOXES, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"frame": stem, "bbox": bbox, "negatives": negatives,
+                                     "note": str(payload.get("notes", "")).strip() or "default",
+                                     "at": time.strftime("%Y-%m-%dT%H:%M:%S")}) + "\n")
+            record = {"id": label_id, "image": image_name, "kind": "hero", "bbox": bbox,
+                      "negatives": len(negatives), "note": str(payload.get("notes", "")),
+                      "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+            return self._json(200, {"ok": True, "saved": image_name, "record": record})
 
         if kind == "feature":
             record = {
