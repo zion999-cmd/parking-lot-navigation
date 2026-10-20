@@ -105,3 +105,42 @@ def detect(frame: np.ndarray, prefer_near: Optional[Tuple[float, float]] = None)
     return Pose(centre=(float(centroids[i][0]), float(centroids[i][1])),
                 heading=_heading(blob), area=int(area),
                 bbox=(int(x), int(y), int(w), int(h)), aspect=float(aspect))
+
+
+def detect_in_box(frame: np.ndarray, box, pad: float = 0.15) -> Optional[Pose]:
+    """The arrow inside a known car box, where the shape filters can be relaxed.
+
+    The aspect filter exists to choose between red blobs across a whole frame. Inside a box
+    that already contains the car there is nothing to choose, and the filter actively hurts:
+    an arrow turned 45 degrees has a nearly square bounding box (measured 26x28, aspect 1.08)
+    and was rejected by MIN_ASPECT. Rotation cannot be filtered by an extent ratio - that is
+    what the PCA axis is for - so here only the area is checked.
+    """
+    x, y, w, h = [int(v) for v in box]
+    m = int(pad * max(w, h))
+    x0, y0 = max(0, x - m), max(0, y - m)
+    crop = frame[y0:y + h + m, x0:x + w + m]
+    if crop.size == 0:
+        return None
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    mask = cv2.morphologyEx(_mask(hsv), cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+    _n, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, 8)
+    best = None
+    for i in range(1, len(stats)):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area < MIN_AREA // 3 or area > MAX_AREA:
+            continue
+        # Prefer the blob nearest the box centre: inside a car box, that is the roof.
+        d = np.hypot(centroids[i][0] - (crop.shape[1] / 2.0),
+                     centroids[i][1] - (crop.shape[0] / 2.0))
+        if best is None or d < best[0]:
+            best = (d, i)
+    if best is None:
+        return None
+    i = best[1]
+    blob = (labels == i).astype(np.uint8)
+    x1, y1, w1, h1, area = stats[i]
+    return Pose(centre=(float(centroids[i][0] + x0), float(centroids[i][1] + y0)),
+                heading=_heading(blob), area=int(area),
+                bbox=(int(x1 + x0), int(y1 + y0), int(w1), int(h1)),
+                aspect=float(max(w1, h1) / max(min(w1, h1), 1.0)))

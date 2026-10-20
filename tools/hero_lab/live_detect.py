@@ -20,7 +20,11 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from hero_capture import grab          # noqa: E402
-from train_hog import MODEL, WIN, make_hog  # noqa: E402
+from train_hog import MODEL, WIN, make_hog
+
+# A window counts as the car when its margin is at or below this. The training crops
+# measure hero at -1.0..-1.8 and everything else at +1.0..+1.6, so -0.5 sits in the gap.
+MARGIN_MAX = -0.5  # noqa: E402
 
 # The lot, roughly. Searching the whole 800x600 for every scale is wasted work on the wall
 # and the shelf, and this is the kind of bound production already uses.
@@ -80,14 +84,23 @@ def main() -> int:
                 boxes.append(box)
             if not patches:
                 continue
-            scores = svm.predict(np.asarray(patches, np.float32))[1].ravel()
-            k = int(np.argmax(scores))
-            if best is None or scores[k] > best[0]:
+            # Raw margin, not the class label: the label is >= 0 for anything the SVM leans
+            # towards, which admitted a false positive in the top-left corner. A positive
+            # margin means it leans towards hero; MARGIN_MIN says how hard it must lean.
+            _r, raw = svm.predict(np.asarray(patches, np.float32),
+                                  flags=cv2.ml.STAT_MODEL_RAW_OUTPUT)
+            # cv2.ml scores this model in reverse: the training crops measure -1.0..-1.8 for
+            # hero and +1.0..+1.6 for everything else, a clean gap at zero. So the most heroic
+            # window is the SMALLEST margin, not the largest, and MARGIN_MAX is the ceiling a
+            # window must stay under.
+            scores = raw.ravel()
+            k = int(np.argmin(scores))
+            if best is None or scores[k] < best[0]:
                 best = (float(scores[k]), boxes[k])
 
         dt = time.time() - t0
         times.append(dt)
-        if best is not None and best[0] > 0.0:
+        if best is not None and best[0] <= MARGIN_MAX:
             last = best[1]
             hits += 1
         else:

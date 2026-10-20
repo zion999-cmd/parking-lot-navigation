@@ -56,6 +56,10 @@ def load_pairs():
     for path in sorted(glob.glob(os.path.join(DATA, "neg", "*.jpg"))):
         stem = os.path.splitext(os.path.basename(path))[0].split("_")[0]
         out.append((path, 0, groups.get(stem, "default")))
+    # Hard negatives mined from the model's own mistakes on the captured frames.
+    for path in sorted(glob.glob(os.path.join(DATA, "hard", "*.jpg"))):
+        stem = os.path.splitext(os.path.basename(path))[0].split("_")[0]
+        out.append((path, 0, groups.get(stem, "default")))
     return out
 
 
