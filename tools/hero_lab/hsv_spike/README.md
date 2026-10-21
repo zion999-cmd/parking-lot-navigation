@@ -63,3 +63,38 @@ arguably - one JSON of thresholds, at the cost of having to know that the arrow 
 
 `config.json` keeps the task's original arcs (0-10 / 170-180). `config.orangered.json` is the
 measured one (0-50, S>=60, V>=40, max_area 1200). Compare both before changing the default.
+
+# Phase 2 — shape matching
+
+One arrow contour as the reference (picked from a frame at the position Phase 1 measured, so
+it is the arrow itself, not a training set), then `cv2.matchShapes` with `CONTOURS_MATCH_I1`
+against every candidate. Hu moments are invariant to position, scale and rotation, which is
+what a candidate filter needs - and which is also why these scores cannot give a heading.
+
+    python shape_match.py --frames 200 --out out/phase2
+
+200 frames, 442 candidates (200 near the arrow, 242 elsewhere):
+
+| | n | min | median | max |
+|---|---|---|---|---|
+| near the arrow | 200 | 0.016 | **0.102** | 0.415 |
+| elsewhere | 242 | 0.105 | **0.873** | 5.971 |
+
+**Cut at the arrow's own worst score (0.415): keeps 200/200 arrow candidates and 15/242 of
+the others.** 94% of the Phase 1 clutter - the bay lights and LED strip at the frame edges -
+is removed by shape alone, without touching a single colour threshold.
+
+Precision 200/215 = 0.93, recall 200/200 = 1.00, F1 0.96 (against the position-based
+definition of "the arrow" below - no per-frame ground truth exists yet).
+
+## The caveat that matters
+
+"Near the arrow" is a position test (within 60 px of 240,485), so this is not a ground-truth
+evaluation. What is not circular is the separation itself: the score is computed from the
+contour alone, and the two groups land at 0.102 and 0.873 without knowing where they are.
+
+## What Phase 2 does not give
+
+Heading. `matchShapes` is rotation-invariant by design, so an arrow pointing left and an
+arrow pointing right score the same. If heading is wanted, it has to come from the template
+angle sweep (Phase 3), not from here.
