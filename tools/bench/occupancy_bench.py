@@ -161,6 +161,20 @@ def main() -> int:
     print("  false empty     %d %s" % (m["FN"], misses))
     print("  unknown rate    %.3f" % (m["UNKNOWN"] / 48.0))
 
+    # Keep the raw evidence, not just the summary: the state document this round was scored
+    # against, and the truth it was scored with. A summary row cannot be re-checked later.
+    if args.round:
+        rounds_dir = os.path.join(OUT_DIR, "rounds")
+        os.makedirs(rounds_dir, exist_ok=True)
+        with open(os.path.join(rounds_dir, "%s_truth.txt" % args.round), "w",
+                  encoding="utf-8") as fh:
+            fh.write("\n".join(sorted(truth)) + "\n")
+        if args.from_state:
+            import shutil
+            shutil.copy(os.path.join(ROOT, "vision", "out", "parking_state.json"),
+                        os.path.join(rounds_dir, "%s_state.json" % args.round))
+        print("  archived %s/rounds/%s_{truth.txt,state.json}" % (OUT_DIR, args.round))
+
     summary = os.path.join(OUT_DIR, "occupancy_rounds.csv")
     new = not os.path.exists(summary)
     with open(summary, "a", newline="", encoding="utf-8") as fh:
