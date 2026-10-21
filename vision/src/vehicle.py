@@ -34,7 +34,10 @@ import numpy as np
 import arrow            # the printed arrow template; see src/arrow.py
 import aruco_hero       # an ArUco marker, which also reports the direction
 import red_arrow        # red arrow on white paper: colour + contour, blur-proof
-import hero_hog         # HOG+SVM finds the car box, the arrow inside gives the direction
+# hero_hog is deliberately NOT imported. It stays in the tree, with its model, tests and
+# benchmarks, because it measured well on the pose it was trained at - but it answers on
+# only 53 of 220 live frames and costs 75.7 ms when it does, against red_arrow's 220/220 at
+# 4.5 ms. It is out of the HERO execution path, not deleted.
 import hsv_marker       # HSV red mask + Hu-moment shape: the position, no model file
 # Car-specific but data-driven, so the hero car can be swapped without editing source. The file
 # holds the HSV target colour plus the morphology sizes; built-in values below are the fallback.
@@ -175,6 +178,10 @@ class VehiclePose:
     # axis. The arrow states the direction, so this heading has a front and is not an
     # axis with two indistinguishable ends.
     heading_from_arrow: bool = False
+    # True when this heading is the last one that could be read, carried forward because the
+    # arrow was unreadable this frame. The angle is real but its age is not obvious, so the
+    # contract says so instead of letting a stale direction look like a fresh measurement.
+    heading_stale: bool = False
 
     @property
     def centre(self) -> Tuple[float, float]:
@@ -190,7 +197,8 @@ class VehiclePose:
                "heading": round(self.heading, 1) if axis_known else None,
                "visible": True,
                  "heading_is_axis_only": bool(axis_known and not self.heading_from_arrow),
-               "front_is_known": bool(self.front_is_known)}
+               "heading_stale": bool(self.heading_stale),
+                 "front_is_known": bool(self.front_is_known)}
         if self.front_is_known and self.front_heading is not None:
             # The axis, plus the one fact a person had to tell us: which end is the front.
             out["front_heading"] = round(self.front_heading, 1)
@@ -911,6 +919,30 @@ _ARROW_TEMPLATE = None
 # pixels per frame, so the next one is nearly always inside a 140 px window of the last.
 _last_centre: List[Optional[float]] = [None, None]
 _last_heading: List[Optional[float]] = [None]
+
+# Heading-health counters. The point is to make a silent degradation visible: if the arrow
+# stops being readable the position channel keeps working and the heading is served from
+# _last_heading, which looks like normal operation on the page. These numbers say whether it
+# is, so a frozen heading becomes a thing you can see rather than a thing you have to suspect.
+_heading_metrics = {
+    "red_arrow_success_total": 0,
+    "red_arrow_fail_total": 0,
+    "heading_hold_last_total": 0,
+    "heading_unavailable_total": 0,
+    "heading_consecutive_failures": 0,
+}
+
+
+def heading_metrics() -> dict:
+    """A copy of the counters, plus the live stale flag."""
+    out = dict(_heading_metrics)
+    out["heading_stale"] = _heading_metrics["heading_consecutive_failures"] > 0
+    return out
+
+
+def reset_heading_metrics() -> None:
+    for k in _heading_metrics:
+        _heading_metrics[k] = 0
 _prev_centre: List[Optional[float]] = [None, None]
 _last_centre_us = 0.0
 WIDE_SEARCH_MIN_S = 2.0      # a whole-frame sweep is ~1 s, so not more often than this
@@ -959,49 +991,42 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
         # comparison to the arrow contour directly. Its position must agree with ours before
         # its direction is trusted - two different red blobs would otherwise mix.
         inner = red_arrow.detect(frame, prefer_near=(cx, cy))
+        stale = False
         if (inner is not None and inner.heading is not None
                 and math.hypot(inner.centre[0] - cx, inner.centre[1] - cy) < 40.0):
             heading = float(inner.heading % 360.0)
             heading_from_arrow = True
+            _last_heading[0] = heading
+            _heading_metrics["red_arrow_success_total"] += 1
+            _heading_metrics["heading_consecutive_failures"] = 0
         else:
-            hog_hit = hero_hog.detect(frame)
-            if hog_hit is not None and hog_hit.heading is not None:
-                heading = float(hog_hit.heading % 360.0)
-                heading_from_arrow = True
-            elif _last_heading[0] is not None:
+            # red_arrow is the only heading provider now. hero_hog used to be tried here and is
+            # no longer called: it answered on 53 of 220 live frames at 75.7 ms, so the common
+            # case was paying 75 ms to be told nothing. Holding the last stable heading is
+            # cheaper and, more importantly, honest - it is the same answer with a flag on it.
+            _heading_metrics["red_arrow_fail_total"] += 1
+            _heading_metrics["heading_consecutive_failures"] += 1
+            if _last_heading[0] is not None:
                 # Keep the car. Dropping it because the arrow is momentarily unreadable is
                 # what made the marker "disappear" and the page replan.
                 heading = float(_last_heading[0])
                 heading_from_arrow = False
+                stale = True
+                _heading_metrics["heading_hold_last_total"] += 1
             else:
+                # Nothing has ever been read. Say so instead of inventing an angle: a consumer
+                # that cannot tell a guess from a measurement will act on the guess.
+                heading = None
                 heading_from_arrow = False
-        if heading is not None:
-            _last_heading[0] = heading
+                _heading_metrics["heading_unavailable_total"] += 1
 
         return [VehiclePose(
             x=float(cx), y=float(cy), heading=heading,
             area=int(hsv_hit["area"]), elongation=float(hsv_hit["aspect"]), fill=1.0,
             bbox=(int(bx), int(by), int(bw), int(bh)), heading_pca=heading,
             forward_score=float(1.0 - hsv_hit["shape_score"]), heading_from_arrow=heading_from_arrow,
-            front_heading=heading, front_is_known=heading is not None)]
-
-    # HOG + linear SVM next: it scores whole windows, so unlike a colour mask it does not
-    # care that the marker is small, blurred at the table's edge, or briefly out of sight. The
-    # arrow inside the box then gives the direction, and a box with no arrow in it is a false
-    # positive and is dropped. Measured: recall 0.984 over three held-out sessions, 10 ms per
-    # frame once the box is known, heading within 1 degree.
-    hog_hit = hero_hog.detect(frame)
-    if hog_hit is not None and hog_hit.heading is not None:
-        x, y, w, h = hog_hit.bbox
-        heading = float(hog_hit.heading % 360.0)
-        _last_centre[0], _last_centre[1] = hog_hit.centre[0], hog_hit.centre[1]
-        return [VehiclePose(
-            x=float(hog_hit.centre[0]), y=float(hog_hit.centre[1]), heading=heading,
-            area=int(w * h), elongation=max(w, h) / max(min(w, h), 1.0), fill=1.0,
-            bbox=(int(x), int(y), int(w), int(h)), heading_pca=heading,
-            forward_score=float(-hog_hit.margin), heading_from_arrow=True,
-            front_heading=heading, front_is_known=True)]
-
+            front_heading=heading, front_is_known=heading is not None,
+            heading_stale=stale)]
 
     # Red arrow on white paper first: colour says which blob is a candidate, area and aspect
     # say which of the red blobs, and the contour's principal axis plus the wider end give the

@@ -980,8 +980,14 @@ def main() -> int:
                     else:
                         a = f"align=FAILED"
                     src = f" src={cam.stats.fps():4.1f}" if cam is not None else ""
+                    _hm = vehicle.heading_metrics()
                     print(f"t={elapsed:5.1f}s fps={fps:4.1f}{src} thr={threshold:.2f} {a} "
-                          f"{status_line(spots, results)}")
+                          f"{status_line(spots, results)} "
+                          f"| heading ok={_hm['red_arrow_success_total']} "
+                          f"fail={_hm['red_arrow_fail_total']} "
+                          f"hold={_hm['heading_hold_last_total']} "
+                          f"none={_hm['heading_unavailable_total']}"
+                          f"{'  STALE' if _hm['heading_stale'] else ''}")
                 else:
                     print(f"t={elapsed:5.1f}s  waiting for a reference (press 'r')")
 
@@ -1016,6 +1022,8 @@ def main() -> int:
                     car_text = "not visible"
                 else:
                     car_text = f"({pose.x:.0f},{pose.y:.0f}) axis {pose.heading:.0f}deg"
+                    if getattr(pose, "heading_stale", False):
+                        car_text += " STALE"
                     if location:
                         car_text += f" {location['kind']}" + (f" {location['id']}"
                                                               if location.get("id") else "")
