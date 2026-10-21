@@ -1,0 +1,8 @@
+  confusion matrix (48 bays, threshold 0.30)
+                   system EMPTY   system OCCUPIED   system UNKNOWN
+  truth EMPTY              41                 0                0
+  truth OCCUP.              0                 7                0
+  accuracy on decided bays  1.000  (48 of 48)
+  false occupied  0 []
+  false empty     0 []
+  unknown rate    0.000
