@@ -55,6 +55,14 @@ MARGIN_MAX = 0.0
 
 @dataclass
 class Detection:
+    """Where the car is, and what that claim is anchored on.
+
+    `centre` is the ARROW's centroid, not the box centre. The box is only what the sliding
+    window proposed; its position jitters with the margin from frame to frame even when the
+    car is standing still. The arrow is found by colour and shape, which is stable to about a
+    pixel, so once it has been seen it is what the position is pinned to - the box stops
+    mattering until the arrow is lost.
+    """
     bbox: Tuple[int, int, int, int]
     centre: Tuple[float, float]
     heading: Optional[float]
@@ -64,6 +72,13 @@ class Detection:
 _SVM = None
 _HOG = None
 _LAST: Optional[Tuple[int, int, int, int]] = None
+_LAST_HEADING: Optional[float] = None   # committed direction; see the gate below
+# A reading must be within this of the committed heading to be believed. The failure it guards
+# against is a clean 180-degree flip, so anything well under 180 works; 30 leaves room for a
+# car turning while being pushed.
+HEADING_GATE = 30.0
+HEADING_PERSIST = 12     # frames of contradiction before a reversal is accepted as real
+_heading_disagreements = 0
 
 
 def _load():
@@ -77,13 +92,15 @@ def _load():
 
 
 def reset() -> None:
-    """Forget the last box, so the next call searches the whole lot."""
-    global _LAST
+    """Forget the last box and heading."""
+    global _LAST, _LAST_HEADING
     _LAST = None
+    _LAST_HEADING = None
 
 
 def detect(frame: np.ndarray) -> Optional[Detection]:
     """The car and its heading, or None."""
+    global _LAST_HEADING, _heading_disagreements
     global _LAST
     if frame is None or frame.size == 0 or not _load():
         return None
@@ -119,13 +136,63 @@ def detect(frame: np.ndarray) -> Optional[Detection]:
         _LAST = None
         return None
 
-    # Stage two: the arrow inside the box, which is also what rejects a false positive.
+    # Stage two: the arrow inside the box. It rejects a false positive (no arrow, no car) and
+    # it is what the position is anchored to - the box only proposed a search area, and its
+    # centre moves by a few pixels between frames even when the car does not.
     arrow = red_arrow.detect_in_box(frame, box)
     if arrow is None:
-        _LAST = None
-        return None
+        # No arrow this frame - blurred, occluded, or the blob filter was strict. The car is
+        # still there (the sliding window is confident and the box has not moved), so report
+        # it with the direction already committed instead of dropping the car entirely.
+        # Dropping it is what made the marker "disappear" for a frame and the page replan.
+        if _LAST_HEADING is None:
+            _LAST = None
+            return None
+        _LAST = box
+        return Detection(bbox=box, centre=(box[0] + box[2] / 2.0, box[1] + box[3] / 2.0),
+                         heading=float(_LAST_HEADING), margin=margin)
+
+    # Position comes from the box, direction from the arrow, and the split is measured:
+    # with the car standing still the box centre held to 0.0 px over twenty frames while the
+    # arrow centroid moved 55 px, because the arrow detector can pick a red LED instead of the
+    # arrow. So the box is the better position and the arrow is the only thing that can give a
+    # direction - it is the one object on the table there is exactly one of.
+    #
+    # The arrow is required to be inside the box; an arrow found elsewhere is not this car's.
+    margin_ok = (box[0] - 10 <= arrow.centre[0] <= box[0] + box[2] + 10
+                 and box[1] - 10 <= arrow.centre[1] <= box[1] + box[3] + 10)
+    if margin_ok:
+        # Anchor the heading, as the user asked: the head/tail decision is a width comparison,
+        # and on this marker it flips by exactly 180 degrees between frames that differ only
+        # in blur (measured: 185, 5, 182, 4, 186, 5 ...). A car cannot change ends, so a
+        # reading that contradicts the committed one by more than HEADING_GATE is ignored
+        # until it keeps repeating - see _heading_disagreements.
+        reading = float(arrow.heading % 360.0)
+        if _LAST_HEADING is None:
+            heading = reading
+        else:
+            diff = abs((reading - _LAST_HEADING + 180.0) % 360.0 - 180.0)
+            if diff <= HEADING_GATE:
+                heading = reading
+            else:
+                _heading_disagreements += 1
+                # Twelve frames of agreement against the committed value is a real turn, not
+                # a flip: measured, a genuine reversal produces a sustained run.
+                if _heading_disagreements >= HEADING_PERSIST:
+                    heading = reading
+                    _heading_disagreements = 0
+                else:
+                    heading = _LAST_HEADING
+        if heading is not _LAST_HEADING:
+            _heading_disagreements = 0
+        _LAST_HEADING = heading
+    else:
+        # A red blob outside the car's box is something else - a bay light, most likely - and
+        # must not be allowed to set the direction. Keep the last trusted one instead.
+        heading = _LAST_HEADING
+    if heading is None:
+        return None                      # a car with no direction yet: not usable as a pose
 
     _LAST = box
-    x, y, w, h = box
-    return Detection(bbox=box, centre=(x + w / 2.0, y + h / 2.0),
-                     heading=float(arrow.heading % 360.0), margin=margin)
+    return Detection(bbox=box, centre=(box[0] + box[2] / 2.0, box[1] + box[3] / 2.0),
+                     heading=heading, margin=margin)

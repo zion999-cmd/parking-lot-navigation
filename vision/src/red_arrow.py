@@ -18,6 +18,7 @@ position is preferred when several candidates qualify.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -107,6 +108,25 @@ def detect(frame: np.ndarray, prefer_near: Optional[Tuple[float, float]] = None)
                 bbox=(int(x), int(y), int(w), int(h)), aspect=float(aspect))
 
 
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_ARROW_REFERENCE = os.path.join(ROOT, "data", "arrow", "design", "white_arrow2.png")
+_REF = None
+
+
+def _reference_shape():
+    """The arrow's outline, for matchShapes. Hu moments drop rotation and scale out."""
+    global _REF
+    if _REF is None:
+        ref = cv2.imread(_ARROW_REFERENCE, cv2.IMREAD_GRAYSCALE)
+        if ref is not None:
+            _t, binary = cv2.threshold(ref, 127, 255, cv2.THRESH_BINARY_INV)
+            contours, _h = cv2.findContours(binary, cv2.RETR_EXTERNAL,
+                                            cv2.CHAIN_APPROX_SIMPLE)
+            if contours:
+                _REF = max(contours, key=cv2.contourArea)
+    return _REF
+
+
 def detect_in_box(frame: np.ndarray, box, pad: float = 0.15) -> Optional[Pose]:
     """The arrow inside a known car box, where the shape filters can be relaxed.
 
@@ -125,14 +145,34 @@ def detect_in_box(frame: np.ndarray, box, pad: float = 0.15) -> Optional[Pose]:
     hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
     mask = cv2.morphologyEx(_mask(hsv), cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
     _n, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, 8)
+    # Which red blob, when a car box can contain the arrow AND the bay lights? Shape, not
+    # proximity: picking the blob nearest the box centre let an LED win often enough that the
+    # heading swung through 356 degrees over twenty frames while the car stood still.
+    reference = _reference_shape()
+    cx_box, cy_box = crop.shape[1] / 2.0, crop.shape[0] / 2.0
     best = None
     for i in range(1, len(stats)):
         area = int(stats[i, cv2.CC_STAT_AREA])
         if area < MIN_AREA // 3 or area > MAX_AREA:
             continue
-        # Prefer the blob nearest the box centre: inside a car box, that is the roof.
-        d = np.hypot(centroids[i][0] - (crop.shape[1] / 2.0),
-                     centroids[i][1] - (crop.shape[0] / 2.0))
+        # Three filters together, because any one of them alone let a bay light through:
+        #   size      the arrow is 150..300 px here; an LED blob is smaller
+        #   shape     Hu-moment distance to the printed arrow, and it must be close
+        #   position  the arrow is on the roof, so near the box's centre; an LED sits at the
+        #             bay's edge and lands in the corner of the box
+        dist = float(np.hypot(centroids[i][0] - cx_box, centroids[i][1] - cy_box))
+        if dist > 0.45 * max(crop.shape[:2]):
+            continue
+        blob_i = (labels == i).astype(np.uint8)
+        contours, _h = cv2.findContours(blob_i * 255, cv2.RETR_EXTERNAL,
+                                        cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            continue
+        contour = max(contours, key=cv2.contourArea)
+        d = float(cv2.matchShapes(reference, contour, cv2.CONTOURS_MATCH_I1, 0.0)) \
+            if reference is not None else 0.0
+        if d > 0.30:
+            continue
         if best is None or d < best[0]:
             best = (d, i)
     if best is None:
