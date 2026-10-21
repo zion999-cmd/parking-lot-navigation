@@ -35,6 +35,7 @@ import arrow            # the printed arrow template; see src/arrow.py
 import aruco_hero       # an ArUco marker, which also reports the direction
 import red_arrow        # red arrow on white paper: colour + contour, blur-proof
 import hero_hog         # HOG+SVM finds the car box, the arrow inside gives the direction
+import hsv_marker       # HSV red mask + Hu-moment shape: the position, no model file
 # Car-specific but data-driven, so the hero car can be swapped without editing source. The file
 # holds the HSV target colour plus the morphology sizes; built-in values below are the fallback.
 VEHICLE_CONFIG_PATH = os.path.join(
@@ -909,6 +910,7 @@ _ARROW_TEMPLATE = None
 # Where the arrow was last seen, and when the last wide search ran. The arrow moves a few
 # pixels per frame, so the next one is nearly always inside a 140 px window of the last.
 _last_centre: List[Optional[float]] = [None, None]
+_last_heading: List[Optional[float]] = [None]
 _prev_centre: List[Optional[float]] = [None, None]
 _last_centre_us = 0.0
 WIDE_SEARCH_MIN_S = 2.0      # a whole-frame sweep is ~1 s, so not more often than this
@@ -933,7 +935,57 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
     if frame is None or frame.size == 0:
         return []
 
-    # HOG + linear SVM first: it scores whole windows, so unlike a colour mask it does not
+    # HSV + Hu-moment shape first, for the position. The mask is on the arc the arrow actually
+    # lives in (OrangeRed, H 24-46 - not the textbook red arcs), and shape matching against one
+    # stored arrow contour removes the rest: measured 199/200 frames kept the arrow and 96% of
+    # the other red blobs were dropped, with 1.3 px of centre jitter over 200 frames. It needs
+    # no model file and no training set, which turned out to matter more than expected: after
+    # the car was moved, HOG detected it 0 times in 40 frames while this found it 40/40.
+    hsv_hit = hsv_marker.detect(frame, prefer_near=(_last_centre[0], _last_centre[1])
+                                if _last_centre[0] is not None else None)
+    if hsv_hit is not None:
+        bx, by, bw, bh = hsv_hit["bbox"]
+        cx, cy = hsv_hit["centre"]
+        _last_centre[0], _last_centre[1] = cx, cy
+
+        # The box is the position; the direction is a separate question that a shape score
+        # cannot answer (Hu moments are rotation invariant by design). Ask the arrow inside
+        # the box we just found. HOG is kept as the heading provider of last resort, tried
+        # only when that fails, because it costs 10-72 ms and currently detects nothing here.
+        heading: Optional[float] = None
+        # red_arrow.detect rather than detect_in_box: the box we have IS the arrow, so there
+        # is nothing to search inside it, and detect_in_box returned None every time when
+        # handed an arrow-sized box. Whole-frame detect applies the PCA axis and the head/tail
+        # comparison to the arrow contour directly. Its position must agree with ours before
+        # its direction is trusted - two different red blobs would otherwise mix.
+        inner = red_arrow.detect(frame, prefer_near=(cx, cy))
+        if (inner is not None and inner.heading is not None
+                and math.hypot(inner.centre[0] - cx, inner.centre[1] - cy) < 40.0):
+            heading = float(inner.heading % 360.0)
+            heading_from_arrow = True
+        else:
+            hog_hit = hero_hog.detect(frame)
+            if hog_hit is not None and hog_hit.heading is not None:
+                heading = float(hog_hit.heading % 360.0)
+                heading_from_arrow = True
+            elif _last_heading[0] is not None:
+                # Keep the car. Dropping it because the arrow is momentarily unreadable is
+                # what made the marker "disappear" and the page replan.
+                heading = float(_last_heading[0])
+                heading_from_arrow = False
+            else:
+                heading_from_arrow = False
+        if heading is not None:
+            _last_heading[0] = heading
+
+        return [VehiclePose(
+            x=float(cx), y=float(cy), heading=heading,
+            area=int(hsv_hit["area"]), elongation=float(hsv_hit["aspect"]), fill=1.0,
+            bbox=(int(bx), int(by), int(bw), int(bh)), heading_pca=heading,
+            forward_score=float(1.0 - hsv_hit["shape_score"]), heading_from_arrow=heading_from_arrow,
+            front_heading=heading, front_is_known=heading is not None)]
+
+    # HOG + linear SVM next: it scores whole windows, so unlike a colour mask it does not
     # care that the marker is small, blurred at the table's edge, or briefly out of sight. The
     # arrow inside the box then gives the direction, and a box with no arrow in it is a false
     # positive and is dropped. Measured: recall 0.984 over three held-out sessions, 10 ms per
