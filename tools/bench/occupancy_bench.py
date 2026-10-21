@@ -44,7 +44,12 @@ OUT_DIR = os.path.join(HERE, "out")
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--stream", default="http://127.0.0.1:8021/stream")
-    ap.add_argument("--truth", default="", help="CSV of bays that have a car in them")
+    ap.add_argument("--truth", default="", help="CSV file, or comma separated bay ids")
+    ap.add_argument("--round", default="", help="label for this run, e.g. r1; appends a summary row")
+    ap.add_argument("--quiet", action="store_true", help="do not print the per-bay ratios")
+    ap.add_argument("--from-state", action="store_true",
+                    help="score parking_state.json (what production decided) instead of "
+                         "re-detecting on a freshly grabbed frame")
     ap.add_argument("--threshold", type=float, default=occupancy.OccupancyParams().changed_ratio_threshold,
                     help="default: the production value, so this measures what production does")
     args = ap.parse_args()
@@ -54,20 +59,39 @@ def main() -> int:
     if reference is None:
         print("no reference at %s - press r in the vision window with every bay empty" % REFERENCE)
         return 1
-    frame = grab(args.stream)
+    # The relay answers immediately with the frame it already has, so a single grab can
+    # return a stale picture - two rounds in a row measured identically (frame diff 0.0)
+    # because of it. Drain a few and keep the last: the detector must see what is on the
+    # table now, not what was there when the previous round ran.
+    for _ in range(3):
+        frame = grab(args.stream)
     if frame.shape[:2] != reference.shape[:2]:
         print("reference is %s but the camera gives %s - they must match"
               % (reference.shape[:2], frame.shape[:2]))
         return 1
 
-    params = occupancy.OccupancyParams(changed_ratio_threshold=args.threshold)
-    detector = occupancy.OccupancyDetector(params)
-    spots = load_spots(os.path.join(ROOT, "vision", "config", "parking_spots.json"),
-                       reference.shape[:2])
-    detector.set_reference(reference, spots)
-    results = detector.evaluate(frame, spots)
+    if args.from_state:
+        # What production actually decided. Re-detecting here would measure this script's
+        # own frame grab rather than the system, and the grab turned out to be able to return
+        # a stale picture - two rounds measured identically while the strip showed red LEDs.
+        doc = json.load(open(os.path.join(ROOT, "vision", "out", "parking_state.json"),
+                             encoding="utf-8"))
+        bays = {str(k): v for k, v in (doc.get("spots") or {}).items()}
+        ratios = {k: float(v.get("changed_ratio") or 0.0) for k, v in bays.items()}
+        states = {k: v.get("state") or "UNKNOWN" for k, v in bays.items()}
+        frame = reference if False else None
+        results = None
+    else:
+        params = occupancy.OccupancyParams(changed_ratio_threshold=args.threshold)
+        detector = occupancy.OccupancyDetector(params)
+        spots = load_spots(os.path.join(ROOT, "vision", "config", "parking_spots.json"),
+                           reference.shape[:2])
+        detector.set_reference(reference, spots)
+        results = detector.evaluate(frame, spots)
     # evaluate() returns {spot_id: SpotResult}
-    if isinstance(results, dict):
+    if args.from_state:
+        pass
+    elif isinstance(results, dict):
         ratios = {str(k): float(v.changed_ratio) for k, v in results.items()}
         states = {str(k): v.state for k, v in results.items()}
     else:
@@ -91,16 +115,22 @@ def main() -> int:
         cv2.imwrite(out, view)
         flagged = sorted((sid, r) for sid, r in ratios.items() if r >= args.threshold)
         print("  threshold %.2f  ->  %d bays over" % (args.threshold, len(flagged)))
-        print("  %s" % ", ".join("%s %.2f" % (s, r) for s, r in flagged))
+        if not args.quiet:
+            print("  %s" % ", ".join("%s %.2f" % (s, r) for s, r in flagged))
         print("  annotated image: %s" % out)
         print("  give the verdict as truth.csv (bays that HAVE a car), then re-run with --truth")
         return 0
 
     truth = set()
-    with open(args.truth, encoding="utf-8") as fh:
-        for row in csv.reader(fh):
-            if row and row[0].strip():
-                truth.add(row[0].strip())
+    if os.path.exists(args.truth):
+        with open(args.truth, encoding="utf-8") as fh:
+            for row in csv.reader(fh):
+                if row and row[0].strip():
+                    truth.add(row[0].strip())
+    else:
+        for part in args.truth.replace("，", ",").split(","):
+            if part.strip():
+                truth.add(part.strip())
     bays = [str(s["id"]) for s in map_doc.get("spots") or []]
     m = {"TP": 0, "FN": 0, "FP": 0, "TN": 0, "UNKNOWN": 0}
     misses, false_pos = [], []
@@ -130,6 +160,19 @@ def main() -> int:
     print("  false occupied  %d %s" % (m["FP"], false_pos))
     print("  false empty     %d %s" % (m["FN"], misses))
     print("  unknown rate    %.3f" % (m["UNKNOWN"] / 48.0))
+
+    summary = os.path.join(OUT_DIR, "occupancy_rounds.csv")
+    new = not os.path.exists(summary)
+    with open(summary, "a", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        if new:
+            w.writerow(["round", "threshold", "truth_occupied", "tp", "fn", "fp", "tn",
+                        "unknown", "accuracy", "false_occupied", "false_empty", "missed"])
+        w.writerow([args.round or "-", args.threshold, len(truth), m["TP"], m["FN"], m["FP"],
+                    m["TN"], m["UNKNOWN"],
+                    round((m["TP"] + m["TN"]) / max(decided, 1), 4), m["FP"], m["FN"],
+                    " ".join(misses)])
+    print("  appended to %s" % summary)
     return 0
 
 
