@@ -65,3 +65,24 @@ thresholds, PCA, or the head/tail rule. That is a separate change with its own r
 Caveat worth stating: this rotates a patch synthetically. It reproduces the rasterisation
 effect faithfully but not a physically rotated car (lighting, shadow, motion blur). A real-turn
 test is still wanted before shipping.
+
+# Gate sequence: what a turn costs, and what a flip costs
+
+`gate_sequence.py` feeds the production path (heading_in_roi + HeadingState) a scripted
+sequence on the same synthetic rotation, and reports how many frames a change takes to commit.
+
+| case | behaviour | frames to commit |
+|---|---|---|
+| slew, +5 deg/frame | every frame inside the 30 deg gate | **0** - accepted 37/37, lag 0.0 deg |
+| jump, 45 deg in one frame | exceeds the gate | **12** (pending x11, then committed) |
+| single 180 deg flip | pending | **never**, heading does not move |
+
+The important line is the first one: a car being pushed round in an arc never leaves the gate,
+so the persistence adds **no latency at all** to a real turn. The 12-frame cost only applies to
+a direction that appears between two frames with nothing in between, which is what a flip looks
+like. Being slow to believe that is the point.
+
+The trade-off, unchanged from 585a327 and stated rather than hidden: a *sustained* 180 error -
+someone physically turning the marker round, or lighting that systematically inverts the
+head/tail test - is believed after 12 frames. Twelve frames of agreement is the best available
+evidence that it is not noise.

@@ -39,7 +39,7 @@ def load_before(tmpdir="/tmp/hog_regress"):
     target = os.path.join(tmpdir, "vehicle_before.py")
     with open(target, "w", encoding="utf-8") as f:
         f.write(subprocess.check_output(
-            ["git", "-C", ROOT, "show", "HEAD~1:vision/src/vehicle.py"]).decode())
+            ["git", "-C", ROOT, "show", (os.environ.get("BEFORE_REF") or "HEAD~1") + ":vision/src/vehicle.py"]).decode())
     sys.path.insert(0, tmpdir)
     import vehicle_before                    # noqa: F401
     return vehicle_before
@@ -164,12 +164,12 @@ def main() -> int:
     # ---- failure behaviour
     print("--- failure behaviour ---")
     import red_arrow
-    real_red = red_arrow.detect
+    real_red = red_arrow.heading_in_roi
 
-    vehicle._last_heading[0] = None
+    vehicle._heading_state.seed(None)
     vehicle.reset_heading_metrics()
 
-    red_arrow.detect = lambda *a, **k: None
+    red_arrow.heading_in_roi = lambda *a, **k: None
     try:
         # a) no history at all
         p = vehicle.locate_all(imgs[0])
@@ -179,8 +179,7 @@ def main() -> int:
         unavailable = vehicle.heading_metrics()["heading_unavailable_total"]
 
         # b) seed a heading, then fail
-        vehicle._last_heading[0] = 137.0
-        vehicle._heading_metrics["heading_consecutive_failures"] = 0
+        vehicle._heading_state.seed(137.0)
         p = vehicle.locate_all(imgs[1])
         pose = p[0] if p else None
         print("history 137, arrow fails      heading=%s stale=%s" % (
@@ -197,10 +196,10 @@ def main() -> int:
             "red_arrow_success_total", "red_arrow_fail_total",
             "heading_hold_last_total", "heading_unavailable_total")})
     finally:
-        red_arrow.detect = real_red
+        red_arrow.heading_in_roi = real_red
 
     # d) recovery clears the flag
-    vehicle._heading_metrics["heading_consecutive_failures"] = 5
+    vehicle._heading_state.consecutive_failures = 5
     p = vehicle.locate_all(imgs[0])
     pose = p[0] if p else None
     m = vehicle.heading_metrics()
@@ -211,8 +210,13 @@ def main() -> int:
     print("  success_total now %d, unavailable_total now %d" % (
         m["red_arrow_success_total"], m["heading_unavailable_total"]))
 
-    ok = (diff_pos == 0 and diff_head == 0 and calls["detect"] == 0 and calls["load"] == 0)
+    # Position must be untouched; heading is expected to move now, because it is measured on a
+    # 4x upsampled ROI and gated, so the bound is "close", not "identical".
+    worst_head = worst[1]
+    ok = (diff_pos == 0 and worst_head <= 5.0
+          and calls["detect"] == 0 and calls["load"] == 0)
     print()
+    print("criteria: position identical, heading within 5 deg, 0 hero_hog calls, 0 model loads")
     print("RESULT: %s" % ("PASS" if ok else "FAIL"))
     return 0 if ok else 2
 

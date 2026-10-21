@@ -19,7 +19,8 @@ scored against its own reading at 0 degrees, which cancels the per-frame base an
 only the rotation effect.
 
 Arms
-  detect    red_arrow.detect            - what production runs
+  detect    red_arrow.detect            - the old production path, native resolution
+  prod_roi  red_arrow.heading_in_roi    - what production runs now, 4x upsampled ROI
   in_box    red_arrow.detect_in_box     - the historical path, box around the arrow
   up4x      same mask, 4x cubic upsample - the proposed fix, measured rather than assumed
 
@@ -168,7 +169,15 @@ def _head_tail_of_blob(blob: np.ndarray) -> float:
     return float(np.percentile(nh, 85) - np.percentile(nl, 85))
 
 
-ARMS = {"detect": arm_detect, "in_box": arm_in_box, "up4x": arm_up4x}
+def arm_prod_roi(frame: np.ndarray, cx: float, cy: float):
+    """The production heading now: red_arrow.heading_in_roi, i.e. 4x upsampled ROI."""
+    pose = red_arrow.heading_in_roi(frame, (cx, cy))
+    if pose is None or pose.heading is None:
+        return None, None
+    return circ(pose.heading), None
+
+
+ARMS = {"detect": arm_detect, "prod_roi": arm_prod_roi, "up4x": arm_up4x}
 
 
 def main() -> int:

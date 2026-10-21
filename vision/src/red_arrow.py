@@ -73,6 +73,62 @@ def _heading(blob: np.ndarray) -> float:
     return axis if wide > narrow else (axis + 180.0) % 360.0
 
 
+# The heading is measured on an upsampled ROI, not on the frame. Reason, measured over 24
+# angles: at 0/90/180/270 the head/tail width margin is 2.72 px and the direction is exact, but
+# at 45/135/225/315 it collapses to 0.51 px - sub-pixel - and the decision becomes a coin flip,
+# 114 wrong out of 228 frames. A 32x19 px arrow has no margin left at 45 degrees; that is a
+# rasterisation limit, not a threshold to tune. Upsampling the ROI 4x before the mask restores
+# the margin to 10.62 px and every flip disappears, and it is cheaper than scanning the frame
+# because the caller already knows where the arrow is.
+ROI_HALF = 24
+ROI_SCALE = 4
+
+
+def heading_in_roi(frame: np.ndarray, centre: Tuple[float, float],
+                   half: int = ROI_HALF, scale: int = ROI_SCALE) -> Optional[Pose]:
+    """The arrow's pose, with the direction measured on a `scale`x upsampled ROI.
+
+    `centre` is where the arrow is (hsv_marker's answer). This does not search the frame for
+    candidates - that is the caller's job - it looks only inside the ROI, which is what makes
+    the x4 upsample affordable.
+    """
+    if frame is None or frame.size == 0:
+        return None
+    cx, cy = int(round(centre[0])), int(round(centre[1]))
+    x0, y0 = cx - half, cy - half
+    x1, y1 = cx + half, cy + half
+    if x0 < 0 or y0 < 0 or x1 > frame.shape[1] or y1 > frame.shape[0]:
+        return None
+    crop = frame[y0:y1, x0:x1]
+    up = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+
+    hsv = cv2.cvtColor(up, cv2.COLOR_BGR2HSV)
+    mask = cv2.morphologyEx(_mask(hsv), cv2.MORPH_OPEN,
+                            np.ones((2 * scale, 2 * scale), np.uint8))
+    _n, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, 8)
+
+    pick = None
+    for i in range(1, len(stats)):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        # The same area window as the frame-level filter, scaled with the image.
+        if area < MIN_AREA * scale * scale or area > MAX_AREA * scale * scale:
+            continue
+        if pick is None or area > pick[1]:
+            pick = (i, area)
+    if pick is None:
+        return None
+
+    i, area = pick
+    blob = (labels == i).astype(np.uint8)
+    x, y, w, h = (int(stats[i, c]) for c in (cv2.CC_STAT_LEFT, cv2.CC_STAT_TOP,
+                                             cv2.CC_STAT_WIDTH, cv2.CC_STAT_HEIGHT))
+    return Pose(centre=(x0 + float(centroids[i][0]) / scale, y0 + float(centroids[i][1]) / scale),
+                heading=_heading(blob), area=int(area / (scale * scale)),
+                bbox=(x0 + x // scale, y0 + y // scale,
+                      max(1, w // scale), max(1, h // scale)),
+                aspect=float(max(w, h) / max(min(w, h), 1)))
+
+
 def detect(frame: np.ndarray, prefer_near: Optional[Tuple[float, float]] = None) -> Optional[Pose]:
     """The arrow, or None. `prefer_near` is the last position, which wins ties."""
     if frame is None or frame.size == 0:

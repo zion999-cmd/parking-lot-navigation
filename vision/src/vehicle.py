@@ -39,6 +39,7 @@ import red_arrow        # red arrow on white paper: colour + contour, blur-proof
 # only 53 of 220 live frames and costs 75.7 ms when it does, against red_arrow's 220/220 at
 # 4.5 ms. It is out of the HERO execution path, not deleted.
 import hsv_marker       # HSV red mask + Hu-moment shape: the position, no model file
+import heading_state    # the 30 deg gate and 12-frame persistence, detector-agnostic
 # Car-specific but data-driven, so the hero car can be swapped without editing source. The file
 # holds the HSV target colour plus the morphology sizes; built-in values below are the fallback.
 VEHICLE_CONFIG_PATH = os.path.join(
@@ -918,31 +919,39 @@ _ARROW_TEMPLATE = None
 # Where the arrow was last seen, and when the last wide search ran. The arrow moves a few
 # pixels per frame, so the next one is nearly always inside a 140 px window of the last.
 _last_centre: List[Optional[float]] = [None, None]
-_last_heading: List[Optional[float]] = [None]
+
+# The committed direction, the 30 degree gate and the 12-frame persistence. These used to live
+# inside hero_hog, so they left the chain when HOG did; they belong to the output, not to a
+# detector, so they live here now and undo the two things that made the direction unstable:
+# a sub-pixel head/tail margin at 45 degrees (fixed by red_arrow.heading_in_roi) and an
+# unguarded 180 degree flip between frames (fixed here).
+_heading_state = heading_state.HeadingState()
 
 # Heading-health counters. The point is to make a silent degradation visible: if the arrow
 # stops being readable the position channel keeps working and the heading is served from
-# _last_heading, which looks like normal operation on the page. These numbers say whether it
+# the last committed direction, which looks like normal operation on the page. These say whether it
 # is, so a frozen heading becomes a thing you can see rather than a thing you have to suspect.
-_heading_metrics = {
-    "red_arrow_success_total": 0,
-    "red_arrow_fail_total": 0,
-    "heading_hold_last_total": 0,
-    "heading_unavailable_total": 0,
-    "heading_consecutive_failures": 0,
-}
-
-
 def heading_metrics() -> dict:
-    """A copy of the counters, plus the live stale flag."""
-    out = dict(_heading_metrics)
-    out["heading_stale"] = _heading_metrics["heading_consecutive_failures"] > 0
-    return out
+    """The state machine's counters, under the names the log line already uses."""
+    m = _heading_state.metrics()
+    return {
+        "red_arrow_success_total": m["heading_readings_total"],
+        "red_arrow_fail_total": m["heading_failures_total"],
+        "heading_hold_last_total": m["heading_hold_total"],
+        "heading_unavailable_total": m["heading_unavailable_total"],
+        "heading_consecutive_failures": m["heading_consecutive_failures"],
+        "heading_stale": m["heading_stale"],
+        # Added with the gate: how often a reading was too far from the committed direction,
+        # and how often a sustained disagreement was finally believed to be a real turn.
+        "heading_gated_total": m["heading_gated_total"],
+        "heading_commits_total": m["heading_commits_total"],
+        "heading_accepted_total": m["heading_accepted_total"],
+        "heading_pending_count": m["heading_pending_count"],
+    }
 
 
 def reset_heading_metrics() -> None:
-    for k in _heading_metrics:
-        _heading_metrics[k] = 0
+    _heading_state.reset()
 _prev_centre: List[Optional[float]] = [None, None]
 _last_centre_us = 0.0
 WIDE_SEARCH_MIN_S = 2.0      # a whole-frame sweep is ~1 s, so not more often than this
@@ -990,35 +999,23 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
         # handed an arrow-sized box. Whole-frame detect applies the PCA axis and the head/tail
         # comparison to the arrow contour directly. Its position must agree with ours before
         # its direction is trusted - two different red blobs would otherwise mix.
-        inner = red_arrow.detect(frame, prefer_near=(cx, cy))
-        stale = False
+        # The direction, measured on a 4x upsampled ROI around the arrow we just found. At
+        # 45 degrees the head/tail margin on the raw frame is 0.51 px and the decision is a coin
+        # flip (114 of 228 frames); at 4x it is 10.62 px and never flips. The centroid still has
+        # to agree with the position channel, so two red blobs cannot be mixed here.
+        inner = red_arrow.heading_in_roi(frame, (cx, cy))
+        reading: Optional[float] = None
         if (inner is not None and inner.heading is not None
                 and math.hypot(inner.centre[0] - cx, inner.centre[1] - cy) < 40.0):
-            heading = float(inner.heading % 360.0)
-            heading_from_arrow = True
-            _last_heading[0] = heading
-            _heading_metrics["red_arrow_success_total"] += 1
-            _heading_metrics["heading_consecutive_failures"] = 0
-        else:
-            # red_arrow is the only heading provider now. hero_hog used to be tried here and is
-            # no longer called: it answered on 53 of 220 live frames at 75.7 ms, so the common
-            # case was paying 75 ms to be told nothing. Holding the last stable heading is
-            # cheaper and, more importantly, honest - it is the same answer with a flag on it.
-            _heading_metrics["red_arrow_fail_total"] += 1
-            _heading_metrics["heading_consecutive_failures"] += 1
-            if _last_heading[0] is not None:
-                # Keep the car. Dropping it because the arrow is momentarily unreadable is
-                # what made the marker "disappear" and the page replan.
-                heading = float(_last_heading[0])
-                heading_from_arrow = False
-                stale = True
-                _heading_metrics["heading_hold_last_total"] += 1
-            else:
-                # Nothing has ever been read. Say so instead of inventing an angle: a consumer
-                # that cannot tell a guess from a measurement will act on the guess.
-                heading = None
-                heading_from_arrow = False
-                _heading_metrics["heading_unavailable_total"] += 1
+            reading = float(inner.heading % 360.0)
+
+        # A single contradictory reading is not evidence of a turn. The gate accepts what is
+        # close to the committed direction and holds what is not, until the disagreement has
+        # persisted long enough to be a real turn. Every outcome is labelled, never guessed.
+        verdict = _heading_state.update(reading)
+        heading = verdict["heading"]
+        stale = bool(verdict["stale"])
+        heading_from_arrow = verdict["action"] in ("initial", "accepted", "committed")
 
         return [VehiclePose(
             x=float(cx), y=float(cy), heading=heading,
@@ -1033,18 +1030,25 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
     # direction. Measured on six hand-annotated positions across the table: offset 2-5 px at
     # every one, including both edges where the template matcher reached only 0.5 - blur
     # cannot change which pixels are red. 7-22 ms per frame.
+    #
+    # This runs when hsv_marker found nothing at all, and it feeds the same heading state
+    # machine as the primary path: otherwise 5% of frames would carry an ungated direction,
+    # which is exactly the hole the gate exists to close.
     red = red_arrow.detect(frame, prefer_near=(_last_centre[0], _last_centre[1])
                            if _last_centre[0] is not None else None)
-    if red is not None:
+    if red is not None and red.heading is not None:
+        verdict = _heading_state.update(float(red.heading % 360.0))
+        heading = verdict["heading"]
+        stale = bool(verdict["stale"])
         bx, by, bw, bh = red.bbox
-        heading = float(red.heading % 360.0)
         _last_centre[0], _last_centre[1] = red.centre[0], red.centre[1]
         return [VehiclePose(
             x=float(red.centre[0]), y=float(red.centre[1]), heading=heading,
             area=int(red.area), elongation=float(red.aspect), fill=1.0,
             bbox=(int(bx), int(by), int(bw), int(bh)), heading_pca=heading,
-            forward_score=1.0, heading_from_arrow=True,
-            front_heading=heading, front_is_known=True)]
+            forward_score=1.0, heading_from_arrow=verdict["action"] in ("initial", "accepted", "committed"),
+            front_heading=heading, front_is_known=heading is not None,
+            heading_stale=stale)]
 
     # An ArUco marker first, when one is on the roof. It detects through rotation, scale and
     # perspective and its corner order states the heading outright, which is everything the
