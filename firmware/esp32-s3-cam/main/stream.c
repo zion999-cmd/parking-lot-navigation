@@ -260,8 +260,14 @@ static void read_regs(char *out, size_t n)
 static esp_err_t bench_handler(httpd_req_t *req)
 {
     if (s_clients > 0) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                                   "a /stream client is attached; disconnect it first");
+        /* Allowed, and logged, because the cost is real and invisible: every client calls
+         * esp_camera_fb_get() for itself against the camera's single frame queue, so the
+         * frames are divided, not shared. Measured on this board: one viewer 11-14 get/s,
+         * two viewers 11-13 get/s TOTAL. The PC-side relays (:8020 analysed, :8021 raw)
+         * exist so that looking does not cost anything here. */
+        ESP_LOGW(TAG, "stream client %d: viewers now share one frame queue, so every viewer "
+                      "gets a fraction of the frames (a relay on the PC avoids this)",
+                 s_clients + 1);
     }
 
     const int seconds = 20;
@@ -575,13 +581,15 @@ static esp_err_t stream_handler(httpd_req_t *req)
         return ESP_OK;
     }
     if (busy) {
-        ESP_LOGW(TAG, "refusing /stream: %d client(s) already watching - one frame queue, "
-                      "so a second viewer would only split the frames", s_clients);
-        httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_set_type(req, "text/plain");
-        httpd_resp_send(req, "one viewer at a time: this camera's frames cannot be shared\n",
-                        HTTPD_RESP_USE_STRLEN);
-        return ESP_OK;
+        /* A second viewer is allowed, and logged, because the cost is real and invisible:
+         * every client calls esp_camera_fb_get() for itself against the camera's single
+         * frame queue, so the frames are divided, not shared. Measured on this board: one
+         * viewer 11-14 get/s, two viewers 11-13 get/s TOTAL. The PC-side relays (:8020
+         * analysed, :8021 raw) exist so that looking does not cost anything here.
+         * (This behaviour was 0.2.54's; it was lost in a revert and came back as a 409 in
+         * 0.2.56/0.2.57 - restored here.) */
+        ESP_LOGW(TAG, "stream client %d: viewers now share one frame queue, so each gets a "
+                      "fraction of the frames (a relay on the PC avoids this)", s_clients + 1);
     }
 
     /*
