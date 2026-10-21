@@ -486,8 +486,12 @@ cmd_start() {
     fi
 
     # serve.py must be on 0.0.0.0: the device and the phone are other machines.
+        # serve.py imports the contract module, which imports road_network, which imports
+        # numpy - so it needs the vision environment, not the system interpreter. It ran on
+        # $PY_SYS until someone started the stack from a shell whose python3 had no numpy,
+        # and then serve died with ModuleNotFoundError and the strip lost its state source.
     start_one serve "port_answers $VISION_PORT" "port:$VISION_PORT" \
-        "$PY_SYS" -u "$ROOT/vision/src/serve.py" --host 0.0.0.0 --port "$VISION_PORT" || true
+        "$PY_VISION" -u "$ROOT/vision/src/serve.py" --host 0.0.0.0 --port "$VISION_PORT" || true
 
     local source="$OPT_SOURCE"
     if [ -z "$source" ]; then
