@@ -1,0 +1,23 @@
+{
+  "_comment": "Phase 1 HSV candidate parameters. Every threshold is here on purpose: the point of the spike is to find out whether a red mask can be tuned in the field, so nothing is hardcoded in the code. h1/h2 are the two red arcs of the OpenCV H axis (0-179).",
+  "h1_min": 0,
+  "h1_max": 50,
+  "h2_min": 170,
+  "h2_max": 180,
+  "s_min": 60,
+  "v_min": 40,
+  "min_area": 40,
+  "max_area": 1200,
+  "min_width": 8,
+  "min_height": 8,
+  "min_aspect": 0.6,
+  "max_aspect": 4.0,
+  "open_kernel": 3,
+  "close_kernel": 5,
+  "roi": [
+    0,
+    60,
+    800,
+    560
+  ]
+}
