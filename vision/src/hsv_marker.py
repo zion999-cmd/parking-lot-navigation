@@ -43,9 +43,11 @@ MIN_ASPECT, MAX_ASPECT = 0.6, 4.0
 OPEN_KERNEL = 3
 CLOSE_KERNEL = 5
 
-# Measured in the spike: at this cut the arrow survived 199/200 frames and 96% of the
-# other red blobs (bay lights, LED strip) were rejected.
-MAX_SHAPE = 0.415
+# Measured in the spike. 0.415 kept 199/200 arrow candidates and 9/243 of the rest, but in
+# production one of those 9 landed on a bay light and threw the position 220 px across the
+# frame. 0.300 costs 5 arrow frames out of 200 (recall 0.975) and drops the false positives to
+# 2/243, which is the better trade for something that drives the route.
+MAX_SHAPE = 0.300
 
 # The arrow does not leave the table, so anything outside this is not it.
 ROI = (0, 60, 800, 560)
