@@ -98,3 +98,52 @@ contour alone, and the two groups land at 0.102 and 0.873 without knowing where 
 Heading. `matchShapes` is rotation-invariant by design, so an arrow pointing left and an
 arrow pointing right score the same. If heading is wanted, it has to come from the template
 angle sweep (Phase 3), not from here.
+
+# Phase 3 — template matching, and why it did not work
+
+Template cut from the arrow, rotated through 24 angles at 15 deg, matched **only inside each
+candidate's ROI** (never the full frame). Two variants, both measured on 200 frames.
+
+**Variant A: 40x40 square crop, `TM_CCOEFF_NORMED`.**
+
+| | n | score median |
+|---|---|---|
+| near the arrow | 200 | 0.371 |
+| elsewhere | 219 | 0.296 |
+
+No usable separation (gap 0.07), because the 40x40 patch contains the car roof as well as the
+arrow, and the roof changes between frames while the arrow does not. The angle did settle on
+a mode - 270 deg in 157/200 frames, with flips to 0 deg in 38 - but a gate at template > 0.5
+kept 1 candidate in 1 frame, i.e. it threw away the arrow.
+
+**Variant B: tight bbox 32x19, `TM_CCORR_NORMED` with an Otsu mask.**
+
+Degenerate. The mask covers the whole crop (the arrow fills its own bbox), so the metric
+collapses to a brightness correlation: arrow 1.000, everything else 0.994. Useless, and the
+angle came out 0 deg for all 200 frames because nothing was actually being rotated.
+
+**Conclusion: at 800x600 the template layer does not earn its place.** It cannot gate (A is
+too weak, B is degenerate) and it cannot give a heading that survives the flips.
+
+# What actually worked: shape alone
+
+Re-scored with only the Phase 2 shape metric as the gate:
+
+| gate | arrow kept | other candidates kept |
+|---|---|---|
+| shape <= 0.415 | 199 / 200 | **9 / 243** |
+| shape <= 0.300 | 195 / 200 | **2 / 243** |
+| shape <= 0.200 | 187 / 200 | 1 / 243 |
+
+At 0.415: 99.5% recall and 96% of the clutter gone. **This is the result of the spike.** A
+red mask with the right hue arc, plus Hu-moment shape, finds the arrow in essentially every
+frame and keeps a small number of false positives, with no model file and no training set.
+
+# What the spike still does not solve
+
+**Heading.** The shape metric is rotation invariant by design, and the template layer is too
+weak at this resolution to supply the angle. This is not a tuning problem: at 800x600 the
+arrow is ~32x19 px and its head/tail asymmetry is a few pixels, which is the same wall the
+production `red_arrow.detect_in_box` hits (measured there as 185/5/182/4/186/5 - the head and
+tail widths are indistinguishable). The HOG path currently gets a heading because it tracks
+the car box and filters the arrow's direction over time, not because a single frame gives it.
