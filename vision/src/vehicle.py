@@ -40,6 +40,7 @@ import red_arrow        # red arrow on white paper: colour + contour, blur-proof
 # 4.5 ms. It is out of the HERO execution path, not deleted.
 import hsv_marker       # HSV red mask + Hu-moment shape: the position, no model file
 import heading_state    # the 30 deg gate and 12-frame persistence, detector-agnostic
+import hero_belief      # what the car looked like and where it was going, last frames
 # Car-specific but data-driven, so the hero car can be swapped without editing source. The file
 # holds the HSV target colour plus the morphology sizes; built-in values below are the fallback.
 VEHICLE_CONFIG_PATH = os.path.join(
@@ -179,6 +180,9 @@ class VehiclePose:
     # axis. The arrow states the direction, so this heading has a front and is not an
     # axis with two indistinguishable ends.
     heading_from_arrow: bool = False
+    # True when the position is the last committed one rather than a fresh measurement - the
+    # belief is holding it while the arrow is unreadable, and a consumer deserves to know.
+    position_stale: bool = False
     # True when this heading is the last one that could be read, carried forward because the
     # arrow was unreadable this frame. The angle is real but its age is not obvious, so the
     # contract says so instead of letting a stale direction look like a fresh measurement.
@@ -199,6 +203,7 @@ class VehiclePose:
                "visible": True,
                  "heading_is_axis_only": bool(axis_known and not self.heading_from_arrow),
                "heading_stale": bool(self.heading_stale),
+                 "position_stale": bool(self.position_stale),
                  "front_is_known": bool(self.front_is_known)}
         if self.front_is_known and self.front_heading is not None:
             # The axis, plus the one fact a person had to tell us: which end is the front.
@@ -927,6 +932,11 @@ _last_centre: List[Optional[float]] = [None, None]
 # unguarded 180 degree flip between frames (fixed here).
 _heading_state = heading_state.HeadingState()
 
+# The positional memory. Without it every frame is an independent guess, which is how a
+# bay light at (295,252) came to be reported as a car standing at (68,475).
+_belief = hero_belief.HeroBelief()
+_last_tick: List[Optional[float]] = [None]
+
 # Heading-health counters. The point is to make a silent degradation visible: if the arrow
 # stops being readable the position channel keeps working and the heading is served from
 # the last committed direction, which looks like normal operation on the page. These say whether it
@@ -952,6 +962,18 @@ def heading_metrics() -> dict:
 
 def reset_heading_metrics() -> None:
     _heading_state.reset()
+
+
+def hero_metrics() -> dict:
+    """Belief and heading counters together: one line in the log, one story."""
+    out = dict(_belief.metrics())
+    out.update(heading_metrics())
+    return out
+
+
+def reset_hero_metrics() -> None:
+    _belief.reset()
+    _heading_state.reset()
 _prev_centre: List[Optional[float]] = [None, None]
 _last_centre_us = 0.0
 WIDE_SEARCH_MIN_S = 2.0      # a whole-frame sweep is ~1 s, so not more often than this
@@ -976,169 +998,86 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
     if frame is None or frame.size == 0:
         return []
 
-    # HSV + Hu-moment shape first, for the position. The mask is on the arc the arrow actually
-    # lives in (OrangeRed, H 24-46 - not the textbook red arcs), and shape matching against one
-    # stored arrow contour removes the rest: measured 199/200 frames kept the arrow and 96% of
-    # the other red blobs were dropped, with 1.3 px of centre jitter over 200 frames. It needs
-    # no model file and no training set, which turned out to matter more than expected: after
-    # the car was moved, HOG detected it 0 times in 40 frames while this found it 40/40.
-    hsv_hit = hsv_marker.detect(frame, prefer_near=(_last_centre[0], _last_centre[1])
-                                if _last_centre[0] is not None else None)
-    if hsv_hit is not None:
-        bx, by, bw, bh = hsv_hit["bbox"]
-        cx, cy = hsv_hit["centre"]
-        _last_centre[0], _last_centre[1] = cx, cy
+    # Time base for the motion model. The belief needs to know how long it has been since the
+    # last frame, otherwise "fast" and "slow" are meaningless.
+    now = time.time()
+    dt = 0.1 if _last_tick[0] is None else min(0.5, max(0.02, now - _last_tick[0]))
+    _last_tick[0] = now
 
-        # The box is the position; the direction is a separate question that a shape score
-        # cannot answer (Hu moments are rotation invariant by design). Ask the arrow inside
-        # the box we just found. HOG is kept as the heading provider of last resort, tried
-        # only when that fails, because it costs 10-72 ms and currently detects nothing here.
-        heading: Optional[float] = None
-        # red_arrow.detect rather than detect_in_box: the box we have IS the arrow, so there
-        # is nothing to search inside it, and detect_in_box returned None every time when
-        # handed an arrow-sized box. Whole-frame detect applies the PCA axis and the head/tail
-        # comparison to the arrow contour directly. Its position must agree with ours before
-        # its direction is trusted - two different red blobs would otherwise mix.
-        # The direction, measured on a 4x upsampled ROI around the arrow we just found. At
-        # 45 degrees the head/tail margin on the raw frame is 0.51 px and the decision is a coin
-        # flip (114 of 228 frames); at 4x it is 10.62 px and never flips. The centroid still has
-        # to agree with the position channel, so two red blobs cannot be mixed here.
-        inner = red_arrow.heading_in_roi(frame, (cx, cy))
-        reading: Optional[float] = None
-        if (inner is not None and inner.heading is not None
-                and math.hypot(inner.centre[0] - cx, inner.centre[1] - cy) < 40.0):
-            reading = float(inner.heading % 360.0)
+    # Local search while tracking, global only after the belief has actually lost the car. This
+    # ordering is the whole point: a single bad frame can no longer hand the car to whatever red
+    # blob happens to score well somewhere else on the table.
+    if _belief.should_search_globally():
+        pool = hsv_marker.candidates(frame)
+        pool.extend(_recovery_candidates(frame))
+    elif _belief.position is not None:
+        pool = hsv_marker.candidates(frame, centre=_belief.position,
+                                     radius=_belief.search_radius())
+    else:
+        pool = hsv_marker.candidates(frame)
 
-        # A single contradictory reading is not evidence of a turn. The gate accepts what is
-        # close to the committed direction and holds what is not, until the disagreement has
-        # persisted long enough to be a real turn. Every outcome is labelled, never guessed.
-        verdict = _heading_state.update(reading)
-        heading = verdict["heading"]
-        stale = bool(verdict["stale"])
-        heading_from_arrow = verdict["action"] in ("initial", "accepted", "committed")
+    verdict = _belief.update(pool, dt)
 
-        return [VehiclePose(
-            x=float(cx), y=float(cy), heading=heading,
-            area=int(hsv_hit["area"]), elongation=float(hsv_hit["aspect"]), fill=1.0,
-            bbox=(int(bx), int(by), int(bw), int(bh)), heading_pca=heading,
-            forward_score=float(1.0 - hsv_hit["shape_score"]), heading_from_arrow=heading_from_arrow,
-            front_heading=heading, front_is_known=heading is not None,
-            heading_stale=stale)]
-
-    # Red arrow on white paper first: colour says which blob is a candidate, area and aspect
-    # say which of the red blobs, and the contour's principal axis plus the wider end give the
-    # direction. Measured on six hand-annotated positions across the table: offset 2-5 px at
-    # every one, including both edges where the template matcher reached only 0.5 - blur
-    # cannot change which pixels are red. 7-22 ms per frame.
-    #
-    # This runs when hsv_marker found nothing at all, and it feeds the same heading state
-    # machine as the primary path: otherwise 5% of frames would carry an ungated direction,
-    # which is exactly the hole the gate exists to close.
-    red = red_arrow.detect(frame, prefer_near=(_last_centre[0], _last_centre[1])
-                           if _last_centre[0] is not None else None)
-    if red is not None and red.heading is not None:
-        verdict = _heading_state.update(float(red.heading % 360.0))
-        heading = verdict["heading"]
-        stale = bool(verdict["stale"])
-        bx, by, bw, bh = red.bbox
-        _last_centre[0], _last_centre[1] = red.centre[0], red.centre[1]
-        return [VehiclePose(
-            x=float(red.centre[0]), y=float(red.centre[1]), heading=heading,
-            area=int(red.area), elongation=float(red.aspect), fill=1.0,
-            bbox=(int(bx), int(by), int(bw), int(bh)), heading_pca=heading,
-            forward_score=1.0, heading_from_arrow=verdict["action"] in ("initial", "accepted", "committed"),
-            front_heading=heading, front_is_known=heading is not None,
-            heading_stale=stale)]
-
-    # An ArUco marker first, when one is on the roof. It detects through rotation, scale and
-    # perspective and its corner order states the heading outright, which is everything the
-    # flat template could not do - the same template scored 0.997 facing one way and 0.757
-    # turned around. The template stays as the fallback so a car without the marker still works.
-    marker = aruco_hero.detect(frame)
-    if marker is not None:
-        xs = [c[0] for c in marker.corners]
-        ys = [c[1] for c in marker.corners]
-        w = float(max(xs) - min(xs))
-        h = float(max(ys) - min(ys))
-        heading = float(marker.heading % 360.0)
-        return [VehiclePose(
-            x=float(marker.centre[0]), y=float(marker.centre[1]), heading=heading,
-            area=int(round(w * h)), elongation=max(w, h) / max(min(w, h), 1.0), fill=1.0,
-            bbox=(int(min(xs)), int(min(ys)), int(w), int(h)), heading_pca=heading,
-            forward_score=float(marker.score), heading_from_arrow=True,
-            front_heading=heading, front_is_known=True)]
-
-    global _ARROW_TEMPLATE
-    if _ARROW_TEMPLATE is None:
-        try:
-            _ARROW_TEMPLATE = arrow.load()
-        except FileNotFoundError as exc:
-            print("  arrow template missing, hero detection is off: %s" % exc, file=sys.stderr)
-            return []
-
-    # No colour hint any more: the arrow is the only thing that decides where the car is.
-    #
-    # The yellow paint used to say "look around here", but the picture holds more than one
-    # yellow thing (a bay marker and the car took turns being the largest blob), so the hint
-    # flipped between them and the arrow was only found in half the frames - 0.921 where the
-    # hint was the car, 0.613 where it was not. Removing it also removes the last part of the
-    # car detector that depended on the paint.
-    #
-    # A whole-frame sweep costs about a second, so the search goes around the last place the
-    # arrow was; the wide search is the recovery path, rate-limited because it is expensive.
-    global _last_centre_us
-    match = None
-    # Predict where the arrow will be: a car that is driving moves between frames, and the
-    # window is only so wide. With the last two sightings the velocity is known, so the search
-    # is centred on where it is going rather than where it was.
-    hint = None
-    if _last_centre[0] is not None:
-        px, py = _last_centre[0], _last_centre[1]
-        if _prev_centre[0] is not None:
-            px += 1.5 * (_last_centre[0] - _prev_centre[0])
-            py += 1.5 * (_last_centre[1] - _prev_centre[1])
-        hint = (px, py)
-    if hint is not None:
-        match = arrow.locate(frame, _ARROW_TEMPLATE, roi_hint=hint)
-    now_us = time.monotonic()
-    if match is None and now_us - _last_centre_us >= WIDE_SEARCH_MIN_S:
-        _last_centre_us = now_us
-        match = arrow.locate(frame, _ARROW_TEMPLATE, roi_hint=None)
-    if match is None:
-        return []
-    _prev_centre[0], _prev_centre[1] = _last_centre[0], _last_centre[1]
-    _last_centre[0], _last_centre[1] = match.centre[0], match.centre[1]
-
-    if not (TRUST_MIN_X <= match.centre[0] <= TRUST_MAX_X
-            and TRUST_MIN_Y <= match.centre[1] <= TRUST_MAX_Y):
-        # Outside the region where the template was measured to work. Saying "not visible"
-        # is honest; a 0.5 match blown up by the wrong landmark is not.
+    if verdict["state"] == hero_belief.LOST or verdict["position"] is None:
+        # Nothing trustworthy. Say so. A car reported at the wrong place is worse than a car
+        # reported as not visible: the first one gets routed to.
         return []
 
-    xs = [c[0] for c in match.corners]
-    ys = [c[1] for c in match.corners]
-    w = float(max(xs) - min(xs))
-    h = float(max(ys) - min(ys))
-    long_side = max(w, h, 1.0)
-    short_side = max(min(w, h), 1.0)
-    heading = float(match.heading % 360.0)
+    cx, cy = verdict["position"]
+    _last_centre[0], _last_centre[1] = cx, cy
+
+    sc = verdict.get("score")
+    cand = sc["candidate"] if sc else None
+    bx, by, bw, bh = (cand["bbox"] if cand
+                      else (int(cx) - int(_belief.width or 16) // 2,
+                            int(cy) - int(_belief.height or 10) // 2,
+                            int(_belief.width or 32), int(_belief.height or 19)))
+
+    # Heading, on a 4x upsampled ROI around the committed position, through the gate.
+    inner = red_arrow.heading_in_roi(frame, (cx, cy))
+    reading: Optional[float] = None
+    if (inner is not None and inner.heading is not None
+            and math.hypot(inner.centre[0] - cx, inner.centre[1] - cy) < 40.0):
+        reading = float(inner.heading % 360.0)
+    hverdict = _heading_state.update(reading)
+    heading = hverdict["heading"]
+
     return [VehiclePose(
-        x=float(match.centre[0]),
-        y=float(match.centre[1]),
-        heading=heading,
-        area=int(round(w * h)),
-        elongation=long_side / short_side,
-        fill=1.0,
-        bbox=(int(min(xs)), int(min(ys)), int(w), int(h)),
-        heading_pca=heading,
-        # The match score is the only evidence there is now, so it goes where the old
-        # pipeline kept its confidence: forward_score.
-        forward_score=float(match.score),
-        heading_from_arrow=True,
-        front_heading=heading,
-        front_is_known=True,
-    )]
+        x=float(cx), y=float(cy), heading=heading,
+        area=int(cand["area"]) if cand else int(_belief.area or 0),
+        elongation=float(cand["aspect"]) if cand else float(_belief.aspect or 1.0), fill=1.0,
+        bbox=(int(bx), int(by), int(bw), int(bh)), heading_pca=heading,
+        forward_score=float(verdict["confidence"]),
+        heading_from_arrow=hverdict["action"] in ("initial", "accepted", "committed"),
+        front_heading=heading, front_is_known=heading is not None,
+        heading_stale=bool(hverdict["stale"]),
+        position_stale=bool(verdict["stale"]))]
 
+
+def _recovery_candidates(frame: np.ndarray) -> List[dict]:
+    """The old fallbacks, demoted to candidate sources.
+
+    They used to return a pose that was accepted on the spot, which is how a single failed frame
+    could relocate the car. Now they only contribute candidates, and the belief decides - a
+    recovery still has to pass the same scoring and the same confidence threshold as anything
+    else, so "found by the template" is not a free pass.
+    """
+    out: List[dict] = []
+    for pose in (red_arrow.detect(frame),
+                 aruco_hero.detect(frame)):
+        if pose is None:
+            continue
+        x, y, w, h = pose.bbox
+        out.append({
+            "bbox": (int(x), int(y), int(w), int(h)),
+            "centre": (float(pose.centre[0]), float(pose.centre[1])),
+            "area": int(pose.area), "width": int(w), "height": int(h),
+            "aspect": float(pose.aspect) if pose.aspect else 1.0,
+            # Unknown shape fidelity: scored in the middle, not as a strong claim.
+            "shape_score": 0.30,
+            "s_min": None, "h": None, "s": None, "v": None,
+        })
+    return out
 
 
 def locate(frame: np.ndarray, **kwargs) -> Optional[VehiclePose]:

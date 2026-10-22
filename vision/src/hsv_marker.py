@@ -22,7 +22,8 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Optional, Tuple
+import math
+from typing import Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -93,6 +94,120 @@ def _contour(mask: np.ndarray, bbox: Tuple[int, int, int, int]) -> Optional[np.n
     if not contours:
         return None
     return max(contours, key=cv2.contourArea)
+
+
+# --------------------------------------------------------------------------- candidate pool
+#
+# One saturation threshold cannot serve the whole table. Measured: at (240,485) the arrow is
+# bright (S~115) and S>=60 finds it in 105 of 120 frames, while at (68,475) it sits in shadow
+# (S 55..81) and S>=60 keeps only its most saturated core, turning it into an 18x30 diamond that
+# fails the shape gate 12/12 times. S>=45 recovers the arrow there (32x17, shape 0.13) but at the
+# bright position it merges the arrow with the red around it and drops to 9/120.
+#
+# So the threshold level becomes a *candidate generator*, not a verdict: every level produces
+# blobs, duplicates are merged, and the resulting pool is scored by whoever knows the history
+# (hero_belief). No single level decides anything on its own.
+S_LEVELS = (60, 50, 45)
+
+
+def _components(hsv: np.ndarray, s_min: int, v_min: int) -> tuple[np.ndarray, int, np.ndarray,
+                                                                  np.ndarray]:
+    mask = cv2.inRange(hsv, (H1_MIN, s_min, v_min), (H1_MAX, 255, 255))
+    mask |= cv2.inRange(hsv, (H2_MIN, s_min, v_min), (H2_MAX, 255, 255))
+    k_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (OPEN_KERNEL, OPEN_KERNEL))
+    k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (CLOSE_KERNEL, CLOSE_KERNEL))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k_open)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close)
+    n, labels, stats, cents = cv2.connectedComponentsWithStats(mask, 8)
+    return mask, n, stats, cents
+
+
+def candidates(frame: np.ndarray, centre: Optional[Tuple[float, float]] = None,
+               radius: Optional[float] = None, s_levels: Sequence[int] = S_LEVELS,
+               max_shape: float = 0.60) -> list[dict]:
+    """A pool of red blobs that could be the arrow, from several saturation levels.
+
+    `centre`/`radius` restrict the search to a window - the caller's belief layer knows roughly
+    where the car is, and a local search is both cheaper and far less likely to find a
+    distracting red object somewhere else on the table.
+
+    `max_shape` is deliberately looser than the old single-shot gate: the pool is meant to be
+    scored later, so rejecting here on the one number that fails at 45 degrees would just move
+    the problem. The scorer sees shape_score and weighs it.
+    """
+    if frame is None or frame.size == 0:
+        return []
+    reference = _load_reference()
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+    # Search window in frame coordinates.
+    if centre is not None and radius is not None:
+        x0 = int(max(0, centre[0] - radius))
+        y0 = int(max(0, centre[1] - radius))
+        x1 = int(min(frame.shape[1], centre[0] + radius))
+        y1 = int(min(frame.shape[0], centre[1] + radius))
+    else:
+        x0, y0 = ROI[0], ROI[1]
+        x1, y1 = ROI[0] + ROI[2], ROI[1] + ROI[3]
+    if x1 - x0 < 8 or y1 - y0 < 8:
+        return []
+
+    # Crop first, then threshold. Three saturation levels over the whole 800x600 frame cost
+    # 15 ms; over a 180x180 window it costs a fraction of one, and the morphology kernels do not
+    # care which pixels they are handed.
+    hsv = hsv[y0:y1, x0:x1]
+
+    pool: list[dict] = []
+    for s_min in s_levels:
+        mask, n, stats, cents = _components(hsv, s_min, V_MIN)
+        for i in range(1, n):
+            x, y, w, h, area = (int(v) for v in stats[i])
+            if area < MIN_AREA or area > MAX_AREA:
+                continue
+            if w < MIN_WIDTH or h < MIN_HEIGHT:
+                continue
+            cx, cy = float(cents[i][0]) + x0, float(cents[i][1]) + y0
+            aspect = w / float(h)
+            if aspect < MIN_ASPECT or aspect > MAX_ASPECT:
+                continue
+            contour = _contour(mask, (x, y, w, h))
+            if contour is None or len(contour) < 3:
+                continue
+            shape = 1.0
+            if reference is not None:
+                shape = float(cv2.matchShapes(contour, reference, cv2.CONTOURS_MATCH_I1, 0.0))
+                if shape > max_shape:
+                    continue
+            # Medians from this blob's own pixels, cropped - a full-frame mask per candidate
+            # would cost more than the detection itself.
+            sub = mask[y:y + h, x:x + w] > 0
+            if not sub.any():
+                continue
+            crop_hsv = hsv[y:y + h, x:x + w]
+            pool.append({
+                "bbox": (x + x0, y + y0, w, h),
+                "centre": (cx, cy),
+                "area": area,
+                "width": w,
+                "height": h,
+                "aspect": aspect,
+                "shape_score": round(shape, 4),
+                "s_min": s_min,
+                "h": float(np.median(crop_hsv[:, :, 0][sub])),
+                "s": float(np.median(crop_hsv[:, :, 1][sub])),
+                "v": float(np.median(crop_hsv[:, :, 2][sub])),
+            })
+
+    # The same physical blob appears once per saturation level. Keep the best-scoring copy -
+    # its geometry came from the mask that fit the arrow best.
+    pool.sort(key=lambda c: c["shape_score"])
+    merged: list[dict] = []
+    for c in pool:
+        if any(math.hypot(c["centre"][0] - m["centre"][0],
+                          c["centre"][1] - m["centre"][1]) < 8.0 for m in merged):
+            continue
+        merged.append(c)
+    return merged
 
 
 def detect(frame: np.ndarray, prefer_near: Optional[Tuple[float, float]] = None,
