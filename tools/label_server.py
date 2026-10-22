@@ -193,6 +193,21 @@ class Handler(BaseHTTPRequestHandler):
                                 pass
             return self._json(200, {"boxes": list(reversed(rows))})
 
+        if path == "/hsv_calib":
+            calib = os.path.join(ROOT, "vision", "data", "hsv_marker", "calibration.jsonl")
+            rows = []
+            if os.path.exists(calib):
+                with open(calib, encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            rows.append(json.loads(line))
+                        except ValueError:
+                            continue
+            return self._json(200, {"samples": rows[-200:], "total": len(rows)})
+
         if path == "/list":
             return self._json(200, {"labels": list(reversed(read_annotations()))})
 
@@ -235,7 +250,11 @@ class Handler(BaseHTTPRequestHandler):
         points = payload.get("points") or []
         quad = payload.get("quad") or []
 
-        if kind in ("feature", "hero"):
+        if kind == "hsv":
+            # HSV calibration carries a single click, not an outline: the server finds the blob
+            # under it. Validated where it is used.
+            pass
+        elif kind in ("feature", "hero"):
             if len(points) < 3:
                 return self._json(400, {"ok": False, "why": "a feature needs at least 3 points"})
         else:
@@ -285,8 +304,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(503, {"ok": False, "why": error or "no frame yet"})
             origin = self.frames.source
 
-        with open(os.path.join(LABELS, image_name), "wb") as fh:
-            fh.write(blob)
+        # The hsv branch keeps its own copy under hsv_marker/frames, where the calibration report
+        # reads from; writing it into the annotation set as well would inflate that dataset with
+        # frames that carry no annotation.
+        if kind != "hsv":
+            with open(os.path.join(LABELS, image_name), "wb") as fh:
+                fh.write(blob)
 
         if kind == "hero":
             # A hero box for the HOG/SVM dataset, saved straight into tools/hero_lab/data:
@@ -335,6 +358,73 @@ class Handler(BaseHTTPRequestHandler):
                       "negatives": len(negatives), "note": str(payload.get("notes", "")),
                       "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
             return self._json(200, {"ok": True, "saved": image_name, "record": record})
+
+        if kind == "hsv":
+            # HERO HSV calibration: one click on the arrow records what that arrow looks like
+            # here - its colour, size and shape distance - at three saturation levels, together
+            # with the frame. This exists because the reference contour the shape gate compares
+            # against was sampled from a single frame at a single position, so at the dark corner
+            # the very same arrow scored 1.14 and was rejected. Four positions of data turns
+            # that into a curve instead of a guess.
+            point = payload.get("point")
+            if (not isinstance(point, (list, tuple)) or len(point) != 2
+                    or not all(isinstance(v, (int, float)) for v in point)):
+                return self._json(400, {"ok": False, "why": "point must be [x, y]"})
+
+            import sys as _sys
+            _sys.path.insert(0, os.path.join(ROOT, "vision", "src"))
+            import cv2 as _cv2
+            import numpy as _np
+            import hsv_marker as _hsv
+
+            frame = _cv2.imdecode(_np.frombuffer(blob, _np.uint8), _cv2.IMREAD_COLOR)
+            if frame is None:
+                return self._json(400, {"ok": False, "why": "frame did not decode"})
+
+            px, py = float(point[0]), float(point[1])
+            pool = _hsv.candidates(frame, centre=(px, py), radius=70.0, max_shape=9.9)
+            if not pool:
+                return self._json(422, {"ok": False,
+                                        "why": "no red blob near that point"})
+            # The blob the click actually landed on, not merely the best-scoring one.
+            def _dist(c):
+                d = abs(c["bbox"][0] - px) + abs(c["bbox"][1] - py)
+                inside = (c["bbox"][0] <= px <= c["bbox"][0] + c["bbox"][2]
+                          and c["bbox"][1] <= py <= c["bbox"][1] + c["bbox"][3])
+                return (0 if inside else 1, d)
+            pool.sort(key=_dist)
+            hit = pool[0]
+
+            CALIB = os.path.join(ROOT, "vision", "data", "hsv_marker")
+            FRAMES_DIR = os.path.join(CALIB, "frames")
+            os.makedirs(FRAMES_DIR, exist_ok=True)
+            with open(os.path.join(FRAMES_DIR, image_name), "wb") as fh:
+                fh.write(blob)
+
+            record = {
+                "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "frame": image_name,
+                "from": origin,
+                "batch": str(payload.get("notes", ""))[:60],
+                "click": [round(px, 1), round(py, 1)],
+                "bbox": list(hit["bbox"]),
+                "centre": [round(hit["centre"][0], 2), round(hit["centre"][1], 2)],
+                "area": hit["area"],
+                "width": hit["width"], "height": hit["height"],
+                "aspect": round(hit["aspect"], 3),
+                "shape_score": hit["shape_score"],
+                "s_min_used": hit["s_min"],
+                "h": round(hit["h"], 1), "s": round(hit["s"], 1), "v": round(hit["v"], 1),
+                # Every level's view of the same arrow, so the report can say which threshold
+                # actually fitted it here without re-running the detection later.
+                "levels": [{"s_min": c["s_min"], "area": c["area"], "shape": c["shape_score"],
+                            "w": c["width"], "h": c["height"]} for c in pool[:6]],
+            }
+            with open(os.path.join(CALIB, "calibration.jsonl"), "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+            n = sum(1 for _ in open(os.path.join(CALIB, "calibration.jsonl"), encoding="utf-8"))
+            return self._json(200, {"ok": True, "saved": image_name, "record": record,
+                                    "total": n})
 
         if kind == "feature":
             record = {
