@@ -54,6 +54,7 @@
     <option value="car">车框（4 角）</option>
     <option value="feature">特征块（自由多边形）</option>
     <option value="hero">英雄车框（HOG 数据集）</option>
+    <option value="hsv">HSV 标定（点一下箭头）</option>
   </select>
   <input type="text" id="fname" value="arrow" placeholder="特征名" style="width:80px">
   <button id="next">下一帧 / 刷新 (N)</button>
@@ -425,6 +426,9 @@ function info() {
 }
 
 /* ---------- 交互 ---------- */
+  let hsvPoint = null;
+  let hsvSaved = 0;
+
 function toImage(ev) {
   const r = img.getBoundingClientRect();
   const s = scale();
@@ -434,6 +438,12 @@ cv.addEventListener("click", ev => {
   if (!natural.w) return;
   const p = toImage(ev);
   if (mode === "hero") { return; }        // 英雄车用拖拽，不用点击
+    if (mode === "hsv") {                   // HSV 标定：点一下箭头，按 S 保存
+      hsvPoint = p;
+      msg("标定点 (" + p[0].toFixed(0) + ", " + p[1].toFixed(0) + ")　按 S 记录");
+      draw(); info();
+      return;
+    }
   if (mode === "feature") {
     if (fclosed) { fpts = []; fclosed = false; }    // 闭合后再点 = 开始新的一块
     fpts.push(p);
@@ -528,6 +538,25 @@ async function save(kind) {
     await loadList();
     return;
   }
+    if (mode === "hsv") {
+      if (kind === "ok" && !hsvPoint) { msg("先在箭头上点一下", true); return; }
+      const body = { kind: "hsv", point: hsvPoint || [0, 0], status: kind,
+                     notes: document.getElementById("notes").value, from: currentFrom };
+      const r = await fetch("/save", { method: "POST",
+                                       headers: { "Content-Type": "application/json" },
+                                       body: JSON.stringify(body) });
+      const j = await r.json();
+      if (!j.ok) { msg("保存失败: " + j.why, true); return; }
+      const rec = j.record;
+      hsvSaved += 1;
+      msg("已记录第 " + j.total + " 个样本 ✓  H" + rec.h.toFixed(0) + " S" + rec.s.toFixed(0)
+          + " V" + rec.v.toFixed(0) + "  面积 " + rec.area + "  shape " + rec.shape_score.toFixed(2)
+          + "  (S≥" + rec.s_min_used + ")");
+      document.getElementById("step").innerHTML =
+        "本次已记录 <b>" + hsvSaved + "</b> 个标定点　→　<b>换一个位置</b>再标，或按 N 换帧";
+      hsvPoint = null; draw();
+      return;
+    }
   if (mode === "feature") {
     if (kind === "ok" && fpts.length < 3) { msg("至少要 3 个点", true); return; }
     const fbody = { kind: mode === "hero" ? "hero" : "feature",
@@ -639,7 +668,10 @@ document.getElementById("mode").addEventListener("change", ev => {
   resetPoints();
   heroSaved = 0;
   loadList();
-  document.getElementById("step").innerHTML = (mode === "hero")
+    hsvPoint = null; hsvSaved = 0;
+    document.getElementById("step").innerHTML = (mode === "hsv")
+      ? "① 在箭头中心<b>点一下</b>　② 备注写<b>位置名</b>（如 左下角/中间/亮区）　③ 按 S 记录"
+      : (mode === "hero")
     ? "① <b>按住鼠标拖一个框</b>把整辆英雄车框住（松手即成）② 备注写<b>采集批次</b>（如 sess1）③ 按 S 保存"
     : (mode === "feature")
     ? "① 随意点箭头轮廓的顶点  ② <b>右键</b>闭合  ③ 按 S 保存"
