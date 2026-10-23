@@ -40,6 +40,17 @@ LOST = "LOST"
 REACQUIRING = "REACQUIRING"
 
 
+# How much each kind of evidence is worth, per state. Deliberately conservative: the shape weight
+# starts where the previous pipeline had it (0.20) and only grows when position has failed.
+WEIGHTS = {
+    ACQUIRED:   {"position": 0.40, "size": 0.20, "shape": 0.20, "colour": 0.10, "area": 0.10},
+    TRACKING:   {"position": 0.40, "size": 0.20, "shape": 0.20, "colour": 0.10, "area": 0.10},
+    UNCERTAIN:  {"position": 0.25, "size": 0.20, "shape": 0.30, "colour": 0.15, "area": 0.10},
+    LOST:       {"position": 0.15, "size": 0.20, "shape": 0.40, "colour": 0.15, "area": 0.10},
+    REACQUIRING:{"position": 0.15, "size": 0.20, "shape": 0.40, "colour": 0.15, "area": 0.10},
+}
+
+
 def _clamp(v: float, lo: float, hi: float) -> float:
     return lo if v < lo else (hi if v > hi else v)
 
@@ -116,6 +127,8 @@ class HeroBelief:
         self.missing_frames = 0
         self.candidate_frames = 0
         self.challenger: Optional[dict] = None
+        self.last_score: Optional[dict] = None
+        self.last_candidates = 0
         self.challenger_frames_count = 0
         self._last_dt = 0.1
         # metrics
@@ -207,10 +220,13 @@ class HeroBelief:
         shape = self._shape_score(c)
         position = position_score
 
-        # Weights: position leads, appearance breaks ties. A perfect-looking blob far away must
-        # still lose to a mediocre-looking one where the car actually is.
-        confidence = (0.40 * position + 0.20 * size + 0.20 * shape + 0.10 * colour
-                      + 0.10 * min(1.0, c.get("area", 0) / max(self.area or c.get("area", 1), 1.0)))
+        # Weights depend on what the state can honestly claim. While tracking, position is the
+        # strongest evidence there is and shape is a tie-breaker. Once the car is uncertain the
+        # position prior has already failed, so shape and appearance carry more.
+        w = WEIGHTS.get(self.state, WEIGHTS[TRACKING])
+        confidence = (w["position"] * position + w["size"] * size + w["shape"] * shape
+                      + w["colour"] * colour
+                      + w["area"] * min(1.0, c.get("area", 0) / max(self.area or c.get("area", 1), 1.0)))
         return {
             "candidate": c,
             "distance": distance,
@@ -266,6 +282,7 @@ class HeroBelief:
         self._last_dt = dt
         self.frames += 1
 
+        self.last_candidates = len(candidates)
         if not candidates:
             return self._miss()
 
@@ -364,6 +381,9 @@ class HeroBelief:
         return self._result(None, action="hold" if self.state != LOST else "lost")
 
     def _result(self, sc: Optional[dict], action: str) -> dict:
+        # Keep the winning candidate's evidence around. When a wrong blob is promoted, the first
+        # question is always "which score pushed it up", and without this the answer is gone.
+        self.last_score = sc
         return {
             "position": self.position,
             "heading_candidate": None,

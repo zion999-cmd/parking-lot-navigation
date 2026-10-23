@@ -21,6 +21,7 @@ caller gets a box and a centre and asks red_arrow.detect_in_box for the directio
 from __future__ import annotations
 
 import json
+import json
 import os
 import math
 from typing import Optional, Sequence, Tuple
@@ -96,6 +97,89 @@ def _contour(mask: np.ndarray, bbox: Tuple[int, int, int, int]) -> Optional[np.n
     return max(contours, key=cv2.contourArea)
 
 
+# --------------------------------------------------------------------------- reference bank
+#
+# One reference contour was never enough: the same arrow scores 0.03 against a contour taken in
+# its own orientation and 0.7 against one taken across it. The bank is built once at import from
+# the calibration frames the operator actually marked, plus eight programmatic rotations, and is
+# only a *scorer* - in TRACKING the shape score is a feature handed to hero_belief, not a gate.
+BANK_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "data", "hsv_marker")
+BANK_CALIB = os.path.join(BANK_DIR, "calibration.jsonl")
+BANK_FRAMES = os.path.join(BANK_DIR, "frames")
+
+_bank: Optional[list] = None
+_bank_sources: Optional[list] = None
+
+
+def _rotations(contour: np.ndarray, step: int = 15, count: int = 8) -> list:
+    out = []
+    for k in range(count):
+        ang = k * (360.0 / count)
+        m = cv2.getRotationMatrix2D((0, 0), ang, 1.0)
+        pts = contour.reshape(-1, 2).astype(np.float64) @ m[:, :2].T
+        out.append(pts.reshape(-1, 1, 2).astype(np.int32))
+    return out
+
+
+def load_bank() -> list:
+    """Real sampled contours plus rotated fallbacks. Built once, reused for every frame."""
+    global _bank, _bank_sources
+    if _bank is not None:
+        return _bank
+    refs, sources = [], []
+    try:
+        with open(BANK_CALIB, "r", encoding="utf-8") as fh:
+            rows = [json.loads(line) for line in fh if line.strip()]
+    except Exception:
+        rows = []
+    for r in rows:
+        name = r.get("frame")
+        bbox = r.get("bbox")
+        s_min = r.get("s_min_used") or S_MIN
+        if not name or not bbox:
+            continue
+        img = cv2.imread(os.path.join(BANK_FRAMES, name))
+        if img is None:
+            continue
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        mask, _n, _st, _ce = _components(hsv, int(s_min), V_MIN)
+        x, y, w, h = (int(v) for v in bbox)
+        sub = (mask[y:y + h, x:x + w] > 0).astype(np.uint8)
+        contours, _h = cv2.findContours(sub * 255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        if not contours:
+            continue
+        refs.append(max(contours, key=cv2.contourArea))
+        sources.append({"frame": name, "batch": r.get("batch"), "s_min": s_min})
+    fallback = _load_reference()
+    if fallback is not None:
+        for c in _rotations(fallback):
+            refs.append(c)
+            sources.append({"frame": None, "batch": "rotated", "s_min": None})
+    _bank, _bank_sources = refs, sources
+    return _bank
+
+
+def bank_size() -> int:
+    return len(load_bank())
+
+
+def shape_score(contour: np.ndarray) -> tuple[float, int]:
+    """Best (lowest) matchShapes score over the bank, and which entry gave it."""
+    refs = load_bank()
+    if not refs:
+        single = _load_reference()
+        if single is None:
+            return 1.0, -1
+        return float(cv2.matchShapes(contour, single, cv2.CONTOURS_MATCH_I1, 0.0)), -1
+    best, which = 9.9, -1
+    for i, ref in enumerate(refs):
+        v = float(cv2.matchShapes(contour, ref, cv2.CONTOURS_MATCH_I1, 0.0))
+        if v < best:
+            best, which = v, i
+    return best, which
+
+
 # --------------------------------------------------------------------------- candidate pool
 #
 # One saturation threshold cannot serve the whole table. Measured: at (240,485) the arrow is
@@ -131,9 +215,10 @@ def candidates(frame: np.ndarray, centre: Optional[Tuple[float, float]] = None,
     where the car is, and a local search is both cheaper and far less likely to find a
     distracting red object somewhere else on the table.
 
-    `max_shape` is deliberately looser than the old single-shot gate: the pool is meant to be
-    scored later, so rejecting here on the one number that fails at 45 degrees would just move
-    the problem. The scorer sees shape_score and weighs it.
+    `max_shape` is a gate only where a gate is honest. In TRACKING the caller passes None: shape
+    becomes a feature for hero_belief and any physically plausible blob may enter the pool. In
+    LOST/REACQUIRING the caller passes a number again, because there is no position history to
+    lean on and shape is the best evidence available.
     """
     if frame is None or frame.size == 0:
         return []
@@ -173,11 +258,9 @@ def candidates(frame: np.ndarray, centre: Optional[Tuple[float, float]] = None,
             contour = _contour(mask, (x, y, w, h))
             if contour is None or len(contour) < 3:
                 continue
-            shape = 1.0
-            if reference is not None:
-                shape = float(cv2.matchShapes(contour, reference, cv2.CONTOURS_MATCH_I1, 0.0))
-                if shape > max_shape:
-                    continue
+            shape, ref_id = shape_score(contour)
+            if max_shape is not None and shape > max_shape:
+                continue
             # Medians from this blob's own pixels, cropped - a full-frame mask per candidate
             # would cost more than the detection itself.
             sub = mask[y:y + h, x:x + w] > 0
@@ -192,6 +275,7 @@ def candidates(frame: np.ndarray, centre: Optional[Tuple[float, float]] = None,
                 "height": h,
                 "aspect": aspect,
                 "shape_score": round(shape, 4),
+                "ref_id": ref_id,
                 "s_min": s_min,
                 "h": float(np.median(crop_hsv[:, :, 0][sub])),
                 "s": float(np.median(crop_hsv[:, :, 1][sub])),

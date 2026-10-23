@@ -1007,14 +1007,22 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
     # Local search while tracking, global only after the belief has actually lost the car. This
     # ordering is the whole point: a single bad frame can no longer hand the car to whatever red
     # blob happens to score well somewhere else on the table.
-    if _belief.should_search_globally():
-        pool = hsv_marker.candidates(frame)
+    # What shape is allowed to do depends on what the state knows:
+    #   TRACKING / ACQUIRED  shape is a feature; any physically plausible blob may enter the pool
+    #                        and hero_belief weighs position, size, colour and shape together
+    #   UNCERTAIN            same, with a wider window: the position prior is less trustworthy
+    #   LOST / REACQUIRING   full frame, and shape becomes a gate again, because there is no
+    #                        position history left to lean on
+    state = _belief.state if _belief.position is not None else hero_belief.LOST
+    if state in (hero_belief.LOST, hero_belief.REACQUIRING):
+        pool = hsv_marker.candidates(frame, max_shape=0.60)
         pool.extend(_recovery_candidates(frame))
-    elif _belief.position is not None:
-        pool = hsv_marker.candidates(frame, centre=_belief.position,
-                                     radius=_belief.search_radius())
     else:
-        pool = hsv_marker.candidates(frame)
+        radius = _belief.search_radius()
+        if state == hero_belief.UNCERTAIN:
+            radius *= 1.6
+        pool = hsv_marker.candidates(frame, centre=_belief.position, radius=radius,
+                                     max_shape=None)
 
     verdict = _belief.update(pool, dt)
 

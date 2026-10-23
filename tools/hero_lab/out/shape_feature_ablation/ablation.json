@@ -3,8 +3,8 @@
   "recall": 28,
   "select": 23,
   "n": 32,
-  "pool": 3.125,
-  "ms": 28.088445498724468,
+  "pool": 3.0625,
+  "ms": 28.14858450437896,
   "lost": 0,
   "jumped": 0,
   "frames": 32,
@@ -123,12 +123,6 @@
     "pool": 5,
     "shape_min": 0.255
    },
-   "下270": {
-    "recall": 1,
-    "select": 1,
-    "pool": 3,
-    "shape_min": 0.243
-   },
    "右下0": {
     "recall": 1,
     "select": 1,
@@ -200,15 +194,21 @@
     "select": 0,
     "pool": 4,
     "shape_min": 0.356
+   },
+   "下270": {
+    "recall": 1,
+    "select": 1,
+    "pool": 1,
+    "shape_min": 0.173
    }
   }
  },
  "bank_gate": {
   "recall": 32,
-  "select": 32,
+  "select": 31,
   "n": 32,
-  "pool": 6.65625,
-  "ms": 30.033547489438206,
+  "pool": 6.46875,
+  "ms": 28.13981450162828,
   "lost": 0,
   "jumped": 0,
   "frames": 32,
@@ -270,7 +270,7 @@
    "左下90": {
     "recall": 1,
     "select": 1,
-    "pool": 8,
+    "pool": 7,
     "shape_min": 0.039
    },
    "左下180": {
@@ -326,12 +326,6 @@
     "select": 1,
     "pool": 7,
     "shape_min": 0.033
-   },
-   "下270": {
-    "recall": 1,
-    "select": 1,
-    "pool": 7,
-    "shape_min": 0.046
    },
    "右下0": {
     "recall": 1,
@@ -378,14 +372,14 @@
    "右270": {
     "recall": 1,
     "select": 1,
-    "pool": 11,
+    "pool": 10,
     "shape_min": 0.029
    },
    "右上0": {
     "recall": 1,
-    "select": 1,
-    "pool": 9,
-    "shape_min": 0.037
+    "select": 0,
+    "pool": 8,
+    "shape_min": 0.134
    },
    "右上90": {
     "recall": 1,
@@ -404,6 +398,12 @@
     "select": 1,
     "pool": 6,
     "shape_min": 0.034
+   },
+   "下270": {
+    "recall": 1,
+    "select": 1,
+    "pool": 4,
+    "shape_min": 0.064
    }
   }
  },
@@ -411,8 +411,8 @@
   "recall": 32,
   "select": 32,
   "n": 32,
-  "pool": 8.375,
-  "ms": 29.501420009182766,
+  "pool": 8.3125,
+  "ms": 28.540270010125823,
   "lost": 0,
   "jumped": 0,
   "frames": 32,
@@ -530,12 +530,6 @@
     "select": 1,
     "pool": 10,
     "shape_min": 0.033
-   },
-   "下270": {
-    "recall": 1,
-    "select": 1,
-    "pool": 10,
-    "shape_min": 0.046
    },
    "右下0": {
     "recall": 1,
@@ -589,7 +583,7 @@
     "recall": 1,
     "select": 1,
     "pool": 9,
-    "shape_min": 0.037
+    "shape_min": 0.134
    },
    "右上90": {
     "recall": 1,
@@ -608,6 +602,12 @@
     "select": 1,
     "pool": 8,
     "shape_min": 0.034
+   },
+   "下270": {
+    "recall": 1,
+    "select": 1,
+    "pool": 8,
+    "shape_min": 0.064
    }
   }
  }

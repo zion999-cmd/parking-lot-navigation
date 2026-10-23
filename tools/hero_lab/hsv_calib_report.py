@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import statistics
 import sys
 
@@ -125,6 +126,12 @@ def main() -> int:
     for r in rows:
         batch = str(r.get("batch") or "(unnamed)")
         pos, _, ang = batch.partition("/")
+        if not ang:
+            # "上0" / "左上270" / "右下-90" are accepted too: a position name (no digits) followed
+            # by an angle. Chinese position names never end in a digit, so this is unambiguous.
+            m = re.match(r"^(\D*?)[\s_-]*(\d{1,3})\s*°?$", batch.strip())
+            if m:
+                pos, ang = m.group(1), m.group(2)
         parsed.append((pos.strip() or batch, ang.strip(), r))
     def _heading_key(a):
         # Numeric suffixes sort numerically; "90" must come before "180", which sorting by
