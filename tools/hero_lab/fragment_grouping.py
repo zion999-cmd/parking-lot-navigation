@@ -356,8 +356,10 @@ def main() -> int:
         cv2.putText(vis, "%s  base %.2f  grp %d/%d  multi %d/%d"
                     % (rec.get("batch"), sc0, group_ok[0], group_ok[1], multi_ok[0], multi_ok[1]),
                     (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
-        name = re.sub(r"[^0-9A-Za-z_.-]+", "_", str(rec.get("batch")))
-        cv2.imwrite(os.path.join(args.out, "overlay", "%s.png" % name), vis)
+        # Chinese batch names strip to nothing, so every file would collide on "_0.png".
+        # The index keeps them distinct and the label stays in the image itself.
+        name = re.sub(r"[^0-9A-Za-z_.\-]+", "_", str(rec.get("batch"))).strip("_") or "x"
+        cv2.imwrite(os.path.join(args.out, "overlay", "%02d_%s.png" % (len(out_rows), name)), vis)
 
     path = os.path.join(args.out, "fragment_grouping.csv")
     with open(path, "w", newline="", encoding="utf-8") as fh:
