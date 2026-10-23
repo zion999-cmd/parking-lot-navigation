@@ -158,3 +158,87 @@ def test_a_candidate_with_none_area_does_not_crash() -> None:
               "s": None, "v": None}
     v = b.update([broken], 0.1)
     assert v["position"] is not None
+
+
+def test_a_takeover_never_teaches_the_appearance_memory() -> None:
+    """The hero being taken away: a bay light wins six frames and is committed.
+
+    If that candidate is allowed to teach, the profile drifts to a bay light and the real hero
+    stops matching. A takeover may move the position; it may not change what the hero looks like.
+    """
+    b = hero_belief.HeroBelief()
+    b.update([cand(100, 300, area=270, w=32, h=17, s=110.0, v=160.0)], 0.1)
+    b.update([cand(105, 300)], 0.1)
+    before = (b.area, b.sat, b.val)
+    # A challenger that would otherwise look convincing: right size, plausible shape. Only the
+    # distance marks it as wrong - which is exactly the bay-light case.
+    actions = [b.update([cand(600, 120, area=300, w=32, h=17, shape=0.20, s=100.0, v=150.0)],
+                        0.1)["action"] for _ in range(b.challenger_frames + 4)]
+    assert "takeover" in actions, actions
+    # And the frames after the takeover look like ordinary tracking - they must not teach either.
+    assert actions[-1] == "accept", actions
+    assert (b.area, b.sat, b.val) == before, "the profile must not learn from a takeover"
+
+
+def test_a_reacquisition_never_teaches_the_appearance_memory() -> None:
+    """Cold start may learn; coming back from LOST may not.
+
+    If the profile already exists, the only way position becomes None is that the hero was lost.
+    Whatever is red at that moment is the wrong teacher - this is the bay light that is left when
+    the hero is taken off the table.
+    """
+    b = hero_belief.HeroBelief()
+    b.update([cand(100, 300, area=270, w=32, h=17, s=110.0, v=160.0)], 0.1)
+    b.update([cand(102, 300)], 0.1)
+    assert b.profile_updates > 0
+    before = (b.area, b.sat, b.val)
+    b.position = None                      # as after LOST
+    v = b.update([cand(600, 120, area=1600, w=48, h=40, s=40.0, v=90.0)], 0.1)
+    assert v["action"] in ("acquire", "acquire_pending")
+    assert (b.area, b.sat, b.val) == before, "a re-acquisition must not teach the profile"
+
+
+def test_a_new_target_must_hold_still_before_it_is_believed() -> None:
+    """acquire_frames > 1: the first confident blob after the hero disappears is usually wrong."""
+    b = hero_belief.HeroBelief(acquire_frames=3)
+    assert b.update([cand(600, 120)], 0.1)["action"] == "acquire_pending"
+    assert b.update([cand(602, 121)], 0.1)["action"] == "acquire_pending"
+    assert b.update([cand(601, 120)], 0.1)["action"] == "acquire"
+    # A different place restarts the count.
+    b2 = hero_belief.HeroBelief(acquire_frames=3)
+    b2.update([cand(600, 120)], 0.1)
+    b2.update([cand(300, 300)], 0.1)
+    assert b2.update([cand(120, 500)], 0.1)["action"] == "acquire_pending"
+
+
+def test_an_established_profile_needs_more_confidence_to_change() -> None:
+    b = hero_belief.HeroBelief(lock_after=3, locked_learn_confidence=0.75)
+    for _ in range(4):
+        b.update([cand(100, 300)], 0.1)
+    assert b.profile_updates >= 3
+    sat_before = b.sat
+    # A weak but accepted candidate must not drag the profile.
+    weak = {"bbox": (90, 290, 20, 20), "centre": (101.0, 300.0), "area": 300, "width": 20,
+            "height": 20, "aspect": 1.0, "shape_score": 0.55, "s": 40.0, "v": 200.0}
+    b.update([weak], 0.1)
+    assert b.sat == sat_before or abs(b.sat - sat_before) < 25.0
+    assert b.learning_skipped > 0
+
+
+def test_a_taken_over_target_is_on_probation_before_it_can_teach() -> None:
+    """The bay light does not just win one frame - the frames after it look like normal tracking.
+
+    Without a probation window those confident accepts would drift the profile to the bay light,
+    and when the hero came back it would no longer match. The target may hold the position; it may
+    not become the definition of what the hero looks like.
+    """
+    b = hero_belief.HeroBelief(takeover_probation=10)
+    b.update([cand(100, 300, area=270, w=32, h=17, s=110.0, v=160.0)], 0.1)
+    before = (b.area, b.sat, b.val)
+    for _ in range(b.challenger_frames + 1):
+        b.update([cand(600, 120, area=300, w=32, h=17, shape=0.2, s=100.0, v=150.0)], 0.1)
+    seen = [b.update([cand(600, 120, area=300, w=32, h=17, shape=0.2, s=100.0, v=150.0)],
+                     0.1)["action"] for _ in range(5)]
+    assert all(a in ("accept", "challenge_held") for a in seen), seen
+    assert (b.area, b.sat, b.val) == before, "no learning while on probation"
+    assert b.probation > 0

@@ -104,6 +104,23 @@ class HeroBelief:
                  lost_after: int = 12,
                  # appearance memory
                  memory_alpha: float = 0.25,
+                 # Learning is not free: it is the one part of this class that can be poisoned.
+                 # A candidate is only allowed to teach the appearance memory when its identity is
+                 # as settled as it gets - a plain accept, close to the prediction, confident.
+                 learn_confidence: float = 0.55,
+                 # After this many updates the profile is treated as established: further learning
+                 # needs a higher confidence, so a slow parade of wrong blobs cannot drift it.
+                 lock_after: int = 25,
+                 locked_learn_confidence: float = 0.75,
+                 # A brand-new target (nothing to compare against, e.g. after the hero was taken
+                 # away and a bay light is the only red thing left) must be seen this many frames
+                 # in the same place before it is believed.
+                 acquire_frames: int = 1,
+                 # A takeover is a jump in position. Until the new target has been tracked stably
+                 # for this many frames it is on probation and may not teach the profile: if it was
+                 # a bay light, the hero comes back and the profile must be unchanged; if it was a
+                 # real move, twenty frames later it starts teaching like anything else.
+                 takeover_probation: int = 20,
                  # ablation switches, so "which layer contributed" is answerable
                  use_motion_gate: bool = True,
                  use_appearance: bool = True,
@@ -120,6 +137,11 @@ class HeroBelief:
         self.uncertain_after = uncertain_after
         self.lost_after = lost_after
         self.memory_alpha = memory_alpha
+        self.learn_confidence = learn_confidence
+        self.lock_after = lock_after
+        self.locked_learn_confidence = locked_learn_confidence
+        self.acquire_frames = max(1, int(acquire_frames))
+        self.takeover_probation = max(0, int(takeover_probation))
         self.use_motion_gate = use_motion_gate
         self.use_appearance = use_appearance
         self.use_commitment = use_commitment
@@ -146,6 +168,11 @@ class HeroBelief:
         self.challenger: Optional[dict] = None
         self.last_score: Optional[dict] = None
         self.last_candidates = 0
+        self.profile_updates = 0        # how many candidates have taught the profile
+        self.probation = 0              # frames left before a taken-over target may teach
+        self.learning_skipped = 0       # candidates that were not allowed to teach it
+        self._acq_anchor: Optional[tuple[float, float]] = None
+        self._acq_count = 0
         self.challenger_frames_count = 0
         self._last_dt = 0.1
         # metrics
@@ -264,7 +291,16 @@ class HeroBelief:
 
     def _remember(self, sc: dict) -> None:
         c = sc["candidate"]
-        a = self.memory_alpha
+        # An established profile only listens to strong evidence. Without this, a slow parade of
+        # wrong blobs - a bay light taking over every few minutes - would drag the profile to them
+        # and the real hero would stop matching.
+        if self.profile_updates >= self.lock_after:
+            if sc["confidence"] < self.locked_learn_confidence:
+                self.learning_skipped += 1
+                return
+            a = self.memory_alpha * 0.35
+        else:
+            a = self.memory_alpha
         def blend(old, new):
             if old is None:
                 return float(new)
@@ -282,7 +318,7 @@ class HeroBelief:
                 setattr(self, {"s": "sat", "v": "val", "h": "hue"}[name], blend(
                     getattr(self, {"s": "sat", "v": "val", "h": "hue"}[name]), got))
 
-    def _move_to(self, sc: dict, dt: float) -> None:
+    def _move_to(self, sc: dict, dt: float, learn: bool = True) -> None:
         c = sc["candidate"]
         x, y = float(c["centre"][0]), float(c["centre"][1])
         if self.position is not None and dt > 0:
@@ -296,7 +332,17 @@ class HeroBelief:
                              a * measured[1] + (1 - a) * self.velocity[1])
         self.position = (x, y)
         self.confidence = sc["confidence"]
-        self._remember(sc)
+        # Learning is opt-in and only for the boring case. A takeover is the single most suspicious
+        # event this class produces, and it is exactly the path the hero disappearing takes: the
+        # bay light wins six frames, is committed, and then teaches the profile its own colour.
+        if self.probation > 0:
+            self.learning_skipped += 1
+            learn = False                # a just-taken-over target has not earned the profile yet
+        if learn and sc["confidence"] >= self.learn_confidence:
+            self._remember(sc)
+            self.profile_updates += 1
+        else:
+            self.learning_skipped += 1
 
     # -- the decision ------------------------------------------------------
 
@@ -304,6 +350,8 @@ class HeroBelief:
         dt = _clamp(dt, 1e-3, 0.5)
         self._last_dt = dt
         self.frames += 1
+        if self.probation > 0:
+            self.probation -= 1
 
         self.last_candidates = len(candidates)
         if not candidates:
@@ -317,8 +365,28 @@ class HeroBelief:
         if self.position is None:
             if best["confidence"] < self.accept_confidence:
                 return self._miss(reason="weak")
+            cx, cy = best["candidate"]["centre"]
+            # Nothing to compare against yet. A bay light is a perfectly confident candidate the
+            # moment the hero is taken off the table, so a brand-new target has to be in the same
+            # place for a few frames before it is believed - and it never teaches the profile.
+            if (self._acq_anchor is not None
+                    and math.hypot(cx - self._acq_anchor[0], cy - self._acq_anchor[1]) < 25.0):
+                self._acq_count += 1
+            else:
+                self._acq_anchor = (cx, cy)
+                self._acq_count = 1
+            if self._acq_count < self.acquire_frames:
+                self.state = REACQUIRING
+                self.missing_frames += 1
+                self.learning_skipped += 1
+                return self._result(None, action="acquire_pending")
             self.state = ACQUIRED
-            self._move_to(best, dt)
+            self._acq_anchor = None
+            self._acq_count = 0
+            # Cold start may learn - there is no profile to poison yet. A re-acquisition may not:
+            # if the profile already exists, the only reason for position to be None is that the
+            # hero was lost, and whatever is red now is the wrong teacher.
+            self._move_to(best, dt, learn=(self.profile_updates == 0))
             self.stable_frames = 1
             self.missing_frames = 0
             self.accepts += 1
@@ -369,7 +437,8 @@ class HeroBelief:
             # Persistent support on one new place: that is a move, not a glitch.
             self.takeovers += 1
             self.false_jumps += 1                       # a move across the gate, counted
-            self._move_to(chall, dt)
+            self._move_to(chall, dt, learn=False)
+            self.probation = self.takeover_probation
             self.state = TRACKING
             self.stable_frames += 1
             self.missing_frames = 0
@@ -437,4 +506,8 @@ class HeroBelief:
             "hero_max_jump_px": round(self.max_jump_px, 1),
             "hero_speed_px_per_frame": round(self.speed(), 2),
             "hero_search_radius_px": round(self.search_radius(), 1),
+            "hero_profile_updates": self.profile_updates,
+            "hero_learning_skipped": self.learning_skipped,
+            "hero_profile_locked": self.profile_updates >= self.lock_after,
+            "hero_probation_frames": self.probation,
         }

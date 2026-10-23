@@ -934,7 +934,10 @@ _heading_state = heading_state.HeadingState()
 
 # The positional memory. Without it every frame is an independent guess, which is how a
 # bay light at (295,252) came to be reported as a car standing at (68,475).
-_belief = hero_belief.HeroBelief()
+# acquire_frames=3: when the hero is taken off the table the only red thing left is a bay light,
+# and it is a perfectly confident candidate. A brand-new target has to hold still for three
+# frames before the tracker believes it - and it never teaches the appearance profile.
+_belief = hero_belief.HeroBelief(acquire_frames=3)
 _last_tick: List[Optional[float]] = [None]
 
 # Heading-health counters. The point is to make a silent degradation visible: if the arrow
