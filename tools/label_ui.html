@@ -688,7 +688,7 @@ document.getElementById("mode").addEventListener("change", ev => {
   loadList();
     hsvPoint = null; hsvSaved = 0;
     document.getElementById("step").innerHTML = (mode === "hsv")
-      ? "① 在箭头中心<b>点一下</b>　② 备注写<b>位置名</b>（如 左下角/中间/亮区）　③ 按 S 记录"
+      ? "① 在箭头中心<b>点一下</b>　② 备注写<b>位置/朝向</b>（如 右上/270）　③ 按 S 记录"
         + '<br><span class="hint">保存到 <span id="hsvloc">vision/data/hsv_marker/</span></span>'
       : (mode === "hero")
     ? "① <b>按住鼠标拖一个框</b>把整辆英雄车框住（松手即成）② 备注写<b>采集批次</b>（如 sess1）③ 按 S 保存"

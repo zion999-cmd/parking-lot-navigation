@@ -115,6 +115,52 @@ def main() -> int:
         print("  same object, the mask it produces there is simply a different shape.")
     else:
         print("  Every sampled position passes the current shape gate.")
+    # ---- position x orientation matrix
+    #
+    # The first eight samples showed the split is by orientation, not by position: every arrow
+    # lying left-right passed the gate (0.10-0.30) and every arrow lying up-down failed
+    # (0.44-0.87). One sample per position cannot tell those two apart, so batches can be named
+    # "位置/朝向" (e.g. 右上/270) and this prints the grid that separates them.
+    parsed = []
+    for r in rows:
+        batch = str(r.get("batch") or "(unnamed)")
+        pos, _, ang = batch.partition("/")
+        parsed.append((pos.strip() or batch, ang.strip(), r))
+    headings = sorted({a for _, a, _ in parsed if a}, key=lambda a: (len(a), a))
+    positions = []
+    for pos, _, _ in parsed:
+        if pos not in positions:
+            positions.append(pos)
+
+    if headings:
+        print()
+        print("  Position x orientation (median shape score; <=0.30 passes the gate):")
+        print("  %-10s %s" % ("position", "  ".join("%-7s" % (a + chr(176)) for a in headings)))
+        for pos in positions:
+            cells = []
+            for ang in headings:
+                vals = [r["shape_score"] for p2, a2, r in parsed if p2 == pos and a2 == ang]
+                if not vals:
+                    cells.append("%-7s" % "·")
+                    continue
+                v = statistics.median(vals)
+                cells.append("%-7s" % ("%.2f%s" % (v, " OK" if v <= 0.30 else "  X")))
+            print("  %-10s %s" % (pos, "  ".join(cells)))
+
+        # Which dimension explains the failures: rule one out with the data rather than by eye.
+        by_ang = {}
+        by_pos = {}
+        for pos, ang, r in parsed:
+            by_ang.setdefault(ang, []).append(r["shape_score"])
+            by_pos.setdefault(pos, []).append(r["shape_score"])
+        def spread(d):
+            meds = [statistics.median(v) for v in d.values() if v]
+            return (max(meds) - min(meds)) if len(meds) > 1 else 0.0
+        print()
+        print("  spread of the median score across orientations: %.3f" % spread(by_ang))
+        print("  spread across positions:                          %.3f" % spread(by_pos))
+        print("  The larger number names the dimension that decides whether the arrow is accepted.")
+
     print()
     print("  Not yet measured: positions with no sample. The gate has never seen them.")
     return 0
