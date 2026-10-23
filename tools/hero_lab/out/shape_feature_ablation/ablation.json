@@ -1,0 +1,614 @@
+{
+ "prod": {
+  "recall": 28,
+  "select": 23,
+  "n": 32,
+  "pool": 3.125,
+  "ms": 28.088445498724468,
+  "lost": 0,
+  "jumped": 0,
+  "frames": 32,
+  "detail": {
+   "上0": {
+    "recall": 1,
+    "select": 1,
+    "pool": 2,
+    "shape_min": 0.218
+   },
+   "上90": {
+    "recall": 1,
+    "select": 1,
+    "pool": 2,
+    "shape_min": 0.504
+   },
+   "上180": {
+    "recall": 1,
+    "select": 0,
+    "pool": 5,
+    "shape_min": 0.439
+   },
+   "上270": {
+    "recall": 0,
+    "select": 0,
+    "pool": 2,
+    "shape_min": 0.452
+   },
+   "左上0": {
+    "recall": 1,
+    "select": 1,
+    "pool": 4,
+    "shape_min": 0.231
+   },
+   "左上90": {
+    "recall": 0,
+    "select": 0,
+    "pool": 1,
+    "shape_min": 0.484
+   },
+   "左上180": {
+    "recall": 1,
+    "select": 1,
+    "pool": 6,
+    "shape_min": 0.206
+   },
+   "左上270": {
+    "recall": 0,
+    "select": 0,
+    "pool": 1,
+    "shape_min": 0.559
+   },
+   "左下0": {
+    "recall": 1,
+    "select": 1,
+    "pool": 1,
+    "shape_min": 0.235
+   },
+   "左下90": {
+    "recall": 1,
+    "select": 1,
+    "pool": 3,
+    "shape_min": 0.311
+   },
+   "左下180": {
+    "recall": 1,
+    "select": 1,
+    "pool": 4,
+    "shape_min": 0.318
+   },
+   "左下270": {
+    "recall": 1,
+    "select": 1,
+    "pool": 3,
+    "shape_min": 0.442
+   },
+   "左0": {
+    "recall": 1,
+    "select": 1,
+    "pool": 3,
+    "shape_min": 0.247
+   },
+   "左90": {
+    "recall": 1,
+    "select": 0,
+    "pool": 5,
+    "shape_min": 0.342
+   },
+   "左180": {
+    "recall": 1,
+    "select": 1,
+    "pool": 2,
+    "shape_min": 0.507
+   },
+   "左270": {
+    "recall": 1,
+    "select": 1,
+    "pool": 3,
+    "shape_min": 0.565
+   },
+   "下0": {
+    "recall": 1,
+    "select": 1,
+    "pool": 3,
+    "shape_min": 0.141
+   },
+   "下90": {
+    "recall": 1,
+    "select": 1,
+    "pool": 3,
+    "shape_min": 0.244
+   },
+   "下180": {
+    "recall": 1,
+    "select": 1,
+    "pool": 5,
+    "shape_min": 0.255
+   },
+   "下270": {
+    "recall": 1,
+    "select": 1,
+    "pool": 3,
+    "shape_min": 0.243
+   },
+   "右下0": {
+    "recall": 1,
+    "select": 1,
+    "pool": 3,
+    "shape_min": 0.28
+   },
+   "右下90": {
+    "recall": 1,
+    "select": 1,
+    "pool": 2,
+    "shape_min": 0.288
+   },
+   "右下180": {
+    "recall": 1,
+    "select": 1,
+    "pool": 3,
+    "shape_min": 0.238
+   },
+   "右下270": {
+    "recall": 1,
+    "select": 1,
+    "pool": 3,
+    "shape_min": 0.415
+   },
+   "右0": {
+    "recall": 1,
+    "select": 1,
+    "pool": 3,
+    "shape_min": 0.095
+   },
+   "右90": {
+    "recall": 0,
+    "select": 0,
+    "pool": 3,
+    "shape_min": 0.434
+   },
+   "右180": {
+    "recall": 1,
+    "select": 1,
+    "pool": 4,
+    "shape_min": 0.264
+   },
+   "右270": {
+    "recall": 1,
+    "select": 1,
+    "pool": 3,
+    "shape_min": 0.35
+   },
+   "右上0": {
+    "recall": 1,
+    "select": 1,
+    "pool": 4,
+    "shape_min": 0.526
+   },
+   "右上90": {
+    "recall": 1,
+    "select": 0,
+    "pool": 3,
+    "shape_min": 0.549
+   },
+   "右上180": {
+    "recall": 1,
+    "select": 0,
+    "pool": 4,
+    "shape_min": 0.384
+   },
+   "右上270": {
+    "recall": 1,
+    "select": 0,
+    "pool": 4,
+    "shape_min": 0.356
+   }
+  }
+ },
+ "bank_gate": {
+  "recall": 32,
+  "select": 32,
+  "n": 32,
+  "pool": 6.65625,
+  "ms": 30.033547489438206,
+  "lost": 0,
+  "jumped": 0,
+  "frames": 32,
+  "detail": {
+   "上0": {
+    "recall": 1,
+    "select": 1,
+    "pool": 8,
+    "shape_min": 0.048
+   },
+   "上90": {
+    "recall": 1,
+    "select": 1,
+    "pool": 5,
+    "shape_min": 0.048
+   },
+   "上180": {
+    "recall": 1,
+    "select": 1,
+    "pool": 6,
+    "shape_min": 0.095
+   },
+   "上270": {
+    "recall": 1,
+    "select": 1,
+    "pool": 6,
+    "shape_min": 0.045
+   },
+   "左上0": {
+    "recall": 1,
+    "select": 1,
+    "pool": 7,
+    "shape_min": 0.032
+   },
+   "左上90": {
+    "recall": 1,
+    "select": 1,
+    "pool": 5,
+    "shape_min": 0.032
+   },
+   "左上180": {
+    "recall": 1,
+    "select": 1,
+    "pool": 9,
+    "shape_min": 0.085
+   },
+   "左上270": {
+    "recall": 1,
+    "select": 1,
+    "pool": 6,
+    "shape_min": 0.038
+   },
+   "左下0": {
+    "recall": 1,
+    "select": 1,
+    "pool": 6,
+    "shape_min": 0.033
+   },
+   "左下90": {
+    "recall": 1,
+    "select": 1,
+    "pool": 8,
+    "shape_min": 0.039
+   },
+   "左下180": {
+    "recall": 1,
+    "select": 1,
+    "pool": 6,
+    "shape_min": 0.033
+   },
+   "左下270": {
+    "recall": 1,
+    "select": 1,
+    "pool": 5,
+    "shape_min": 0.025
+   },
+   "左0": {
+    "recall": 1,
+    "select": 1,
+    "pool": 5,
+    "shape_min": 0.029
+   },
+   "左90": {
+    "recall": 1,
+    "select": 1,
+    "pool": 7,
+    "shape_min": 0.029
+   },
+   "左180": {
+    "recall": 1,
+    "select": 1,
+    "pool": 6,
+    "shape_min": 0.095
+   },
+   "左270": {
+    "recall": 1,
+    "select": 1,
+    "pool": 6,
+    "shape_min": 0.025
+   },
+   "下0": {
+    "recall": 1,
+    "select": 1,
+    "pool": 6,
+    "shape_min": 0.092
+   },
+   "下90": {
+    "recall": 1,
+    "select": 1,
+    "pool": 7,
+    "shape_min": 0.035
+   },
+   "下180": {
+    "recall": 1,
+    "select": 1,
+    "pool": 7,
+    "shape_min": 0.033
+   },
+   "下270": {
+    "recall": 1,
+    "select": 1,
+    "pool": 7,
+    "shape_min": 0.046
+   },
+   "右下0": {
+    "recall": 1,
+    "select": 1,
+    "pool": 6,
+    "shape_min": 0.042
+   },
+   "右下90": {
+    "recall": 1,
+    "select": 1,
+    "pool": 8,
+    "shape_min": 0.062
+   },
+   "右下180": {
+    "recall": 1,
+    "select": 1,
+    "pool": 7,
+    "shape_min": 0.027
+   },
+   "右下270": {
+    "recall": 1,
+    "select": 1,
+    "pool": 6,
+    "shape_min": 0.053
+   },
+   "右0": {
+    "recall": 1,
+    "select": 1,
+    "pool": 8,
+    "shape_min": 0.058
+   },
+   "右90": {
+    "recall": 1,
+    "select": 1,
+    "pool": 7,
+    "shape_min": 0.042
+   },
+   "右180": {
+    "recall": 1,
+    "select": 1,
+    "pool": 6,
+    "shape_min": 0.042
+   },
+   "右270": {
+    "recall": 1,
+    "select": 1,
+    "pool": 11,
+    "shape_min": 0.029
+   },
+   "右上0": {
+    "recall": 1,
+    "select": 1,
+    "pool": 9,
+    "shape_min": 0.037
+   },
+   "右上90": {
+    "recall": 1,
+    "select": 1,
+    "pool": 6,
+    "shape_min": 0.031
+   },
+   "右上180": {
+    "recall": 1,
+    "select": 1,
+    "pool": 5,
+    "shape_min": 0.085
+   },
+   "右上270": {
+    "recall": 1,
+    "select": 1,
+    "pool": 6,
+    "shape_min": 0.034
+   }
+  }
+ },
+ "bank_feature": {
+  "recall": 32,
+  "select": 32,
+  "n": 32,
+  "pool": 8.375,
+  "ms": 29.501420009182766,
+  "lost": 0,
+  "jumped": 0,
+  "frames": 32,
+  "detail": {
+   "上0": {
+    "recall": 1,
+    "select": 1,
+    "pool": 9,
+    "shape_min": 0.048
+   },
+   "上90": {
+    "recall": 1,
+    "select": 1,
+    "pool": 8,
+    "shape_min": 0.048
+   },
+   "上180": {
+    "recall": 1,
+    "select": 1,
+    "pool": 9,
+    "shape_min": 0.095
+   },
+   "上270": {
+    "recall": 1,
+    "select": 1,
+    "pool": 10,
+    "shape_min": 0.045
+   },
+   "左上0": {
+    "recall": 1,
+    "select": 1,
+    "pool": 8,
+    "shape_min": 0.032
+   },
+   "左上90": {
+    "recall": 1,
+    "select": 1,
+    "pool": 7,
+    "shape_min": 0.032
+   },
+   "左上180": {
+    "recall": 1,
+    "select": 1,
+    "pool": 10,
+    "shape_min": 0.085
+   },
+   "左上270": {
+    "recall": 1,
+    "select": 1,
+    "pool": 7,
+    "shape_min": 0.038
+   },
+   "左下0": {
+    "recall": 1,
+    "select": 1,
+    "pool": 8,
+    "shape_min": 0.033
+   },
+   "左下90": {
+    "recall": 1,
+    "select": 1,
+    "pool": 10,
+    "shape_min": 0.039
+   },
+   "左下180": {
+    "recall": 1,
+    "select": 1,
+    "pool": 7,
+    "shape_min": 0.033
+   },
+   "左下270": {
+    "recall": 1,
+    "select": 1,
+    "pool": 8,
+    "shape_min": 0.025
+   },
+   "左0": {
+    "recall": 1,
+    "select": 1,
+    "pool": 5,
+    "shape_min": 0.029
+   },
+   "左90": {
+    "recall": 1,
+    "select": 1,
+    "pool": 9,
+    "shape_min": 0.029
+   },
+   "左180": {
+    "recall": 1,
+    "select": 1,
+    "pool": 7,
+    "shape_min": 0.095
+   },
+   "左270": {
+    "recall": 1,
+    "select": 1,
+    "pool": 7,
+    "shape_min": 0.025
+   },
+   "下0": {
+    "recall": 1,
+    "select": 1,
+    "pool": 9,
+    "shape_min": 0.092
+   },
+   "下90": {
+    "recall": 1,
+    "select": 1,
+    "pool": 8,
+    "shape_min": 0.035
+   },
+   "下180": {
+    "recall": 1,
+    "select": 1,
+    "pool": 10,
+    "shape_min": 0.033
+   },
+   "下270": {
+    "recall": 1,
+    "select": 1,
+    "pool": 10,
+    "shape_min": 0.046
+   },
+   "右下0": {
+    "recall": 1,
+    "select": 1,
+    "pool": 8,
+    "shape_min": 0.042
+   },
+   "右下90": {
+    "recall": 1,
+    "select": 1,
+    "pool": 11,
+    "shape_min": 0.062
+   },
+   "右下180": {
+    "recall": 1,
+    "select": 1,
+    "pool": 7,
+    "shape_min": 0.027
+   },
+   "右下270": {
+    "recall": 1,
+    "select": 1,
+    "pool": 8,
+    "shape_min": 0.053
+   },
+   "右0": {
+    "recall": 1,
+    "select": 1,
+    "pool": 9,
+    "shape_min": 0.058
+   },
+   "右90": {
+    "recall": 1,
+    "select": 1,
+    "pool": 9,
+    "shape_min": 0.042
+   },
+   "右180": {
+    "recall": 1,
+    "select": 1,
+    "pool": 6,
+    "shape_min": 0.042
+   },
+   "右270": {
+    "recall": 1,
+    "select": 1,
+    "pool": 14,
+    "shape_min": 0.029
+   },
+   "右上0": {
+    "recall": 1,
+    "select": 1,
+    "pool": 9,
+    "shape_min": 0.037
+   },
+   "右上90": {
+    "recall": 1,
+    "select": 1,
+    "pool": 6,
+    "shape_min": 0.031
+   },
+   "右上180": {
+    "recall": 1,
+    "select": 1,
+    "pool": 7,
+    "shape_min": 0.085
+   },
+   "右上270": {
+    "recall": 1,
+    "select": 1,
+    "pool": 8,
+    "shape_min": 0.034
+   }
+  }
+ }
+}
