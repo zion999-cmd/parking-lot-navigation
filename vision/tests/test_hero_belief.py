@@ -133,3 +133,28 @@ def test_metrics_are_reported() -> None:
                                 hero_belief.UNCERTAIN), "a held challenge does not make it LOST"
     assert m["hero_challengers_rejected"] == 1
     assert "hero_max_jump_px" in m
+
+
+def test_a_candidate_with_none_fields_does_not_crash() -> None:
+    """The recovery candidates carry s/v/h as None because they come from a Pose, not a mask.
+
+    This is the crash that killed main.py: dict.get("s", default) returns the stored None when the
+    key exists, and float(None) raises. A missing colour is missing evidence, not an exception.
+    """
+    b = hero_belief.HeroBelief()
+    b.update([cand(100, 300)], 0.1)
+    broken = {"bbox": (90, 290, 20, 20), "centre": (100.0, 300.0), "area": 400,
+              "width": 20, "height": 20, "aspect": 1.0, "shape_score": 0.30,
+              "s_min": None, "h": None, "s": None, "v": None}
+    v = b.update([broken], 0.1)
+    assert v["position"] is not None
+
+
+def test_a_candidate_with_none_area_does_not_crash() -> None:
+    b = hero_belief.HeroBelief()
+    b.update([cand(100, 300)], 0.1)
+    broken = {"bbox": (90, 290, 20, 20), "centre": (101.0, 300.0), "area": None,
+              "width": None, "height": None, "aspect": None, "shape_score": None,
+              "s": None, "v": None}
+    v = b.update([broken], 0.1)
+    assert v["position"] is not None

@@ -55,6 +55,23 @@ def _clamp(v: float, lo: float, hi: float) -> float:
     return lo if v < lo else (hi if v > hi else v)
 
 
+def _num(value, fallback):
+    """A number, or the fallback.
+
+    `dict.get(key, default)` returns the stored value when the key EXISTS, even when that value is
+    None - and the recovery candidates from the whole-frame fallbacks carry s/v/h as None because
+    they come from a Pose, not from a mask. That turned a missing colour into a TypeError in the
+    middle of the loop, which is how main.py died.
+    """
+    if value is None:
+        return fallback
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    return out if out == out else fallback      # NaN
+
+
 def _gauss(d: float, sigma: float) -> float:
     """1.0 at zero distance, falling off smoothly. Never negative, never exactly zero."""
     if sigma <= 0:
@@ -177,10 +194,10 @@ class HeroBelief:
         ratios = []
         for key, expected in (("area", self.area), ("width", self.width),
                               ("height", self.height), ("aspect", self.aspect)):
-            got = c.get(key)
+            got = _num(c.get(key), None)
             if got is None or not expected or expected <= 0:
                 continue
-            ratios.append(math.log(max(float(got), 1e-6) / float(expected)))
+            ratios.append(math.log(max(got, 1e-6) / float(expected)))
         if not ratios:
             return 0.5
         # A blob three times the remembered size is not a slightly worse HERO, it is a different
@@ -193,12 +210,16 @@ class HeroBelief:
             return 0.5
         if self.sat is None or self.val is None:
             return 0.5
-        ds = (float(c.get("s", self.sat)) - self.sat) / 45.0
-        dv = (float(c.get("v", self.val)) - self.val) / 70.0
+        got_s = _num(c.get("s"), None)
+        got_v = _num(c.get("v"), None)
+        if got_s is None and got_v is None:
+            return 0.5                      # no colour evidence: neutral, not a crash
+        ds = ((self.sat if got_s is None else got_s) - self.sat) / 45.0
+        dv = ((self.val if got_v is None else got_v) - self.val) / 70.0
         return _gauss(math.hypot(ds, dv), 1.0)
 
     def _shape_score(self, c: dict) -> float:
-        got = c.get("shape_score")
+        got = _num(c.get("shape_score"), None)
         if got is None:
             return 0.5
         # 0 is a perfect match, 0.6 and beyond is a different shape entirely.
@@ -226,7 +247,8 @@ class HeroBelief:
         w = WEIGHTS.get(self.state, WEIGHTS[TRACKING])
         confidence = (w["position"] * position + w["size"] * size + w["shape"] * shape
                       + w["colour"] * colour
-                      + w["area"] * min(1.0, c.get("area", 0) / max(self.area or c.get("area", 1), 1.0)))
+                      + w["area"] * min(1.0, _num(c.get("area"), 1.0)
+                                        / max(self.area or _num(c.get("area"), 1.0), 1.0)))
         return {
             "candidate": c,
             "distance": distance,
@@ -247,14 +269,15 @@ class HeroBelief:
             if old is None:
                 return float(new)
             return (1 - a) * old + a * float(new)
-        self.area = blend(self.area, c.get("area", self.area or 1))
-        self.width = blend(self.width, c.get("width", self.width or 1))
-        self.height = blend(self.height, c.get("height", self.height or 1))
-        self.aspect = blend(self.aspect, c.get("aspect", self.aspect or 1))
-        if c.get("shape_score") is not None:
-            self.shape = blend(self.shape, c["shape_score"])
+        self.area = blend(self.area, _num(c.get("area"), self.area or 1))
+        self.width = blend(self.width, _num(c.get("width"), self.width or 1))
+        self.height = blend(self.height, _num(c.get("height"), self.height or 1))
+        self.aspect = blend(self.aspect, _num(c.get("aspect"), self.aspect or 1))
+        shape_now = _num(c.get("shape_score"), None)
+        if shape_now is not None:
+            self.shape = blend(self.shape, shape_now)
         for name in ("s", "v", "h"):
-            got = c.get(name)
+            got = _num(c.get(name), None)
             if got is not None:
                 setattr(self, {"s": "sat", "v": "val", "h": "hue"}[name], blend(
                     getattr(self, {"s": "sat", "v": "val", "h": "hue"}[name]), got))
