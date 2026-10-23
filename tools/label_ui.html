@@ -643,6 +643,24 @@ async function loadList() {
     }).join("");
     return;
   }
+  if (mode === "hsv") {
+    // HSV calibration lives in vision/data/hsv_marker/calibration.jsonl - not in the annotation
+    // set and not in the HOG dataset. Without this branch the 已保存 panel kept showing whichever
+    // list came before it, which is exactly the confusion it caused.
+    const jc = await (await fetch("/hsv_calib?t=" + Date.now())).json();
+    const rows = (jc.samples || []).slice().reverse();
+    document.getElementById("count").textContent = jc.total ? "(" + jc.total + ")" : "";
+    const loc = document.getElementById("hsvloc");
+    if (loc) { loc.textContent = "vision/data/hsv_marker/ · " + jc.total + " 条"; }
+    document.getElementById("list").innerHTML = rows.map(r => {
+      const c = r.centre || [0, 0];
+      return `<div><b>${esc(String(r.batch || "(未命名)"))}</b>`
+           + `<span class="k">H${Math.round(r.h)} S${Math.round(r.s)} V${Math.round(r.v)}</span>`
+           + `<span class="k">${r.width}×${r.height} shape ${Number(r.shape_score).toFixed(2)}</span>`
+           + `<span class="k">(${Math.round(c[0])},${Math.round(c[1])})</span></div>`;
+    }).join("") || '<span class="hint">还没有样本 —— 点一下箭头，按 S</span>';
+    return;
+  }
   const j = await (await fetch("/list")).json();
   saved = j.labels || [];
   document.getElementById("count").textContent = saved.length ? "(" + saved.length + ")" : "";
@@ -671,6 +689,7 @@ document.getElementById("mode").addEventListener("change", ev => {
     hsvPoint = null; hsvSaved = 0;
     document.getElementById("step").innerHTML = (mode === "hsv")
       ? "① 在箭头中心<b>点一下</b>　② 备注写<b>位置名</b>（如 左下角/中间/亮区）　③ 按 S 记录"
+        + '<br><span class="hint">保存到 <span id="hsvloc">vision/data/hsv_marker/</span></span>'
       : (mode === "hero")
     ? "① <b>按住鼠标拖一个框</b>把整辆英雄车框住（松手即成）② 备注写<b>采集批次</b>（如 sess1）③ 按 S 保存"
     : (mode === "feature")
