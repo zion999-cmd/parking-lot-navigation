@@ -126,7 +126,15 @@ def main() -> int:
         batch = str(r.get("batch") or "(unnamed)")
         pos, _, ang = batch.partition("/")
         parsed.append((pos.strip() or batch, ang.strip(), r))
-    headings = sorted({a for _, a, _ in parsed if a}, key=lambda a: (len(a), a))
+    def _heading_key(a):
+        # Numeric suffixes sort numerically; "90" must come before "180", which sorting by
+        # string or by length would get wrong.
+        try:
+            return (0, float(a), a)
+        except ValueError:
+            return (1, 0.0, a)
+
+    headings = sorted({a for _, a, _ in parsed if a}, key=_heading_key)
     positions = []
     for pos, _, _ in parsed:
         if pos not in positions:
