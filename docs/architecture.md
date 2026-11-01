@@ -53,6 +53,8 @@
 ## 2. 各模块职责
 
 > HERO 识别链路的四层分工、全部实测数字与已否决方案，单独成文：[hero-pipeline.md](hero-pipeline.md)。
+>
+> 地磁车位传感器（TCA9548A + 4× QMC5883P）的接线、固件与**测试方法**：[geomagnetic.md](geomagnetic.md)。
 
 | 模块 | 状态 | 职责 |
 |---|---|---|
