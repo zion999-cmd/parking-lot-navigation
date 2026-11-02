@@ -149,3 +149,50 @@ python tools/rfid/e310_antenna_matrix.py --port /dev/cu.usbserial-14330 --rounds
 - `超高频模块多天线4D数据手册.pdf` —— 电气参数、管脚定义
 - `超高频读写模块多天线系列通讯配置协议/RFID模块通讯协议使用说明.pdf` —— 完整协议（57 页）
 - `四端口快捷指令.txt` —— 天线选择 / 功率设置（GBK 编码）
+
+## 8. 接到 ESP32-S3 的接线方案
+
+### 引脚核实（不是猜的）
+
+从固件源码和 sdkconfig 里核出来的占用情况：
+
+| GPIO | 用途 | 依据 |
+|---|---|---|
+| 4–18 | 相机（SCCB 4/5、VSYNC 6、HREF 7、D0–D7、PCLK 13、XCLK 15）+ **灯带 14** | `camera.c:42-55`、`CONFIG_LED_GPIO=14` |
+| 19, 20, 21, 38, 45, 47 | TFT（CLK/MOSI/RST/BL/CS/DC）| `display.c` 注释，与原理图一致 |
+| **39 / 40** | 道闸开关 / 舵机 | `CONFIG_GATE_SENSOR_GPIO/GATE_SERVO_GPIO` |
+| **41 / 42** | **地磁 I2C 总线** | `CONFIG_MAG_SDA_GPIO/SCL_GPIO` |
+| 43 / 44 | 控制台 UART0 | `CONFIG_ESP_CONSOLE_UART_NUM=0` |
+| **26–32** | SPI flash | 芯片固定 |
+| **33–37** | **Octal PSRAM**（`CONFIG_SPIRAM_MODE_OCT=y`）| sdkconfig |
+
+**真正空闲**：`0, 1, 2, 3, 46, 48`
+
+⚠️ 其中两个不能用/不建议用：
+
+- **GPIO46 是输入专用脚**（S3 的 46 只能做输入）→ **不能当 TX** ✗
+- **0 / 3 是 strapping 脚** → 上电瞬间电平会影响启动模式，尽量避开 ✗
+
+### 推荐接法
+
+| RFID 模块 | ESP32-S3 | 说明 |
+|---|---|---|
+| **GND** | GND | 必须共地 |
+| **VCC** | **5V（VCC5V）** | ≥300 mA 峰值 |
+| **TX**（模块发） | **GPIO1**（UART1 RX） | 交叉：模块 TX → ESP32 RX |
+| **RX**（模块收） | **GPIO48**（UART1 TX） | 交叉：ESP32 TX → 模块 RX |
+| **EN** | **3.3V**（或 GPIO2 做电源控制）| 模块要求 **>1.1V** |
+
+⚠️ **电平**：模块手册写 "UART 串口接收管脚，**TTL 3.3V**" → **和 ESP32 直连，不需要电平转换** ✓（模块用 5V 供电，但 IO 是 3.3V）。
+
+⚠️ **5V 电源余量**：README §17 记录过，**舵机动作会把共享 5V 拉低**，导致整条灯带变黑。RFID 模块发射峰值 ≈300 mA，同样吃这条轨 —— 如果出现"舵机一转 RFID 就断"，优先给 RFID 一条独立 5V，或至少加 1000 µF 就近电容。
+
+### 固件计划（未开始）
+
+1. 新增 `main/rfid.c`：UART1 用 GPIO1/48，115200 8N1，**best-effort**（失败只记日志，不影响相机/灯带/道闸）
+2. 发送/接收都走帧解析：`BB … 7E`，**PL 2 字节**，校验和验证
+3. 轮询任务：默认 200 ms 一次单次轮询（`BB 00 22 00 00 22 7E`），维护 `EPC → {last_seen, rssi, antenna}` 表
+4. HTTP：`GET /api/rfid` 返回当前场内标签表（与 `/api/mag` 同一个风格）
+5. Kconfig 菜单 "UHF RFID"：`RFID_ENABLE / RFID_TX_GPIO / RFID_RX_GPIO / RFID_UART / RFID_POLL_MS / RFID_ANTENNA`
+
+⚠️ **不要占 43/44（控制台）和 41/42（地磁 I2C）**。
