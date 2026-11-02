@@ -150,49 +150,76 @@ python tools/rfid/e310_antenna_matrix.py --port /dev/cu.usbserial-14330 --rounds
 - `超高频读写模块多天线系列通讯配置协议/RFID模块通讯协议使用说明.pdf` —— 完整协议（57 页）
 - `四端口快捷指令.txt` —— 天线选择 / 功率设置（GBK 编码）
 
-## 8. 接到 ESP32-S3 的接线方案
+## 8. 接到 ESP32-S3 的接线方案（已定稿）
 
-### 引脚核实（不是猜的）
+### 最终接线
 
-从固件源码和 sdkconfig 里核出来的占用情况：
+```
+RFID 模块                ESP32-S3
+──────────────────────────────────────────
+GND      ───────────►    GND
+VCC      ───────────►    5V (VCC5V)      ⚠️ 峰值 ≈300 mA
+TX       ───────────►    GPIO1   (UART1 RX)
+RX       ◄───────────    GPIO2   (UART1 TX)
+EN       ───────────►    3.3V            （模块要求 >1.1V）
+```
 
-| GPIO | 用途 | 依据 |
+UART1 @ 115200 8N1。**GPIO1 = 模块 TX 进 ESP32**，**GPIO2 = ESP32 发给模块**。
+
+### 引脚占用（从源码与 sdkconfig 核出来的，不是猜的）
+
+| 资源 | GPIO | 来源 |
 |---|---|---|
-| 4–18 | 相机（SCCB 4/5、VSYNC 6、HREF 7、D0–D7、PCLK 13、XCLK 15）+ **灯带 14** | `camera.c:42-55`、`CONFIG_LED_GPIO=14` |
-| 19, 20, 21, 38, 45, 47 | TFT（CLK/MOSI/RST/BL/CS/DC）| `display.c` 注释，与原理图一致 |
-| **39 / 40** | 道闸开关 / 舵机 | `CONFIG_GATE_SENSOR_GPIO/GATE_SERVO_GPIO` |
-| **41 / 42** | **地磁 I2C 总线** | `CONFIG_MAG_SDA_GPIO/SCL_GPIO` |
-| 43 / 44 | 控制台 UART0 | `CONFIG_ESP_CONSOLE_UART_NUM=0` |
-| **26–32** | SPI flash | 芯片固定 |
-| **33–37** | **Octal PSRAM**（`CONFIG_SPIRAM_MODE_OCT=y`）| sdkconfig |
+| Camera | 4 (SIOD), 5 (SIOC), 6 (VSYNC), 7 (HREF), 8–12 (D2,D1,D3,D0,D4), 13 (PCLK), 15 (XCLK), 16–18 (D7,D6,D5) | `main/camera.c:42-55` |
+| LCD | 19 (SCLK), 20 (MOSI), 21 (RST), 38 (BL), 45 (CS), 47 (DC) | `main/display.c:51-56` |
+| WS2812 灯带 | 14 | `CONFIG_LED_GPIO=14`，`main/led.c:157` |
+| 红外开关 / 道闸地感 | 39 | `CONFIG_GATE_SENSOR_GPIO=39`，`main/gate.c:379` |
+| 舵机 | 40（LEDC TIMER_2 / CH2）| `CONFIG_GATE_SERVO_GPIO=40`，`main/gate.c:424` |
+| QMC5883 I2C | 41 (SDA), 42 (SCL) | `CONFIG_MAG_SDA_GPIO/SCL_GPIO`，`main/mag.c:605` |
+| UART0 控制台 / 烧录 / 日志 | 43 (TX), 44 (RX) | `CONFIG_ESP_CONSOLE_UART_NUM=0`（非 CUSTOM，即默认引脚）|
+| SPI flash | 26–32 | 芯片固定 |
+| Octal PSRAM | 33–37 | `CONFIG_SPIRAM_MODE_OCT=y` |
 
-**真正空闲**：`0, 1, 2, 3, 46, 48`
+**空闲**：`0, 1, 2, 3, 46, 48`（ESP32-S3 没有 GPIO22–25）
 
-⚠️ 其中两个不能用/不建议用：
+### 为什么选 1 / 2
 
-- **GPIO46 是输入专用脚**（S3 的 46 只能做输入）→ **不能当 TX** ✗
-- **0 / 3 是 strapping 脚** → 上电瞬间电平会影响启动模式，尽量避开 ✗
+| 判据 | GPIO1 / GPIO2 |
+|---|---|
+| 工程内引用 | 无（`grep GPIO_NUM_\|_PIN\|_GPIO` 全仓库无匹配）|
+| strapping 脚 | 不是（strapping 是 0 / 3 / 45 / 46）|
+| 双向能力 | 是（见下）|
+| 影响烧录 / 日志 | 不影响，UART0 未动 |
+| 与现有外设冲突 | 无 |
 
-### 推荐接法
+`GPIO48` 留作备用；`GPIO46` 留到真的没有普通脚时才考虑。
 
-| RFID 模块 | ESP32-S3 | 说明 |
-|---|---|---|
-| **GND** | GND | 必须共地 |
-| **VCC** | **5V（VCC5V）** | ≥300 mA 峰值 |
-| **TX**（模块发） | **GPIO1**（UART1 RX） | 交叉：模块 TX → ESP32 RX |
-| **RX**（模块收） | **GPIO48**（UART1 TX） | 交叉：ESP32 TX → 模块 RX |
-| **EN** | **3.3V**（或 GPIO2 做电源控制）| 模块要求 **>1.1V** |
+### 关于 GPIO46 与 "输入专用" —— 一处更正
 
-⚠️ **电平**：模块手册写 "UART 串口接收管脚，**TTL 3.3V**" → **和 ESP32 直连，不需要电平转换** ✓（模块用 5V 供电，但 IO 是 3.3V）。
+**ESP32-S3 没有输入专用的 GPIO。** 芯片能力定义里两者完全相同：
 
-⚠️ **5V 电源余量**：README §17 记录过，**舵机动作会把共享 5V 拉低**，导致整条灯带变黑。RFID 模块发射峰值 ≈300 mA，同样吃这条轨 —— 如果出现"舵机一转 RFID 就断"，优先给 RFID 一条独立 5V，或至少加 1000 µF 就近电容。
+```c
+// components/soc/esp32s3/include/soc/soc_caps.h
+#define SOC_GPIO_VALID_GPIO_MASK        (0x1FFFFFFFFFFFFULL & ~(BIT22|BIT23|BIT24|BIT25))
+#define SOC_GPIO_VALID_OUTPUT_GPIO_MASK (SOC_GPIO_VALID_GPIO_MASK)   // 相等
+```
+
+所以 GPIO46 **可以输出**，可以做 UART TX。早先文档里"46 是输入专用"的说法是错的 —— 那是 **ESP32-S2** 的 GPIO46，套到 S3 上不成立。
+
+**但 GPIO46 确实是 strapping 脚**（S3 的 strapping 是 **GPIO0 / GPIO3 / GPIO45 / GPIO46**）。它参与启动模式判定：默认 SPI Boot 下 GPIO0=1 时 GPIO46 可为任意值；若 GPIO0 被拉低进入下载相关模式，GPIO46 的电平就参与判定。因此它**不是不能用，而是上电时不能乱给电平** —— 接一个空闲高电平的 UART TX 通常无碍，但没有必要冒这个险，因为 1/2/48 是真空闲。
+
+### 电平与供电
+
+- 模块 UART 是 **TTL 3.3V**（数据手册原文："UART 串口接收管脚，TTL 3.3V"）→ **与 ESP32 直连，不需要电平转换**
+- **VCC 必须 5V**（"高功率下需稳定 +5V"），峰值 ≈300 mA
+- ⚠️ README §17 记录过：**舵机动作会把共享 5V 拉低**，导致灯带整条变黑。RFID 发射同样吃这条轨 —— 若出现"舵机一动 RFID 掉线"，给 RFID 独立 5V 或就近加 1000 µF
 
 ### 固件计划（未开始）
 
-1. 新增 `main/rfid.c`：UART1 用 GPIO1/48，115200 8N1，**best-effort**（失败只记日志，不影响相机/灯带/道闸）
-2. 发送/接收都走帧解析：`BB … 7E`，**PL 2 字节**，校验和验证
-3. 轮询任务：默认 200 ms 一次单次轮询（`BB 00 22 00 00 22 7E`），维护 `EPC → {last_seen, rssi, antenna}` 表
-4. HTTP：`GET /api/rfid` 返回当前场内标签表（与 `/api/mag` 同一个风格）
-5. Kconfig 菜单 "UHF RFID"：`RFID_ENABLE / RFID_TX_GPIO / RFID_RX_GPIO / RFID_UART / RFID_POLL_MS / RFID_ANTENNA`
+1. `main/rfid.c`：UART1（RX=GPIO1 / TX=GPIO2，Kconfig 可配），115200 8N1，**best-effort**（失败只记日志，不影响相机/灯带/道闸）
+2. 帧解析：`BB … 7E`，**PL 为 2 字节**，校验和验证
+3. 轮询任务：默认 200 ms 一次单次轮询，维护 `EPC → {last_seen, rssi, antenna}`
+4. `GET /api/rfid`，与 `/api/mag` 同一风格
+5. Kconfig 菜单 "UHF RFID"：`RFID_ENABLE / RFID_UART / RFID_RX_GPIO / RFID_TX_GPIO / RFID_POLL_MS / RFID_ANTENNA`
 
-⚠️ **不要占 43/44（控制台）和 41/42（地磁 I2C）**。
+⚠️ **不要占 43/44（控制台）和 41/42（地磁 I2C）**。本工程**无法使用外部 JTAG**（MTCK/MDTI/MTDO/MTMS = 39/41/40/42 全被 IR、地磁、舵机占用），**也无法使用原生 USB**（D-/D+ = 19/20 被 LCD 的 SCLK/MOSI 占用）→ **43/44 是唯一的调试通道**，更不能挪用。
