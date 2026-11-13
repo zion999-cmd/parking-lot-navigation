@@ -12,11 +12,11 @@
 | 项 | 在仓库 | 说明 |
 |---|---|---|
 | 固件源码（相机/LCD/灯带/道闸/地磁/RFID） | ✅ | `firmware/esp32-s3-cam/main/` |
-| PC 视觉代码 + 351 个单测 | ✅ | `vision/src/`、`vision/tests/` |
-| HOG 模型 | ✅ | `vision/data/hero_hog.yml`（检测器要加载的就是它）|
+| PC 视觉代码 + 356 个单测 | ✅ | `vision/src/`、`vision/tests/` |
+| HOG 模型（历史资产）| ✅ | `vision/data/hero_hog.yml`、`tools/hero_lab/hero_hog.yml`。**运行时不再加载** —— HERO 的位置来自 HSV+shape，朝向来自 `red_arrow`；HOG 已退出执行路径，保留只为可复现那段否决记录（见 `docs/hero-pipeline.md`）|
 | HSV 标记参考轮廓 | ✅ | `vision/data/hsv_marker/reference_arrow.json` |
 | 车位多边形（默认标定） | ✅ | `vision/config/parking_spots.json` —— 是**作者那张桌子**的标定 |
-| **占用检测参考图** | ❌ | `vision/data/reference/reference.jpg` **必须自己拍** |
+| **占用检测参考图** | ❌ | `vision/data/reference/reference.jpg` **必须自己拍**（唯一真正的运行时缺失）|
 | **地磁标定样本** | ❌ | `vision/data/hsv_marker/calibration.jsonl`，按需重新采 |
 | **HOG 训练数据集** | ❌ | `tools/hero_lab/data/`，重新训练才需要 |
 
@@ -95,7 +95,7 @@ N occupied, M empty, 0 unknown
 - [ ] `curl -s http://127.0.0.1:8010/out/parking_state.json` 里 `vehicle` 有位置
 - [ ] `GET /api/mag`（板子）返回 4 条地磁
 - [ ] `GET /api/rfid`（板子）返回标签表 + 每口计数
-- [ ] `python -m pytest vision/tests -q` → 351 passed
+- [ ] `python -m pytest vision/tests -q` → 356 passed
 
 ---
 
