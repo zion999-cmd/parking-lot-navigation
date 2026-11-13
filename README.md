@@ -941,6 +941,7 @@ vision/src/arrow.py              检测器
 vision/src/vehicle.py            locate_all() 调它；VehicleTracker 对箭头姿态直通
 docs/hero-pipeline.md            HERO 识别链路：四层分工、实测数字、已否决方案
 docs/geomagnetic.md             地磁车位传感器：接线、固件、测试方法与调试坑
+docs/deploy.md                  从零部署：仓库里有什么、还必须自己做什么
                                 （它的平滑建立在 0–180 轴线上，而 5° 和 185° 在这里是相反方向）
 ```
 
