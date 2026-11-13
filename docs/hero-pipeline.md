@@ -133,6 +133,19 @@ profile 保持 `(area 270, S 110, V 160)` 不变，跳过学习 9 次，位置�
 | template matching（0–345°） | 未采用 | 800×600 下两种变体都失败：一个分不开（0.371 vs 0.296），一个退化（1.000 vs 0.994） |
 | 膨胀分组（fragment grouping） | 未采用 | 28/32 箭头本就是**完整单块**（覆盖率 1.00）；膨胀 9 px 在 **31/32** 上会与邻居粘连 |
 
+### 关于仓库里那两个模型文件（11 MB）
+
+`vision/data/hero_hog.yml`（7.0 MB）和 `tools/hero_lab/hero_hog.yml`（4.2 MB）**仍然保留在仓库里**，
+这是一个明确的决定，不是遗漏：
+
+- **运行时没有任何代码加载它们** —— `vehicle.py` 里只剩一行注释说明为什么故意不 import；
+  `grep -rn "import hero_hog" vision/src/` 现在匹配不到任何东西
+- 保留的原因：本文件第 9 节那张否决表要能**被复现**。`tools/bench/check_hog_removed.py`
+  会用它们验证 HOG 确实没有被调用，`tools/hero_lab/train_hog.py` 能重新训练出同样的模型
+- 代价：公开仓库里多了 11 MB 的历史资产。如果将来要清理，删这两个 `.yml` 并加进 `.gitignore`
+  即可 —— 它们可以随时由 `tools/hero_lab/train_hog.py` 重新生成，而且**不影响 `hero-v1-static`**：
+  tag 指向历史 commit，历史里的模型不会消失
+
 ## 10. 未验证
 
 **动态推车测试尚未执行。** 静态帧与"原地转方向"都无法考验运动门控：220 帧回放里新旧实现

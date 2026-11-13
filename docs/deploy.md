@@ -23,6 +23,13 @@
 被排除的原因：参考图、标定、数据集都是**某一台设备的测量结果**，不是源码，跟着仓库走只会误导。
 （见 `.gitignore` 里的注释。）
 
+⭐ **反过来说，有两个东西是「故意留着」的**：`vision/data/hero_hog.yml`（7.0 MB）和
+`tools/hero_lab/hero_hog.yml`（4.2 MB）。它们**运行时不被任何代码加载**（HOG 已退出执行路径，
+位置改由 HSV+shape 给出），保留是为了让 `docs/hero-pipeline.md` 第 9 节的否决结论**可复现** ——
+`tools/bench/check_hog_removed.py` 用它们验证「HOG 一次都没被调用」。要清理时删掉这两个文件并加
+`.gitignore` 即可，不影响 `hero-v1-static` tag。
+
+
 ---
 
 ## 2. 新克隆后必须做的三件事
