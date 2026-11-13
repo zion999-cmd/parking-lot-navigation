@@ -1,4 +1,6 @@
 #include "stream.h"
+#include "mag.h"
+#include "rfid.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -305,13 +307,13 @@ static esp_err_t bench_handler(httpd_req_t *req)
 
     read_regs(regs_after, sizeof(regs_after));
 
-    char body[2048];
+    char body[4096];
     int n = snprintf(body, sizeof(body),
         "{\"mode\":\"camera_only\",\"seconds\":%d,\"elapsed_ms\":%lld,\"frames\":%u,"
         "\"fps\":%.2f,\"avg_frame_bytes\":%llu,\"min_frame_bytes\":%llu,"
         "\"max_frame_bytes\":%llu,\"avg_fb_get_us\":%.0f,"
         "\"min_fb_get_us\":%lld,\"max_fb_get_us\":%lld,\"clients\":%d,\"uptime_s\":%u,"
-        "\"regs_before\":%s,\"regs_during\":%s,\"regs_after\":%s}\n",
+        "\"regs_before\":%.600s,\"regs_during\":%.600s,\"regs_after\":%.600s}\n",
         seconds, (long long)(elapsed / 1000), frames,
         frames > 0 ? (double)frames * 1000000.0 / (double)elapsed : 0.0,
         frames ? (unsigned long long)(bytes / frames) : 0ULL, min_b, max_b,
@@ -323,7 +325,11 @@ static esp_err_t bench_handler(httpd_req_t *req)
         regs_after[0] ? regs_after : "null");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    return httpd_resp_send(req, body, n);
+    /* snprintf returns the length it WOULD have written, so an accumulated n can exceed the
+     * buffer and httpd_resp_send(body, n) then reads past it. That is why this endpoint returned
+     * an empty response once the diag string grew: the buffer was fine, the length was a lie. */
+    (void)n;
+    return httpd_resp_send(req, body, strlen(body));
 }
 
 static esp_err_t ota_check_handler(httpd_req_t *req)
@@ -626,6 +632,87 @@ static esp_err_t stream_handler(httpd_req_t *req)
 /* Server                                                                     */
 /* ------------------------------------------------------------------------- */
 
+/* GET /api/mag - the four bay magnetometers, read-only.
+*
+* There is no serial console on a board that is mounted on a wall, and the channel diagnostics
+* are the only way to tell "no sensor" from "wrong chip" from "no pull-ups". Serving them over
+* HTTP is what made that possible here; the same endpoint is what the occupancy work will read.
+*/
+/* GET /api/rfid - tags currently in the field, read-only. */
+static esp_err_t rfid_handler(httpd_req_t *req)
+{
+    static rfid_tag_t tags[16];
+    int n = rfid_snapshot(tags, 16);
+    char body[2048];
+    int len = snprintf(body, sizeof(body),
+                       "{\"ok\":%s,\"count\":%d,\"polls\":%lu,\"bytes\":%lu,"
+                       "\"frames\":%lu,\"notifications\":%lu,\"timeouts\":%lu,\"tags\":[",
+                       rfid_available() ? "true" : "false", n,
+                       (unsigned long)rfid_polls(), (unsigned long)rfid_bytes_rx(),
+                       (unsigned long)rfid_frames_rx(), (unsigned long)rfid_notifications(),
+                       (unsigned long)rfid_errors());
+    for (int i = 0; i < n && len < (int)sizeof(body) - 160; i++) {
+        char epc[25];
+        for (int k = 0; k < 12; k++) {
+            snprintf(epc + k * 2, 3, "%02X", tags[i].epc[k]);
+        }
+        len += snprintf(body + len, sizeof(body) - len,
+                        "%s{\"epc\":\"%s\",\"rssi\":%d,\"port\":%d,\"age_ms\":%lu,"
+                        "\"reads\":%lu,\"gap_ms\":%lu,\"max_gap_ms\":%lu}",
+                        i ? "," : "", epc, tags[i].rssi, tags[i].port,
+                        (unsigned long)tags[i].age_ms, (unsigned long)tags[i].reads,
+                        (unsigned long)tags[i].last_gap_ms,
+                        (unsigned long)tags[i].max_gap_ms);
+    }
+    len += snprintf(body + len, sizeof(body) - len, "],\"ports\":[");
+    for (int p = 1; p <= 4; p++) {
+        rfid_port_stat_t ps;
+        if (!rfid_port_stats(p, &ps)) {
+            continue;
+        }
+        len += snprintf(body + len, sizeof(body) - len,
+                        "%s{\"port\":%d,\"select_ok\":%lu,\"select_fail\":%lu,"
+                        "\"inventory_ok\":%lu,\"inventory_timeout\":%lu,\"tags\":%lu}",
+                        p > 1 ? "," : "", p, (unsigned long)ps.select_ok,
+                        (unsigned long)ps.select_fail, (unsigned long)ps.inventory_ok,
+                        (unsigned long)ps.inventory_timeout, (unsigned long)ps.tags);
+    }
+    len += snprintf(body + len, sizeof(body) - len, "]}");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    return httpd_resp_send(req, body, strlen(body));
+}
+
+static esp_err_t mag_handler(httpd_req_t *req)
+{
+    char body[2048];   /* 4 sensors + a 600-char diag does not fit in 1024: the
+                        JSON was being cut mid-string, which is what made
+                        python -m json.tool report a control character at 1023. */
+int n = 0;
+n += snprintf(body + n, sizeof(body) - n, "{\"ok\":%s,\"count\":%u,\"sensors\":[",
+              mag_available() ? "true" : "false", (unsigned)mag_count());
+for (uint8_t i = 0; i < mag_count() && n < (int)sizeof(body) - 220; i++) {
+    mag_reading_t r;
+    if (!mag_get(i, &r)) {
+        continue;
+    }
+    const char *chip = r.chip == MAG_CHIP_HMC5883L ? "hmc5883l"
+                     : r.chip == MAG_CHIP_QMC5883L ? "qmc5883l" : "none";
+    n += snprintf(body + n, sizeof(body) - n,
+                  "%s{\"ch\":%u,\"chip\":\"%s\",\"ok\":%s,\"x\":%d,\"y\":%d,\"z\":%d,"
+                  "\"field_ut\":%.1f,\"ut_per_lsb\":%.5f,\"reads\":%lu,\"errors\":%lu}",
+                  i ? "," : "", r.channel, chip, r.ok ? "true" : "false",
+                  r.x, r.y, r.z, (double)r.field_ut, (double)r.ut_per_lsb,
+                  (unsigned long)r.reads, (unsigned long)r.errors);
+}
+n += snprintf(body + n, sizeof(body) - n, "],\"diag\":\"%.600s\"}", mag_diag());
+httpd_resp_set_type(req, "application/json");
+httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+return httpd_resp_send(req, body, n);
+}
+
 esp_err_t stream_server_start(void)
 {
     if (s_server != NULL) {
@@ -655,7 +742,9 @@ esp_err_t stream_server_start(void)
         return err;
     }
 
-    httpd_uri_t index_uri = {
+    
+
+httpd_uri_t index_uri = {
         .uri = "/",
         .method = HTTP_GET,
         .handler = index_handler,
@@ -667,6 +756,19 @@ esp_err_t stream_server_start(void)
         .handler = stream_handler,
         .user_ctx = NULL,
     };
+    static const httpd_uri_t rfid_uri = {
+        .uri = "/api/rfid",
+        .method = HTTP_GET,
+        .handler = rfid_handler,
+        .user_ctx = NULL,
+    };
+    static const httpd_uri_t mag_uri = {
+        .uri = "/api/mag",
+        .method = HTTP_GET,
+        .handler = mag_handler,
+        .user_ctx = NULL,
+    };
+
     httpd_uri_t ota_uri = {
         .uri = STREAM_OTA_CHECK_PATH,
         .method = HTTP_POST,
@@ -685,6 +787,8 @@ esp_err_t stream_server_start(void)
         .user_ctx = NULL,
     };
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &bench_uri));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &mag_uri));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &rfid_uri));
 
     ESP_LOGI(TAG, "Stream server started");
     ESP_LOGI(TAG, "Stream server listening on port 80");

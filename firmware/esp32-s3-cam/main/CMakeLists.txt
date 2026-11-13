@@ -49,6 +49,8 @@ idf_component_register(
         "ota.c"
         "led.c"
         "gate.c"
+        "mag.c"
+        "rfid.c"
         "discovery.c"
         "urlhost.c"
         "version.c"

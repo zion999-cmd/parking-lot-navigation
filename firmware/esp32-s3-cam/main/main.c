@@ -15,6 +15,8 @@
 #include "discovery.h"
 #include "display.h"
 #include "gate.h"
+#include "mag.h"
+#include "rfid.h"
 #include "led.h"
 #include "ota.h"
 #include "provisioning.h"
@@ -369,6 +371,16 @@ void app_main(void)
      * and it publishes nothing.
      */
     gate_start();
+
+    /* Best effort: a magnetometer that does not answer must not stop the camera or the gate. */
+    if (mag_start() != ESP_OK) {
+        ESP_LOGW(TAG, "magnetometers unavailable; everything else keeps running");
+    }
+
+    /* Same rule as the magnetometers: an unplugged reader is a log line, not a boot failure. */
+    if (rfid_start() != ESP_OK) {
+        ESP_LOGW(TAG, "RFID reader unavailable; everything else keeps running");
+    }
 #endif
 
     if (xTaskCreate(network_task, "network_app", 6144, NULL, 5, NULL) != pdPASS) {

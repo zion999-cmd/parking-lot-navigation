@@ -291,6 +291,131 @@ menu "Parking Lot Bay Lights (WS2812B)"
 
 endmenu
 
+menu "UHF RFID (4D four-antenna reader)"
+
+    config RFID_ENABLE
+        bool "Poll the UHF RFID reader"
+        default n
+        help
+            The module reports presence, not position: no phase, ~30 cm read radius. It answers
+            "which tags are on the table" and at best "which antenna zone", never a bay coordinate.
+
+            UART1 on GPIO1 (RX from the module) and GPIO2 (TX to it). UART0 on 43/44 stays the
+            console - it is the only debugging channel this board has.
+
+    config RFID_UART
+        int "UART controller"
+        range 1 2
+        default 1
+
+    config RFID_RX_GPIO
+        int "RX GPIO (module TX connects here)"
+        default 1
+
+    config RFID_TX_GPIO
+        int "TX GPIO (connects to module RX)"
+        default 2
+
+    config RFID_POLL_MS
+        int "Poll period (ms)"
+        range 50 2000
+        default 200
+
+    config RFID_LOG_MS
+        int "Minimum gap between log lines for the same tag (ms)"
+        range 0 10000
+        default 1000
+
+    config RFID_ANTENNA_PROBE
+        bool "Run a one-shot antenna probe at boot (temporary, for validation)"
+        default n
+        help
+            For each of the four ports: select it, then one single inventory, and stop reading when
+            a complete checksum-valid frame has arrived - not after a fixed dwell. The timeout is
+            only a fault guard. Twenty rounds per port, then a summary line.
+
+            Enable this to answer "how long does the reader really take, per port" before choosing
+            a scheduler. Leave off in normal use.
+
+    config RFID_PROBE_ROUNDS
+        int "Probe rounds per port"
+        depends on RFID_ANTENNA_PROBE
+        range 1 100
+        default 20
+
+    config RFID_PROBE_TIMEOUT_MS
+        int "Probe transaction timeout (ms)"
+        depends on RFID_ANTENNA_PROBE
+        range 200 5000
+        default 1000
+
+    config RFID_ANTENNAS
+        int "Antenna ports to rotate through (1 = no selection)"
+        range 1 4
+        default 4
+
+    config RFID_SELECT_MS
+        int "Settle time after switching antenna (ms)"
+        range 10 500
+        default 80
+
+    config RFID_LISTEN_MS
+        int "Listen window per poll (ms)"
+        range 50 1000
+        default 150
+
+endmenu
+
+menu "Geomagnetic bays (TCA9548A + magnetometers)"
+
+    config MAG_ENABLE
+        bool "Read the four bay magnetometers"
+        default n
+        help
+            Four magnetometers behind a TCA9548A I2C multiplexer, one per channel. The mux is
+            needed because the HMC5883L address (0x1E) is fixed and four of them on one bus would
+            collide. Runs on I2C port 1: port 0 belongs to the camera's SCCB bus.
+
+            Best effort. If nothing answers, the firmware logs it and every other peripheral keeps
+            running.
+
+    config MAG_I2C_PORT
+        int "I2C controller"
+        range 0 1
+        default 0
+        help
+            Measured, not assumed: asking for port 1 broke the camera. esp32-camera installs its
+            SCCB bus on port 1 on this build (CONFIG_SCCB_HARDWARE_I2C_PORT1=y), regardless of the
+            sccb_i2c_port field in camera.c, so the magnetometers must take port 0.
+
+    config MAG_SDA_GPIO
+        int "SDA GPIO"
+        default 41
+
+    config MAG_SCL_GPIO
+        int "SCL GPIO"
+        default 42
+
+    config MAG_HUB_ADDR
+        hex "TCA9548A address (A0/A1/A2 to GND = 0x70)"
+        default 0x70
+
+    config MAG_CHANNELS
+        int "Channels to probe (one sensor each)"
+        range 1 8
+        default 4
+
+    config MAG_SAMPLE_HZ
+        int "Samples per second per channel"
+        range 1 50
+        default 10
+
+    config MAG_CLK_HZ
+        int "I2C clock (Hz)"
+        default 100000
+
+endmenu
+
 menu "Barrier Gate (servo + contact switch)"
 
     config GATE_ENABLE
