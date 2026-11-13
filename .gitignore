@@ -48,3 +48,13 @@ __pycache__/
 !docs/
 !docs/**
 !.gitignore
+
+# Hand-labelled HOG dataset: regenerable from the labeller, and it is annotation data rather than
+# source. The model it produces (vision/data/hero_hog.yml) stays tracked, because that is what the
+# detector loads.
+tools/hero_lab/data/
+
+# Magnetometer calibration samples and their frames: per-installation measurement, not source.
+vision/data/hsv_marker/calibration.jsonl
+vision/data/hsv_marker/calibration.recovered.jsonl
+vision/data/hsv_marker/frames/
