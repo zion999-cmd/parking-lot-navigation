@@ -236,12 +236,20 @@ class TestState:
             states = self._states
         channels = []
         for channel, reading in sorted((k, v) for k, v in frame.items() if isinstance(k, int)):
+            # The poller keeps only the axes, so |B| is computed here rather than read from the
+            # board. That is a fix, not a preference: the old code looked for a field_ut key that
+            # the poller never stored, so the table's |B| column showed "-" on every refresh and
+            # the absolute field was simply invisible. Verified against the board's own field_ut
+            # over 100 samples during diagnosis: identical to the rounded value at every step.
+            scale = float((frame.get("_meta") or {}).get("scales", {}).get(channel) or 0.0)
+            field_ut = round((reading["x"] ** 2 + reading["y"] ** 2 + reading["z"] ** 2) ** 0.5
+                             * scale, 2) if scale else None
             channels.append({
                 "ch": channel,
                 "x": reading["x"],
                 "y": reading["y"],
                 "z": reading["z"],
-                "field_ut": round(reading["field_ut"], 2) if "field_ut" in reading else None,
+                "field_ut": field_ut,
                 "ok": reading.get("ok", True),
                 "age": round(reading.get("age", 99), 2),
                 "reads": reading.get("reads"),

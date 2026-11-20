@@ -51,6 +51,7 @@
 
 <div class="bar">
   <button id="baseline">建立 Baseline</button>
+  <button id="copy" style="background:#21262d;border-color:#30363d">复制当前诊断数据</button>
   <span class="note" id="note">先把 B1–B4 全部清空，再点这个按钮（采集 3 秒）。</span>
 </div>
 
@@ -99,11 +100,8 @@ function renderCards(bays, thresholds) {
     const id = bay.bay;
     document.getElementById("ch-" + id).textContent =
       bay.channel === null || bay.channel === undefined ? "未映射通道" : "通道 ch" + bay.channel;
-    const stateBox = document.getElementById("state-" + id);
-    stateBox.textContent = bay.state;
-    stateBox.className = "state " + stateClass(bay.state);
-    document.getElementById("delta-" + id).textContent =
-      bay.delta_ut === null ? "—" : bay.delta_ut.toFixed(2);
+    setText("state-" + id, bay.state, "state " + stateClass(bay.state));
+    setText("delta-" + id, bay.delta_ut === null ? "—" : bay.delta_ut.toFixed(2));
     const fill = document.getElementById("fill-" + id);
     fill.style.width = Math.round((bay.bar || 0) * 100) + "%";
     fill.className = "fill" + (bay.state === "OCCUPIED" ? " hot" : "");
@@ -111,11 +109,11 @@ function renderCards(bays, thresholds) {
     // uT, and "still OCCUPIED" is then either hysteresis or a baseline that contains the magnet.
     const enter = thresholds.enter === null ? null : thresholds.enter;
     const exit = thresholds.exit === null ? null : thresholds.exit;
-    document.getElementById("rules-" + id).textContent =
+    setText("rules-" + id,
       (enter === null ? "阈值未加载" : `进入 ≥ ${enter.toFixed(1)} · 退出 < ${exit.toFixed(1)} µT`)
       + (bay.baseline_field_ut === null || bay.baseline_field_ut === undefined
-          ? "" : `  · 基线 ${bay.baseline_field_ut.toFixed(0)} µT`);
-    document.getElementById("detail-" + id).textContent = bay.detail || "";
+          ? "" : `  · 基线 ${bay.baseline_field_ut.toFixed(0)} µT`));
+    setText("detail-" + id, bay.detail || "");
   }
 }
 
@@ -161,15 +159,32 @@ function ensureChannelRows(channels) {
   }
 }
 
+// A live page that rewrites text every 350 ms makes it impossible to select or copy anything: the
+// selection dies with each write. Two rules fix that without stopping the updates - write only when
+// the value actually changed, and stop writing entirely while the operator has something selected.
+function hasSelection() {
+  const selection = (typeof window !== "undefined" && window.getSelection)
+    ? window.getSelection() : null;
+  return !!(selection && selection.toString().length > 0);
+}
+
+function setText(id, text, className) {
+  const node = document.getElementById(id);
+  if (!node) return;
+  if (node.textContent === String(text) && node.className === (className || node.className)) return;
+  node.textContent = String(text);
+  if (className !== undefined) node.className = className;
+}
+
+let paused = false;
+
 function updateChannelRows(channels, currentMapping) {
+  if (paused) return;
   for (const c of channels) {
     const cells = { x: `cx-${c.ch}`, y: `cy-${c.ch}`, z: `cz-${c.ch}`,
                     f: `cf-${c.ch}`, a: `ca-${c.ch}` };
     const set = (id, text, stale) => {
-      const node = document.getElementById(id);
-      if (!node) return;
-      node.textContent = text;
-      if (id === cells.a) node.className = stale ? "stale" : "";
+      setText(id, text, id === cells.a ? (stale ? "stale" : "") : undefined);
     };
     set(cells.x, c.x);
     set(cells.y, c.y);
@@ -199,10 +214,13 @@ async function tick() {
     return;
   }
   mapping = data.mapping || {};
-  document.getElementById("board").textContent =
+  lastData = data;
+  paused = hasSelection();
+  if (paused) return;                       // keep the selection alive; resume when it is cleared
+  setText("board",
     data.board_ok ? `板子 ${data.board} · 轮询 ${data.polls} 次 · 重复 ${data.duplicates} 次`
-                  : `板子 ${data.board || "?"} 无响应 ${data.error ? "(" + data.error + ")" : ""}`;
-  document.getElementById("build").textContent = data.build ? ` · 后台版本 ${data.build}` : "";
+                  : `板子 ${data.board || "?"} 无响应 ${data.error ? "(" + data.error + ")" : ""}`);
+  setText("build", data.build ? ` · 后台版本 ${data.build}` : "");
   const base = data.baseline || {};
   // Computed once, here, and used by every renderCards call: an earlier patch put this inside one
   // branch only, so the normal path passed null and every card said "thresholds not loaded" while
@@ -213,9 +231,9 @@ async function tick() {
     ? 0 : data.hysteresis_ut;
   const thresholds = { enter: enterUt,
                        exit: enterUt === null ? null : Math.max(0, enterUt - hysteresisUt) };
-  document.getElementById("baseinfo").textContent = base.loaded
+  setText("baseinfo", base.loaded
     ? ` · Baseline: ${base.valid}/${base.total} 有效 · 阈值 ${data.threshold_ut} µT`
-    : " · 还没有 Baseline";
+    : " · 还没有 Baseline");
   const note = document.getElementById("note");
   const unmapped = BAYS.filter(bay => mapping[bay] === null || mapping[bay] === undefined);
   if (!data.capturing && unmapped.length === BAYS.length) {
@@ -241,6 +259,57 @@ async function tick() {
   renderCards(data.bays || [], thresholds);
   renderChannels(data.channels || [], mapping);
 }
+
+let lastData = null;
+
+function diagnosticsText() {
+  const d = lastData;
+  if (!d) return "还没有数据";
+  const lines = [];
+  lines.push(`board        ${d.board}  ok=${d.board_ok}  polls=${d.polls}  duplicates=${d.duplicates}`);
+  lines.push(`build        ${d.build}`);
+  lines.push(`threshold    enter ${d.threshold_ut} uT   hysteresis ${d.hysteresis_ut} uT`);
+  const b = d.baseline || {};
+  lines.push(`baseline     loaded=${b.loaded} valid=${b.valid}/${b.total} at=${b.calibrated_at} from=${b.source}`);
+  lines.push("");
+  lines.push("bay  ch   state      delta_ut  baseline|B|  detail");
+  for (const bay of d.bays || []) {
+    lines.push(`${bay.bay}  ${bay.channel === null ? "-" : bay.channel}    ${String(bay.state).padEnd(9)}  ` +
+               `${(bay.delta_ut === null ? "-" : bay.delta_ut.toFixed(2)).padStart(8)}  ` +
+               `${(bay.baseline_field_ut === null ? "-" : bay.baseline_field_ut.toFixed(1)).padStart(10)}  ` +
+               `${bay.detail || ""}`);
+  }
+  lines.push("");
+  lines.push("ch   x       y       z       field_ut  age_s  reads");
+  for (const c of d.channels || []) {
+    lines.push(`${c.ch}  ${String(c.x).padStart(7)} ${String(c.y).padStart(7)} ${String(c.z).padStart(7)} ` +
+               `${(c.field_ut === null ? "-" : c.field_ut.toFixed(2)).padStart(9)}  ` +
+               `${c.age.toFixed(2).padStart(5)}  ${c.reads}`);
+  }
+  lines.push("");
+  lines.push("mapping  " + JSON.stringify(d.mapping));
+  return lines.join("\n");
+}
+
+document.getElementById("copy").onclick = async () => {
+  const text = diagnosticsText();
+  const note = document.getElementById("note");
+  try {
+    await navigator.clipboard.writeText(text);
+    note.textContent = "已复制 ✓（可直接粘贴）";
+    note.className = "note ok";
+  } catch (error) {
+    // Fallback for pages served over plain http, where the clipboard API can be unavailable.
+    const area = document.createElement("textarea");
+    area.value = text;
+    document.body.appendChild(area);
+    area.select();
+    document.execCommand("copy");
+    document.body.removeChild(area);
+    note.textContent = "已复制 ✓（web 协议下用回退方式）";
+    note.className = "note ok";
+  }
+};
 
 document.getElementById("baseline").onclick = async () => {
   if (busy) return;
