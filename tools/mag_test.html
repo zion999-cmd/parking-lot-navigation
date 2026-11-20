@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>地磁测试 — B1..B4</title>
+<style>
+  :root { --bg:#10141a; --card:#1a2029; --line:#2a3340; --text:#e6edf3; --dim:#8b98a8;
+          --ok:#3fb950; --warn:#d29922; --bad:#f85149; --accent:#58a6ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:18px 22px 40px; background:var(--bg); color:var(--text);
+         font:15px/1.5 -apple-system, "PingFang SC", "Helvetica Neue", sans-serif; }
+  h1 { margin:0 0 4px; font-size:19px; font-weight:600; }
+  .sub { color:var(--dim); font-size:13px; margin-bottom:16px; }
+  .bar { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:14px; }
+  button { font:inherit; font-weight:600; padding:9px 18px; border-radius:8px; border:1px solid #2f81f7;
+           background:#1f6feb; color:#fff; cursor:pointer; }
+  button:disabled { background:#20303f; border-color:#2a3340; color:var(--dim); cursor:default; }
+  .note { color:var(--dim); font-size:13px; }
+  .note.bad { color:var(--bad); } .note.ok { color:var(--ok); }
+  .cards { display:grid; grid-template-columns:repeat(4, minmax(180px, 1fr)); gap:14px; margin:16px 0 22px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; }
+  .card .name { font-size:20px; font-weight:700; letter-spacing:.5px; }
+  .card .ch { color:var(--dim); font-size:12px; margin:2px 0 10px; }
+  .card .state { font-size:15px; font-weight:700; margin-bottom:8px; }
+  .state.EMPTY { color:var(--ok); } .state.OCCUPIED { color:var(--warn); }
+  .state.UNKNOWN { color:var(--dim); }
+  .delta { font-size:30px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .delta small { font-size:14px; color:var(--dim); font-weight:400; }
+  .track { height:8px; background:#0d1117; border-radius:6px; margin-top:10px; overflow:hidden;
+           border:1px solid var(--line); }
+  .fill { height:100%; width:0; background:var(--accent); transition:width .18s linear; }
+  .fill.hot { background:var(--warn); }
+  .detail { color:var(--dim); font-size:11px; margin-top:7px; min-height:15px; }
+  table { border-collapse:collapse; width:100%; max-width:820px; font-variant-numeric:tabular-nums; }
+  th, td { text-align:left; padding:7px 10px; border-bottom:1px solid var(--line); font-size:13px; }
+  th { color:var(--dim); font-weight:600; }
+  select { font:inherit; background:#0d1117; color:var(--text); border:1px solid var(--line);
+           border-radius:6px; padding:4px 6px; }
+  .hint { color:var(--dim); font-size:12px; margin-top:10px; max-width:820px; }
+  .stale { color:var(--bad); }
+</style>
+</head>
+<body>
+<h1>地磁测试 — B1..B4</h1>
+<div class="sub">
+  <span id="board">连接中…</span>
+  <span id="baseinfo"></span>
+</div>
+
+<div class="bar">
+  <button id="baseline">建立 Baseline</button>
+  <span class="note" id="note">先把 B1–B4 全部清空，再点这个按钮（采集 3 秒）。</span>
+</div>
+
+<div class="cards" id="cards"></div>
+
+<table>
+  <thead><tr><th>通道</th><th>X</th><th>Y</th><th>Z</th><th>|B| µT</th><th>数据年龄</th><th>对应车位</th></tr></thead>
+  <tbody id="channels"></tbody>
+</table>
+<div class="hint">
+  所有通道都列在这里，未映射的车位显示 UNKNOWN，但原始通道不隐藏。在最后一列选择某个车位，保存后立即生效
+  （写入 <code>vision/config/mag_bays.json</code>）。判定用 1 秒滑窗、3.8 µT 进入、0.6 µT 回差。
+</div>
+
+<script>
+const BAYS = ["B1", "B2", "B3", "B4"];
+let mapping = {};
+let busy = false;
+
+async function post(path, body) {
+  const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" },
+                                       body: JSON.stringify(body || {}) });
+  return response.json();
+}
+
+function stateClass(state) { return state === "EMPTY" ? "EMPTY" : state === "OCCUPIED" ? "OCCUPIED" : "UNKNOWN"; }
+
+function renderCards(bays) {
+  const host = document.getElementById("cards");
+  if (host.children.length !== bays.length) {
+    host.innerHTML = bays.map(bay => `
+      <div class="card" id="card-${bay.bay}">
+        <div class="name">${bay.bay}</div>
+        <div class="ch" id="ch-${bay.bay}"></div>
+        <div class="state" id="state-${bay.bay}">—</div>
+        <div class="delta"><span id="delta-${bay.bay}">—</span><small> µT</small></div>
+        <div class="track"><div class="fill" id="fill-${bay.bay}"></div></div>
+        <div class="detail" id="detail-${bay.bay}"></div>
+      </div>`).join("");
+  }
+  for (const bay of bays) {
+    const id = bay.bay;
+    document.getElementById("ch-" + id).textContent =
+      bay.channel === null || bay.channel === undefined ? "未映射通道" : "通道 ch" + bay.channel;
+    const stateBox = document.getElementById("state-" + id);
+    stateBox.textContent = bay.state;
+    stateBox.className = "state " + stateClass(bay.state);
+    document.getElementById("delta-" + id).textContent =
+      bay.delta_ut === null ? "—" : bay.delta_ut.toFixed(2);
+    const fill = document.getElementById("fill-" + id);
+    fill.style.width = Math.round((bay.bar || 0) * 100) + "%";
+    fill.className = "fill" + (bay.state === "OCCUPIED" ? " hot" : "");
+    document.getElementById("detail-" + id).textContent = bay.detail || "";
+  }
+}
+
+function renderChannels(channels, currentMapping) {
+  const body = document.getElementById("channels");
+  const options = ch => {
+    const selected = Object.entries(currentMapping).find(([, value]) => value === ch);
+    return `<option value="">—</option>` + BAYS.map(bay =>
+      `<option value="${bay}" ${selected && selected[0] === bay ? "selected" : ""}>${bay}</option>`).join("");
+  };
+  body.innerHTML = channels.map(c => `
+    <tr>
+      <td>ch${c.ch}</td>
+      <td>${c.x}</td>
+      <td>${c.y}</td>
+      <td>${c.z}</td>
+      <td>${c.field_ut === null ? "—" : c.field_ut.toFixed(2)}</td>
+      <td class="${c.age > 2 ? "stale" : ""}">${c.age.toFixed(1)} s</td>
+      <td><select data-ch="${c.ch}">${options(c.ch)}</select></td>
+    </tr>`).join("");
+  for (const select of body.querySelectorAll("select")) {
+    select.onchange = async event => {
+      const channel = Number(event.target.dataset.ch);
+      const bay = event.target.value;
+      const pairs = {};
+      for (const name of BAYS) {
+        if (mapping[name] === channel) pairs[name] = null;      // one channel, one bay
+      }
+      if (bay) pairs[bay] = channel;
+      await post("/api/map", { pairs });
+      await tick();
+    };
+  }
+}
+
+async function tick() {
+  let data;
+  try {
+    const response = await fetch("/api/state", { cache: "no-store" });
+    data = await response.json();
+  } catch (error) {
+    document.getElementById("board").textContent = "页面与后台断开（后台进程还在吗？）";
+    return;
+  }
+  mapping = data.mapping || {};
+  document.getElementById("board").textContent =
+    data.board_ok ? `板子 ${data.board} · 轮询 ${data.polls} 次 · 重复 ${data.duplicates} 次`
+                  : `板子 ${data.board || "?"} 无响应 ${data.error ? "(" + data.error + ")" : ""}`;
+  const base = data.baseline || {};
+  document.getElementById("baseinfo").textContent = base.loaded
+    ? ` · Baseline: ${base.valid}/${base.total} 有效 · 阈值 ${data.threshold_ut} µT`
+    : " · 还没有 Baseline";
+  const note = document.getElementById("note");
+  if (data.capturing) {
+    note.textContent = "正在采集 Baseline…（约 3 秒，别动车）";
+    note.className = "note";
+    document.getElementById("baseline").disabled = true;
+  } else {
+    note.textContent = data.capture_note ? "上次: " + data.capture_note
+                                         : "先把 B1–B4 全部清空，再点这个按钮（采集 3 秒）。";
+    note.className = "note" + (/failed/.test(data.capture_note || "") ? " bad" : "");
+    document.getElementById("baseline").disabled = false;
+  }
+  renderCards(data.bays || []);
+  renderChannels(data.channels || [], mapping);
+}
+
+document.getElementById("baseline").onclick = async () => {
+  if (busy) return;
+  busy = true;
+  try {
+    const result = await post("/api/baseline", { seconds: 3 });
+    document.getElementById("note").textContent = result.ok ? "开始采集…" : ("没能开始: " + result.note);
+  } finally { busy = false; }
+  await tick();
+};
+
+tick();
+setInterval(tick, 350);
+</script>
+</body>
+</html>
