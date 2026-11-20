@@ -29,6 +29,8 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import urllib.parse
+import urllib.request
 import math
 import os
 import shutil
@@ -68,6 +70,37 @@ COL_OCCUPIED = (0, 0, 255)
 
 
 COL_CAR = (255, 120, 0)
+
+
+def mag_api_url(source):
+    """The magnetometer endpoint belonging to the board we are reading frames from.
+
+    A snapshot only correlates what the camera saw with what the sensors saw if both come from the
+    same moment, so this is derived from --source instead of being configured a second time. A still
+    image has no board behind it and returns None.
+    """
+    if not isinstance(source, str) or not source.lower().startswith(("http://", "https://")):
+        return None
+    parsed = urllib.parse.urlsplit(source)
+    if not parsed.netloc:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}/api/mag"
+
+
+def fetch_mag(source, timeout=1.5):
+    """Read /api/mag once; returns the parsed document or {"error": ...}. Never raises.
+
+    This runs on a key press with the frame loop paused, so a board that has gone away must cost one
+    timeout rather than the session.
+    """
+    url = mag_api_url(source)
+    if url is None:
+        return {"error": "source is not a board URL; no magnetometers to read"}
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except Exception as exc:                        # noqa: BLE001 - any failure is "no reading"
+        return {"error": f"{type(exc).__name__}: {exc}", "url": url}
 
 
 def annotate(frame: np.ndarray, spots: List[Spot], results: Dict[str, SpotResult],
@@ -1126,11 +1159,25 @@ def main() -> int:
                     else:
                         print("  no reference to audit yet - press r with every bay empty")
                 elif key == ord('s'):
-                    name = os.path.join(ROOT, "data", "debug",
-                                        f"snapshot_{int(time.time())}.png")
+                    stamp = int(time.time())
+                    name = os.path.join(ROOT, "data", "debug", f"snapshot_{stamp}.png")
                     os.makedirs(os.path.dirname(name), exist_ok=True)
                     cv2.imwrite(name, canvas)
                     print(f"  saved {name}")
+                    # Keep the magnetometers beside the picture: a snapshot is evidence about one moment,
+                    # and half of that moment is what the field looked like. Read them here rather than
+                    # reusing a cached copy, so the two cannot drift apart.
+                    mag = fetch_mag(args.source)
+                    mag_name = os.path.join(os.path.dirname(name), f"snapshot_{stamp}.mag.json")
+                    with open(mag_name, "w", encoding="utf-8") as fh:
+                        json.dump({"t": stamp, "source": args.source, "mag": mag}, fh, indent=1)
+                    sensors = mag.get("sensors") or []
+                    if sensors:
+                        fields = "  ".join(
+                            "ch%d %.2fuT" % (r.get("ch", -1), r.get("field_ut", 0.0)) for r in sensors)
+                        print(f"  mag {mag_name}: {fields}")
+                    else:
+                        print(f"  mag {mag_name}: {mag.get('error', 'no sensors')}")
             else:
                 if args.duration and elapsed >= args.duration:
                     break
