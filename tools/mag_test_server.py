@@ -258,7 +258,8 @@ class TestState:
         for bay in BAYS:
             entry = states.get(bay) or {}
             delta = entry.get("delta_ut")
-            threshold = self.baseline.threshold_ut if self.baseline else 3.8
+            threshold = self.baseline.threshold_counts if self.baseline else 70.0
+            live = frame.get(self.mapping.get(bay)) if self.mapping.get(bay) is not None else None
             entry_baseline = (self.baseline.bays.get(bay) or {}) if self.baseline else {}
             mean_xyz = entry_baseline.get("mean_xyz_ut") or {}
             field_ut = None
@@ -268,11 +269,19 @@ class TestState:
             bays.append({
                 "bay": bay,
                 "baseline_field_ut": field_ut,
+                # The live axes for this bay's channel, so a card can show what the sensor sees
+                # without the reader having to match rows in the table below.
+                "x": None if live is None else live.get("x"),
+                "y": None if live is None else live.get("y"),
+                "z": None if live is None else live.get("z"),
+                "delta_counts": None if entry.get("delta_counts") is None else round(entry["delta_counts"], 1),
+                "threshold_counts": threshold,
                 "channel": self.mapping.get(bay),
                 "state": entry.get("state", "UNKNOWN"),
                 "delta_ut": None if delta is None else round(delta, 2),
                 "detail": entry.get("reason", ""),
-                "bar": 0.0 if delta is None else min(1.0, delta / max(threshold, 0.1)),
+                "bar": 0.0 if entry.get("delta_counts") is None
+                       else min(1.0, entry["delta_counts"] / max(threshold, 1.0)),
             })
         meta = frame.get("_meta") or {}
         return {
@@ -283,8 +292,8 @@ class TestState:
             "duplicates": meta.get("duplicates", 0),
             "capturing": self.capturing,
             "capture_note": self.capture_note,
-            "threshold_ut": self.baseline.threshold_ut if self.baseline else None,
-            "hysteresis_ut": self.baseline.hysteresis_ut if self.baseline else None,
+            "threshold_counts": self.baseline.threshold_counts if self.baseline else None,
+            "hysteresis_counts": self.baseline.hysteresis_counts if self.baseline else None,
             "baseline": {
                 "loaded": self.baseline is not None,
                 "calibrated_at": self.baseline.calibrated_at if self.baseline else None,

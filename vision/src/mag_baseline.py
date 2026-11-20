@@ -7,7 +7,7 @@ Three things this module refuses to do, because the experiment depends on them:
 
 * It never treats a repeated read counter as a new sample. The board's HTTP interface and its
   sensor loop run at unrelated rates, so several polls legitimately return the same reading.
-* It never reports OCCUPIED without a valid baseline, a mapped channel, and fresh, healthy data -
+* It never reports CHANGED without a valid baseline, a mapped channel, and fresh, healthy data -
   those cases are UNKNOWN. An unmapped bay is inert, not occupied.
 * It never touches the vision result. It only reports what the field looks like.
 """
@@ -26,13 +26,12 @@ STALE_S = 2.0
 # Roll the delta over about a second, which is the timescale a parked car changes on and where the
 # measured per-sample noise (1.0-1.5 uT) falls to well under the signal the big bays produce.
 WINDOW_S = 1.0
-# Measured on this rig with every bay empty, 60 s, 1 s window, LED strip running: delta-B has
-# median 1.22 uT, p95 2.29, p99 3.44, max 3.44. The field drifts over tens of seconds rather than
-# wobbling per sample, so the empty-state delta is 1-3 uT and not the 0.3 uT the white-noise
-# estimate suggested. 1.5 was tried first and reported OCCUPIED constantly; the default is now the
-# measured p99 with margin. Re-measure after moving the sandbox.
-DEFAULT_THRESHOLD_UT = 3.8
-DEFAULT_HYSTERESIS_UT = 0.6
+# Measured with every bay empty, 40 s, 1 s window, at the sensors' own scale: delta in counts has
+# median 18, p95 36, p99 47, max 66. A threshold of 70 counts sits above everything the empty sandbox
+# produced and far below a magnet, which runs to hundreds and thousands of counts. Expressed in
+# counts because that is what comes off the wire; the old 3.8 (uT) is not a count value.
+DEFAULT_THRESHOLD_COUNTS = 70.0
+DEFAULT_HYSTERESIS_COUNTS = 10.0
 # Below this many fresh samples a baseline is not a baseline.
 MIN_SAMPLES = 8
 
@@ -125,18 +124,20 @@ class MagPoller(threading.Thread):
 class MagBaseline:
     """Per-bay empty-field reference: mean X/Y/Z, in microtesla relative to each sensor's scale."""
 
-    def __init__(self, bays=None, calibrated_at=None, source=None, threshold_ut=None,
-                 hysteresis_ut=None):
+    def __init__(self, bays=None, calibrated_at=None, source=None, threshold_counts=None,
+                 hysteresis_counts=None):
         self.bays = bays or {}
         self.calibrated_at = calibrated_at
         self.source = source
-        self.threshold_ut = DEFAULT_THRESHOLD_UT if threshold_ut is None else threshold_ut
-        self.hysteresis_ut = DEFAULT_HYSTERESIS_UT if hysteresis_ut is None else hysteresis_ut
+        self.threshold_counts = (DEFAULT_THRESHOLD_COUNTS if threshold_counts is None
+                                 else threshold_counts)
+        self.hysteresis_counts = (DEFAULT_HYSTERESIS_COUNTS if hysteresis_counts is None
+                                  else hysteresis_counts)
 
     # -- capture ------------------------------------------------------------------------
     @classmethod
     def capture(cls, poller, mapping, duration=3.0, min_samples=MIN_SAMPLES, source=None,
-                threshold_ut=None, hysteresis_ut=None, log=print):
+                threshold_counts=None, hysteresis_counts=None, log=print):
         """Average the field over `duration` seconds and build a baseline per mapped bay.
 
         The windows are collected from the poller the vision loop already feeds, so nothing here
@@ -196,7 +197,7 @@ class MagBaseline:
                              "reason": "no channel mapped for this bay"}
         log(f"  mag baseline: {sum(1 for b in bays.values() if b['valid'])}/{len(bays)} bay(s) valid")
         return cls(bays=bays, calibrated_at=time.time(), source=source,
-                   threshold_ut=threshold_ut, hysteresis_ut=hysteresis_ut)
+                   threshold_counts=threshold_counts, hysteresis_counts=hysteresis_counts)
 
     # -- helpers ------------------------------------------------------------------------
     def invalid_bays(self):
@@ -209,8 +210,8 @@ class MagBaseline:
             "schema": "mag_baseline/1",
             "calibrated_at": self.calibrated_at,
             "source": self.source,
-            "threshold_ut": self.threshold_ut,
-            "hysteresis_ut": self.hysteresis_ut,
+            "threshold_counts": self.threshold_counts,
+            "hysteresis_counts": self.hysteresis_counts,
             "bays": self.bays,
         }
 
@@ -233,12 +234,17 @@ class MagBaseline:
         except (OSError, ValueError):
             return None
         return cls(bays=document.get("bays") or {}, calibrated_at=document.get("calibrated_at"),
-                   source=document.get("source"), threshold_ut=document.get("threshold_ut"),
-                   hysteresis_ut=document.get("hysteresis_ut"))
+                   source=document.get("source"),
+                   threshold_counts=document.get("threshold_counts"),
+                   hysteresis_counts=document.get("hysteresis_counts"))
 
 
 class MagJudge:
-    """Turns the rolling field into EMPTY / OCCUPIED / UNKNOWN per bay."""
+    """Turns the rolling field into NORMAL / CHANGED / UNKNOWN per bay.
+
+    Two states and one threshold, as the current task asks: the magnetometer is an observation, not a
+    business decision - the vision run owns occupancy.
+    """
 
     def __init__(self, baseline, window_s=WINDOW_S, stale_s=STALE_S):
         self.baseline = baseline
@@ -253,13 +259,14 @@ class MagJudge:
         """frame is MagPoller.snapshot(). Returns {bay: {state, delta_ut, channel, reason}}."""
         now = time.time() if now is None else now
         if self.baseline is None:
-            return {bay: {"state": "UNKNOWN", "delta_ut": None, "channel": None,
+            return {bay: {"state": "UNKNOWN", "delta_ut": None, "delta_counts": None, "channel": None,
                           "reason": "no baseline (press r with the bays empty)"}
                     for bay in ("B1", "B2", "B3", "B4")}
         result = {}
         for bay, entry in self.baseline.bays.items():
             channel = entry.get("channel")
-            out = {"channel": channel, "delta_ut": None, "state": "UNKNOWN", "reason": ""}
+            out = {"channel": channel, "delta_ut": None, "delta_counts": None,
+                   "state": "UNKNOWN", "reason": ""}
             if not entry.get("valid"):
                 out["reason"] = entry.get("reason") or "baseline invalid"
                 result[bay] = out
@@ -315,15 +322,27 @@ class MagJudge:
                     "y": statistics.fmean(point[2] for point in series),
                     "z": statistics.fmean(point[3] for point in series)}
             base = entry["mean_xyz_ut"]
-            delta = math.sqrt(sum((mean[axis] - base[axis]) ** 2 for axis in ("x", "y", "z")))
-            out["delta_ut"] = delta
-            threshold = self.baseline.threshold_ut
-            hysteresis = self.baseline.hysteresis_ut
-            previous = self._state.get(bay, "EMPTY")
-            if previous == "OCCUPIED":
-                state = "OCCUPIED" if delta > threshold - hysteresis else "EMPTY"
+            # Delta in counts, measured on the same axis as the threshold. The baseline is stored in
+            # uT with the scale in force when it was captured, and the sensors can come back from a
+            # strong field on a different range (measured: ch2/ch4 moved from 0.04 to 0.10 uT/count),
+            # so the difference is divided by the capture scale rather than the current one.
+            scale_capture = entry.get("ut_per_lsb") or 0.0
+            if scale_capture <= 0:
+                out["reason"] = "baseline has no scale; recapture"
+                result[bay] = out
+                continue
+            delta_counts = math.sqrt(sum(((mean[axis] - base[axis]) / scale_capture) ** 2
+                                         for axis in ("x", "y", "z")))
+            delta_ut = math.sqrt(sum((mean[axis] - base[axis]) ** 2 for axis in ("x", "y", "z")))
+            out["delta_counts"] = delta_counts
+            out["delta_ut"] = delta_ut
+            threshold = self.baseline.threshold_counts
+            hysteresis = self.baseline.hysteresis_counts
+            previous = self._state.get(bay, "NORMAL")
+            if previous == "CHANGED":
+                state = "CHANGED" if delta_counts > threshold - hysteresis else "NORMAL"
             else:
-                state = "OCCUPIED" if delta >= threshold else "EMPTY"
+                state = "CHANGED" if delta_counts >= threshold else "NORMAL"
             self._state[bay] = state
             out["state"] = state
             self._last_result[bay] = dict(out)         # what a repeat-read update holds

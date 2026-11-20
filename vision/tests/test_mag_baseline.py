@@ -2,7 +2,7 @@
 
 The states these tests pin down are the ones that decide whether the experiment means anything:
 a bay with no baseline, no mapped channel, a dead sensor or stale data must never be reported
-OCCUPIED, and the read counter must not be mistaken for new measurements.
+CHANGED, and the read counter must not be mistaken for new measurements.
 """
 
 import os
@@ -38,12 +38,12 @@ class FakePoller:
         return frame
 
 
-def make_baseline(threshold=3.8, hysteresis=0.6, **bays):
+def make_baseline(threshold=70.0, hysteresis=10.0, **bays):
     entries = {}
     for bay, spec in bays.items():
         entries[bay] = spec
-    return M.MagBaseline(bays=entries, calibrated_at=time.time(), threshold_ut=threshold,
-                         hysteresis_ut=hysteresis)
+    return M.MagBaseline(bays=entries, calibrated_at=time.time(), threshold_counts=threshold,
+                         hysteresis_counts=hysteresis)
 
 
 def valid_entry(channel, x=0.0, y=0.0, z=0.0, scale=0.1):
@@ -106,7 +106,7 @@ def test_missing_channel_is_unknown():
     assert "not reported" in states["B1"]["reason"]
 
 
-def test_empty_field_is_empty():
+def test_field_at_baseline_is_normal():
     baseline = make_baseline(B1=valid_entry(1, x=10.0, y=2.0, z=3.0))
     judge = M.MagJudge(baseline, window_s=5.0)
     now = time.time()
@@ -114,13 +114,13 @@ def test_empty_field_is_empty():
     judge.update(frame, now=now)                           # first point fills the window
     frame = FakePoller({1: reading(101, 20, 30, reads=2, t=now + 0.1)}).snapshot(now=now + 0.1)
     states = judge.update(frame, now=now + 0.1)
-    assert states["B1"]["state"] == "EMPTY"
+    assert states["B1"]["state"] == "NORMAL"
     assert states["B1"]["delta_ut"] < 3.8
 
 
-def test_occupied_then_hysteresis_keeps_it_until_well_below():
+def test_changed_then_hysteresis_keeps_it_until_well_below():
     """A step above the threshold latches, and only clears below threshold - hysteresis."""
-    baseline = make_baseline(B1=valid_entry(1, x=0.0), threshold=3.8, hysteresis=0.6)
+    baseline = make_baseline(B1=valid_entry(1, x=0.0), threshold=70.0, hysteresis=10.0)
     judge = M.MagJudge(baseline, window_s=5.0)
 
     clock = [time.time()]
@@ -134,17 +134,17 @@ def test_occupied_then_hysteresis_keeps_it_until_well_below():
             last = judge.update(frame, now=clock[0])
         return last["B1"]
 
-    # 6 uT above baseline: occupied.
-    state = run([60, 60])
+    # 600 counts above baseline: changed.
+    state = run([600, 600])
     clock[0] += 10.0                                       # let the old window drain
-    assert state["state"] == "OCCUPIED"
-    # 3.5 uT is below the threshold but above threshold - hysteresis: still occupied.
-    state = run([35, 35])
+    assert state["state"] == "CHANGED"
+    # 65 counts is below the threshold of 70 but above 70 - 10: hysteresis keeps it changed.
+    state = run([65, 65])
     clock[0] += 10.0
-    assert state["state"] == "OCCUPIED"
-    # 2.0 uT is below threshold - hysteresis: clears.
+    assert state["state"] == "CHANGED"
+    # 20 counts is below threshold - hysteresis: back to normal.
     state = run([20, 20])
-    assert state["state"] == "EMPTY"
+    assert state["state"] == "NORMAL"
 
 
 def test_delta_is_vector_distance_not_per_axis():
@@ -154,8 +154,9 @@ def test_delta_is_vector_distance_not_per_axis():
     judge.update(FakePoller({1: reading(20, 20, 20, reads=1, t=now)}).snapshot(now=now), now=now)
     states = judge.update(FakePoller({1: reading(20, 20, 20, reads=2, t=now + 0.1)})
                           .snapshot(now=now + 0.1), now=now + 0.1)
-    # 20 counts on every axis at 0.1 uT/count = 2 uT per axis, 3.464 uT in length. Per-axis
-    # comparison would have said 2.0, which is why the judge uses the vector length.
+    # 20 counts on every axis: 20*sqrt(3) = 34.6 counts in length, i.e. 3.46 uT at 0.1 uT/count.
+    # A per-axis test would have said 20, which is why the judge uses the vector length.
+    assert abs(states["B1"]["delta_counts"] - (20 ** 2 * 3) ** 0.5) < 0.01
     assert abs(states["B1"]["delta_ut"] - (2.0 ** 2 * 3) ** 0.5) < 0.01
 
 
@@ -196,7 +197,7 @@ def test_baseline_round_trip(tmp_path=None):
         baseline.save(path)
         loaded = M.MagBaseline.load(path)
         assert loaded is not None
-        assert loaded.threshold_ut == baseline.threshold_ut
+        assert loaded.threshold_counts == baseline.threshold_counts
         assert loaded.bays["B1"]["mean_xyz_ut"] == baseline.bays["B1"]["mean_xyz_ut"]
         assert json.load(open(path, encoding="utf-8"))["schema"] == "mag_baseline/1"
 
@@ -213,27 +214,27 @@ def _frame(value, reads, when, observed=None):
         now=when if observed is None else observed)
 
 
-def test_new_sample_reports_occupied():
-    baseline = make_baseline(B1=valid_entry(1, x=0.0), threshold=3.8, hysteresis=0.6)
+def test_new_sample_reports_changed():
+    baseline = make_baseline(B1=valid_entry(1, x=0.0), threshold=70.0, hysteresis=10.0)
     judge = M.MagJudge(baseline, window_s=5.0)
     now = time.time()
-    judge.update(_frame(60, 1, now), now=now)
-    states = judge.update(_frame(60, 2, now + 0.1), now=now + 0.1)
-    assert states["B1"]["state"] == "OCCUPIED"
+    judge.update(_frame(600, 1, now), now=now)
+    states = judge.update(_frame(600, 2, now + 0.1), now=now + 0.1)
+    assert states["B1"]["state"] == "CHANGED"
 
 
 def test_repeated_read_holds_the_last_judgement():
     """The fix: same counter, still fresh -> hold, do not fall back to UNKNOWN."""
-    baseline = make_baseline(B1=valid_entry(1, x=0.0), threshold=3.8, hysteresis=0.6)
+    baseline = make_baseline(B1=valid_entry(1, x=0.0), threshold=70.0, hysteresis=10.0)
     judge = M.MagJudge(baseline, window_s=5.0)
     now = time.time()
-    judge.update(_frame(60, 1, now), now=now)
-    decided = judge.update(_frame(60, 2, now + 0.1), now=now + 0.1)
-    assert decided["B1"]["state"] == "OCCUPIED"
+    judge.update(_frame(600, 1, now), now=now)
+    decided = judge.update(_frame(600, 2, now + 0.1), now=now + 0.1)
+    assert decided["B1"]["state"] == "CHANGED"
 
-    held = judge.update(_frame(60, 2, now + 0.1), now=now + 0.3)
-    assert held["B1"]["state"] == "OCCUPIED"
-    assert held["B1"]["delta_ut"] == decided["B1"]["delta_ut"]
+    held = judge.update(_frame(600, 2, now + 0.1), now=now + 0.3)
+    assert held["B1"]["state"] == "CHANGED"
+    assert held["B1"]["delta_counts"] == decided["B1"]["delta_counts"]
     assert "holding the last judgement" in held["B1"]["reason"]
 
 
@@ -244,11 +245,11 @@ def test_no_flicker_across_repeated_reads():
     now = time.time()
     judge.update(_frame(0, 1, now), now=now)
     first = judge.update(_frame(0, 2, now + 0.1), now=now + 0.1)
-    assert first["B1"]["state"] == "EMPTY"
+    assert first["B1"]["state"] == "NORMAL"
     for step in range(10):
         held = judge.update(_frame(0, 2, now + 0.1), now=now + 0.1 + step * 0.01)
-        assert held["B1"]["state"] == "EMPTY", f"flickered at step {step}"
-        assert held["B1"]["delta_ut"] == first["B1"]["delta_ut"]
+        assert held["B1"]["state"] == "NORMAL", f"flickered at step {step}"
+        assert held["B1"]["delta_counts"] == first["B1"]["delta_counts"]
         assert held["B1"]["reason"] == "no new sample; holding the last judgement"
 
 
@@ -259,7 +260,7 @@ def test_held_judgement_expires_to_unknown():
     now = time.time()
     judge.update(_frame(0, 1, now), now=now)
     decided = judge.update(_frame(0, 2, now + 0.1), now=now + 0.1)
-    assert decided["B1"]["state"] == "EMPTY"
+    assert decided["B1"]["state"] == "NORMAL"
 
     later = now + 0.1 + 2.5
     expired = judge.update(_frame(0, 2, now + 0.1, observed=later), now=later)
@@ -269,34 +270,35 @@ def test_held_judgement_expires_to_unknown():
 
 def test_new_sample_after_a_hold_recomputes():
     """A fresh sample must be used, not ignored because a judgement was being held."""
-    baseline = make_baseline(B1=valid_entry(1, x=0.0), threshold=3.8, hysteresis=0.6)
+    baseline = make_baseline(B1=valid_entry(1, x=0.0), threshold=70.0, hysteresis=10.0)
     judge = M.MagJudge(baseline, window_s=5.0)
     now = time.time()
-    judge.update(_frame(60, 1, now), now=now)
-    assert judge.update(_frame(60, 2, now + 0.1), now=now + 0.1)["B1"]["state"] == "OCCUPIED"
-    assert judge.update(_frame(60, 2, now + 0.1), now=now + 0.3)["B1"]["state"] == "OCCUPIED"
+    judge.update(_frame(600, 1, now), now=now)
+    assert judge.update(_frame(600, 2, now + 0.1), now=now + 0.1)["B1"]["state"] == "CHANGED"
+    assert judge.update(_frame(60, 2, now + 0.1), now=now + 0.3)["B1"]["state"] == "CHANGED"
 
     # Field returns to baseline on a new counter: recomputed, and outside the old window.
     later = now + 20.0
     judge.update(_frame(0, 3, later), now=later)
     back = judge.update(_frame(0, 4, later + 0.1), now=later + 0.1)
-    assert back["B1"]["state"] == "EMPTY"
+    assert back["B1"]["state"] == "NORMAL"
     assert back["B1"]["delta_ut"] < 0.01
 
 
 def test_recalibration_does_not_inherit_the_old_state():
-    """A new baseline gets a new judge; the latched OCCUPIED from before must not survive."""
-    baseline = make_baseline(B1=valid_entry(1, x=0.0), threshold=3.8, hysteresis=0.6)
+    """A new baseline gets a new judge; the latched CHANGED from before must not survive."""
+    baseline = make_baseline(B1=valid_entry(1, x=0.0), threshold=70.0, hysteresis=10.0)
     judge = M.MagJudge(baseline, window_s=5.0)
     now = time.time()
-    judge.update(_frame(60, 1, now), now=now)
-    assert judge.update(_frame(60, 2, now + 0.1), now=now + 0.1)["B1"]["state"] == "OCCUPIED"
+    judge.update(_frame(600, 1, now), now=now)
+    assert judge.update(_frame(600, 2, now + 0.1), now=now + 0.1)["B1"]["state"] == "CHANGED"
 
-    recaptured = make_baseline(B1=valid_entry(1, x=6.0), threshold=3.8, hysteresis=0.6)
+    recaptured = make_baseline(B1=valid_entry(1, x=60.0), threshold=70.0, hysteresis=10.0)
     fresh = M.MagJudge(recaptured, window_s=5.0)
-    # The field is now at the new baseline (6 uT), so it is empty, and nothing is latched yet.
+    # The field is now at the new baseline (60 uT = the 600 counts being read), so it reads normal,
+    # and nothing is latched yet because the judge is a new one.
     later = now + 30.0
-    fresh.update(_frame(60, 10, later), now=later)
-    states = fresh.update(_frame(60, 11, later + 0.1), now=later + 0.1)
-    assert states["B1"]["state"] == "EMPTY"
-    assert fresh._state.get("B1") == "EMPTY"
+    fresh.update(_frame(600, 10, later), now=later)
+    states = fresh.update(_frame(600, 11, later + 0.1), now=later + 0.1)
+    assert states["B1"]["state"] == "NORMAL"
+    assert fresh._state.get("B1") == "NORMAL"
