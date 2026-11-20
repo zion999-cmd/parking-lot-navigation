@@ -47,6 +47,18 @@ SINGLE_POLL = frame(0x22)
 #   BB 00 1B 00 05 02 <a1><a2><a3><a4> CRC 7E - which antennas take part in continuous inventory
 # Without one of these the module answers on antenna 1 only, which is what "only one antenna
 # works" looks like from the outside.
+def set_power(dbm: int) -> bytes:
+    """Set the transmit power on all four ports.
+
+    Frame: BB 00 B6 00 08 <p1> <p2> <p3> <p4> <crc> 7E, where each port takes two bytes and the unit
+    is dBm x 100 (vendor quick reference: 03 E8 = 10 dBm, 07 D0 = 20 dBm). PL is 8, not 4 - an
+    earlier note in this repository had it wrong, which would have made the reader interpret two of
+    the four ports as garbage.
+    """
+    raw = max(5, min(28, int(dbm))) * 100
+    return frame(0xB6, bytes([(raw >> 8) & 0xFF, raw & 0xFF]) * 4)
+
+
 def select_antenna(n: int) -> bytes:
     return frame(0x1B, bytes([0x01, n]))
 
@@ -125,6 +137,8 @@ def main() -> int:
     ap.add_argument("--seconds", type=float, default=0, help="0 = until q")
     ap.add_argument("--antenna", type=int, default=1, choices=[1, 2, 3, 4],
                     help="antenna port to poll on (see the ANT column to confirm)")
+    ap.add_argument("--power", type=int, default=28,
+                    help="transmit power in dBm, 5..28 on all four ports (default 28, the maximum)")
     ap.add_argument("--csv", help="append every tag read to this file (time,ant,epc,rssi)")
     ap.add_argument("--cycle", action="store_true",
                     help="rotate through antennas 1..4, one poll each - the ANT column says which "
@@ -149,6 +163,12 @@ def main() -> int:
         ack = parse(drain(fd, 0.25))
         ok = any(f["type"] == 0x01 for f in ack)
         print("select antenna %d -> %s" % (args.antenna, "acknowledged" if ok else "no reply"))
+    pw = set_power(args.power)
+    os.write(fd, pw)
+    ack = parse(drain(fd, 0.3))
+    ok = any(f["type"] == 0x01 for f in ack)
+    print("power -> %d dBm x4  %s  (%s)" % (
+        max(5, min(28, args.power)), "acknowledged" if ok else "no reply", pw.hex(" ").upper()))
     print("polling every %.0f ms - press q to stop" % (args.interval * 1000))
     print()
     print("  %-8s %6s %-36s %s" % ("time", "ant", "EPC", "RSSI"))
