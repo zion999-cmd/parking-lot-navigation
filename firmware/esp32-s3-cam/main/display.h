@@ -73,17 +73,14 @@ void display_restore(void);
 void display_show_error(const char *title, const char *hint);
 
 /**
- * Show the fixed test QR code, full screen.
- *
- * A transient overlay, like the OTA screens: display_restore() puts the previous
- * base screen back. The modules are a baked constant (qr_code.h) scaled to fill
- * the panel with a full four module quiet zone, so this allocates nothing and
- * encodes nothing - it is 441 filled squares in the existing frame buffer.
- *
- * 'payload' is only logged (pass NULL for the compiled-in payload); the modules
- * themselves live in qr_code.h, which tools/make-qr-test.py generates.
+ * Show the current dynamic navigation QR as a transient overlay. If no matrix is
+ * currently valid, the overlay says so instead of showing an old address.
+ * display_restore() and the existing gate/boot timers still own its duration.
  */
 void display_show_qr(const char *payload);
+
+/** Called by the QR worker after a matrix becomes valid or invalid. Never blocks. */
+void display_qr_data_changed(void);
 
 #ifdef __cplusplus
 }

@@ -13,6 +13,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include <cJSON.h>
 #include <esp_app_desc.h>
 #include <esp_camera.h>
 #include <esp_heap_caps.h>
@@ -25,6 +26,7 @@
 #include "camera.h"
 #include "ota.h"
 #include "provisioning.h"
+#include "qr_dynamic.h"
 #include "wifi.h"
 
 static const char *TAG = "stream";
@@ -133,9 +135,15 @@ static void note_fb_get(void)
 
 static esp_err_t index_handler(httpd_req_t *req)
 {
-    static char page[3072];
+    static char page[4096];
 
     const esp_partition_t *running = esp_ota_get_running_partition();
+    qr_snapshot_t qr;
+    qr_dynamic_snapshot(&qr);
+    int qr_success_age_s = qr.last_success_us > 0
+        ? (int)((esp_timer_get_time() - qr.last_success_us) / 1000000) : -1;
+    char ota_url[192];
+    ota_manifest_url_string(ota_url, sizeof(ota_url));
 
     int n = snprintf(page, sizeof(page),
         "<!DOCTYPE html>\n"
@@ -160,7 +168,11 @@ static esp_err_t index_handler(httpd_req_t *req)
         "<tr><td>Firmware</td><td>%s (slot %s)</td></tr>\n"
         "<tr><td>Net state</td><td>%s</td></tr>\n"
         "<tr><td>OTA</td><td>%s%s</td></tr>\n"
+        "<tr><td>OTA state</td><td>%s</td></tr>\n"
         "<tr><td>OTA server</td><td>%s</td></tr>\n"
+        "<tr><td>QR valid</td><td>%s (last success %d s ago)</td></tr>\n"
+        "<tr><td>QR URL</td><td>%s</td></tr>\n"
+        "<tr><td>QR status</td><td>%s</td></tr>\n"
         "</table>\n"
         "<p><img src=\"%s\" alt=\"live stream\"></p>\n"
         "<p><button onclick=\"fetch('%s',{method:'POST'})\">Check for firmware update</button></p>\n"
@@ -181,9 +193,12 @@ static esp_err_t index_handler(httpd_req_t *req)
         provisioning_state_name(),
         ota_in_progress() ? "checking... " : "",
         ota_last_result(),
-        /* Shown on purpose: a wrong OTA server address is then obvious from the
-         * status page instead of only showing up as a timeout in the log. */
-        CONFIG_OTA_MANIFEST_URL,
+        ota_link_state(),
+        /* Actual discovered URL, not the compile-time fallback. */
+        ota_url[0] ? ota_url : "PC not found",
+        qr.valid ? "yes" : "no", qr_success_age_s,
+        qr.valid ? qr.url : "",
+        qr.valid ? qr.source_url : qr.error,
         STREAM_PATH,
         STREAM_OTA_CHECK_PATH);
 
@@ -628,6 +643,36 @@ static esp_err_t stream_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* Current dynamic QR state: safe diagnostics without exposing the LCD task. */
+static esp_err_t qr_status_handler(httpd_req_t *req)
+{
+    qr_snapshot_t qr;
+    qr_dynamic_snapshot(&qr);
+    int64_t now = esp_timer_get_time();
+    cJSON *root = cJSON_CreateObject();
+    if (root == NULL) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+    }
+    cJSON_AddBoolToObject(root, "valid", qr.valid);
+    cJSON_AddStringToObject(root, "url", qr.url);
+    cJSON_AddStringToObject(root, "source_url", qr.source_url);
+    cJSON_AddNumberToObject(root, "last_attempt_age_ms",
+                            qr.last_attempt_us ? (double)(now - qr.last_attempt_us) / 1000 : -1);
+    cJSON_AddNumberToObject(root, "last_success_age_ms",
+                            qr.last_success_us ? (double)(now - qr.last_success_us) / 1000 : -1);
+    cJSON_AddStringToObject(root, "error", qr.error);
+    char *body = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (body == NULL) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t result = httpd_resp_send(req, body, strlen(body));
+    cJSON_free(body);
+    return result;
+}
+
 /* ------------------------------------------------------------------------- */
 /* Server                                                                     */
 /* ------------------------------------------------------------------------- */
@@ -756,6 +801,11 @@ httpd_uri_t index_uri = {
         .handler = stream_handler,
         .user_ctx = NULL,
     };
+    static const httpd_uri_t qr_uri = {
+        .uri = "/api/qr-status",
+        .method = HTTP_GET,
+        .handler = qr_status_handler,
+    };
     static const httpd_uri_t rfid_uri = {
         .uri = "/api/rfid",
         .method = HTTP_GET,
@@ -789,6 +839,7 @@ httpd_uri_t index_uri = {
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &bench_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &mag_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &rfid_uri));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &qr_uri));
 
     ESP_LOGI(TAG, "Stream server started");
     ESP_LOGI(TAG, "Stream server listening on port 80");

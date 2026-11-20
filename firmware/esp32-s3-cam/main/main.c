@@ -20,6 +20,7 @@
 #include "led.h"
 #include "ota.h"
 #include "provisioning.h"
+#include "qr_dynamic.h"
 #include "stream.h"
 #include "esp_wifi.h"
 #include "wifi.h"
@@ -111,6 +112,7 @@ static void network_task(void *arg)
 {
     (void)arg;
     bool camera_up = false;
+    bool qr_started = false;
 #if CONFIG_LED_ENABLE
     bool led_started = false;
 #endif
@@ -135,6 +137,11 @@ static void network_task(void *arg)
 
         if (stream_server_start() != ESP_OK) {
             restart_after_failure("HTTP stream server");
+        }
+
+        /* Independent worker: the gate and display tasks never perform HTTP. */
+        if (!qr_started) {
+            qr_started = qr_dynamic_start();
         }
 
 #if CONFIG_LED_ENABLE
@@ -313,7 +320,7 @@ void app_main(void)
      * healthy network is the one thing you cannot check when the network is what
      * you are debugging.
      */
-    display_show_qr(NULL);      /* NULL = the payload baked into qr_code.h */
+    display_show_qr(NULL);      /* dynamic snapshot; unavailable until first HTTP success */
     qr_overlay_start();
 #endif
 

@@ -33,3 +33,9 @@ const char *ota_last_result(void);
 
 /** True while a check/download is in progress. */
 bool ota_in_progress(void);
+
+/** Discovery/service state, kept separate from firmware verification. */
+const char *ota_link_state(void);
+
+/** Actual manifest URL in force (empty when no PC has been discovered). */
+void ota_manifest_url_string(char *out, unsigned size);

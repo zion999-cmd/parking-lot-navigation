@@ -49,6 +49,8 @@ idf_component_register(
         "ota.c"
         "led.c"
         "gate.c"
+        "qr_dynamic.c"
+        "qr_matrix.c"
         "mag.c"
         "rfid.c"
         "discovery.c"

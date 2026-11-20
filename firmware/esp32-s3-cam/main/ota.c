@@ -17,6 +17,7 @@
 #include <esp_log.h>
 #include <esp_ota_ops.h>
 #include <esp_system.h>
+#include <mbedtls/md.h>
 #include <mbedtls/sha256.h>
 #include <sdkconfig.h>
 
@@ -53,11 +54,13 @@ static const char *TAG = "ota";
  * stream server are up and the network has settled.
  */
 #define OTA_BOOT_CHECK_DELAY_MS 30000
+#define OTA_RETRY_MS 30000
 
 static TaskHandle_t s_task = NULL;
 static volatile bool s_in_progress = false;
 static char s_available_version[16] = "-";
 static char s_last_result[96] = "not checked yet";
+static const char *s_link_state = "PC_NOT_FOUND";
 
 /*
  * The manifest URL in force.
@@ -75,10 +78,31 @@ static void ota_manifest_url(char *out, size_t size)
 /* #ifdef, not #if: a bool that defaults to n is left undefined entirely, so #if
  * would be a compile error rather than a false branch. */
 #ifdef CONFIG_DISCOVERY_APPLY_OTA
+    char host[64];
+    discovery_host(host, sizeof(host));
+    if (host[0] == '\0') {
+        if (size > 0) {
+            out[0] = '\0';              /* no stale OTA host: do not fetch */
+        }
+        return;
+    }
     discovery_url(CONFIG_OTA_MANIFEST_URL, out, size);
 #else
     snprintf(out, size, "%s", CONFIG_OTA_MANIFEST_URL);
 #endif
+}
+
+const char *ota_link_state(void)
+{
+    return s_link_state;
+}
+
+void ota_manifest_url_string(char *out, unsigned size)
+{
+    if (out == NULL || size == 0) {
+        return;
+    }
+    ota_manifest_url(out, size);
 }
 
 const char *ota_running_version(void)
@@ -265,6 +289,52 @@ static bool http_get_to_buffer(const char *url, char *buf, size_t buf_len, size_
     return ok;
 }
 
+static bool verify_publisher(const cJSON *root, const ota_manifest_t *m)
+{
+    const cJSON *algorithm = cJSON_GetObjectItemCaseSensitive(root, "signature_algorithm");
+    const cJSON *signature = cJSON_GetObjectItemCaseSensitive(root, "signature");
+    if (!cJSON_IsString(algorithm) || strcmp(algorithm->valuestring, "HMAC-SHA256") != 0 ||
+            !cJSON_IsString(signature)) {
+        set_result("manifest: publisher signature missing");
+        return false;
+    }
+
+    /* Exact canonical form shared with tools/ota-server/publish.sh. */
+    char canonical[768];
+    int n = snprintf(canonical, sizeof(canonical), "parking-lot-cam\n%s\n%s\n%s\n%u\n",
+                     m->version, m->firmware_url, m->sha256, (unsigned)m->size);
+    if (n <= 0 || n >= (int)sizeof(canonical)) {
+        set_result("manifest: canonical form too long");
+        return false;
+    }
+    unsigned char digest[32];
+    const unsigned char *key = (const unsigned char *)CONFIG_OTA_PUBLISHER_KEY;
+    if (mbedtls_md_hmac(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256),
+                        key, strlen((const char *)key),
+                        (const unsigned char *)canonical, (size_t)n, digest) != 0) {
+        set_result("manifest: HMAC failed");
+        return false;
+    }
+    char expected[65];
+    for (int i = 0; i < 32; i++) {
+        snprintf(expected + i * 2, 3, "%02x", digest[i]);
+    }
+    expected[64] = '\0';
+    if (strlen(signature->valuestring) != 64) {
+        set_result("manifest: publisher signature invalid");
+        return false;
+    }
+    unsigned char different = 0;
+    for (int i = 0; i < 64; i++) {
+        different |= (unsigned char)(expected[i] ^ signature->valuestring[i]);
+    }
+    if (different != 0 || signature->valuestring[64] != '\0') {
+        set_result("manifest: publisher signature invalid");
+        return false;
+    }
+    return true;
+}
+
 static bool fetch_manifest(const char *manifest_url, ota_manifest_t *m)
 {
     char *body = malloc(OTA_MANIFEST_MAX);
@@ -277,12 +347,14 @@ static bool fetch_manifest(const char *manifest_url, ota_manifest_t *m)
     size_t len = 0;
 
     if (!http_get_to_buffer(manifest_url, body, OTA_MANIFEST_MAX, &len)) {
+        s_link_state = "OTA_UNAVAILABLE";
         set_result("manifest: fetch failed");
         goto done;
     }
 
     cJSON *root = cJSON_Parse(body);
     if (root == NULL) {
+        s_link_state = "OTA_VERIFY_FAILED";
         set_result("manifest: invalid JSON");
         goto done;
     }
@@ -293,6 +365,7 @@ static bool fetch_manifest(const char *manifest_url, ota_manifest_t *m)
     cJSON *jsz = cJSON_GetObjectItemCaseSensitive(root, "size");
 
     if (!cJSON_IsString(jv) || !cJSON_IsString(ju) || !cJSON_IsString(js)) {
+        s_link_state = "OTA_VERIFY_FAILED";
         set_result("manifest: missing version/firmware_url/sha256");
         cJSON_Delete(root);
         goto done;
@@ -302,6 +375,12 @@ static bool fetch_manifest(const char *manifest_url, ota_manifest_t *m)
     snprintf(m->firmware_url, sizeof(m->firmware_url), "%s", ju->valuestring);
     snprintf(m->sha256, sizeof(m->sha256), "%s", js->valuestring);
     m->size = cJSON_IsNumber(jsz) ? (size_t)jsz->valuedouble : 0;
+
+    if (!verify_publisher(root, m)) {
+        s_link_state = "OTA_VERIFY_FAILED";
+        cJSON_Delete(root);
+        goto done;
+    }
 
     cJSON_Delete(root);
     ok = true;
@@ -519,12 +598,24 @@ static void check_once(void)
     ota_manifest_t manifest;
 
     if (!wifi_is_connected()) {
+        s_link_state = "PC_NOT_FOUND";
         set_result("skipped: no network");
         return;                     /* no overlay was shown, nothing to undo */
     }
 
     char manifest_url[192];
     ota_manifest_url(manifest_url, sizeof(manifest_url));
+    if (manifest_url[0] == '\0') {
+        s_link_state = "PC_NOT_FOUND";
+        set_result("waiting for the backend PC");
+        return;
+    }
+    if (CONFIG_OTA_PUBLISHER_KEY[0] == '\0') {
+        s_link_state = "OTA_VERIFY_FAILED";
+        set_result("OTA publisher key is not configured");
+        return;
+    }
+    s_link_state = "PC_DISCOVERED";
 
     ESP_LOGI(TAG, "checking %s (running %s)", manifest_url, ota_running_version());
     display_show_ota_checking();
@@ -533,6 +624,7 @@ static void check_once(void)
         goto done;                  /* reason is already in s_last_result */
     }
     snprintf(s_available_version, sizeof(s_available_version), "%s", manifest.version);
+    s_link_state = "OTA_AVAILABLE";
 
     if (version_cmp(manifest.version, ota_running_version()) <= 0) {
         set_result("up to date (running %s, server %s)",
@@ -546,6 +638,7 @@ static void check_once(void)
     /* Relative firmware_url resolves against whichever manifest was fetched, so
      * the download lands on the same machine the manifest came from. */
     if (!make_firmware_url(manifest_url, manifest.firmware_url, url, sizeof(url))) {
+        s_link_state = "OTA_VERIFY_FAILED";
         set_result("manifest: firmware_url is on a different origin - refused");
         goto done;
     }
@@ -563,6 +656,12 @@ static void check_once(void)
      * a moment to read it, and then go back to the normal screen. The detailed
      * reason stays in the serial log.
      */
+    if (strncmp(s_last_result, "SHA256", 6) == 0 ||
+            strncmp(s_last_result, "esp_ota", 7) == 0) {
+        s_link_state = "OTA_VERIFY_FAILED";
+    } else {
+        s_link_state = "OTA_UNAVAILABLE";
+    }
     display_show_ota_result(false);
     vTaskDelay(pdMS_TO_TICKS(4000));
 
@@ -580,7 +679,7 @@ static void ota_task(void *arg)
 {
     (void)arg;
 
-    /* One automatic check shortly after boot, then only on request. */
+    /* First check shortly after boot, then every 30 s or immediately on request. */
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(OTA_BOOT_CHECK_DELAY_MS));
 
     while (true) {
@@ -588,8 +687,9 @@ static void ota_task(void *arg)
         check_once();
         s_in_progress = false;
 
-        /* Sleep until someone asks for another check. */
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        /* Periodic retry: a PC or OTA server that comes back is discovered
+         * without a reboot. A manual request still wakes the task immediately. */
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(OTA_RETRY_MS));
     }
 }
 

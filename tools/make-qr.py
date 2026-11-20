@@ -1,26 +1,18 @@
 #!/usr/bin/env python3
-"""Generate the fixed test QR matrix that firmware/esp32-s3-cam/main/qr_code.h holds.
+"""Offline QR matrix/header generator using the production encoder.
 
-    python3 tools/make-qr.py "http://<PC-IP>:8010/go" > firmware/esp32-s3-cam/main/qr_code.h
+The running firmware gets its matrix from GET /api/qr and no longer compiles a
+fixed header. This tool remains useful for diagnostics and host-side tests.
 
-Why a baked matrix instead of an encoder on the device: the payload changes about
-once per installation, so an encoder would be flash spent on a decision already made -
-and one more thing to get wrong. The cost is that changing the URL is a rebuild plus an
-OTA, which is measured in minutes and happens once. The
-panel draws the modules as filled squares, so what the firmware needs is the
-module grid, which is exactly what this prints.
-
-Regenerate whenever the payload changes. The README section on the QR screen says
-so, and the generated header says so in its own comment.
-
-Kept in tools/ next to make-aruco-marker.py, for the same reason: the thing that
-produces a constant belongs with the constant it produces.
+    python3 tools/make-qr.py "http://<PC-IP>:8010/go" > /tmp/qr_code.h
 """
 
+import os
 import sys
 
-import qrcode
-from qrcode.constants import ERROR_CORRECT_L
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "..", "vision", "src"))
+from qr_data import make_matrix                                  # noqa: E402
 
 
 def main() -> int:
@@ -31,20 +23,13 @@ def main() -> int:
         sys.stderr.write(
             'usage: make-qr.py "<url or text>"\n'
             '   eg: make-qr.py "http://192.168.0.10:8010/go"\n'
-            '       > firmware/esp32-s3-cam/main/qr_code.h\n')
+            '       > /tmp/qr_code.h\n')
         return 2
     payload = sys.argv[1]
 
-    # Error correction L, and the reason is module size rather than robustness: on a
-    # 240 px panel the scale is what decides whether a phone can read it. L keeps a
-    # 16 character payload at version 1 (21 modules), which allows 8 px per module
-    # plus a full 4 module quiet zone. M would push it to version 2 (25 modules) and
-    # 7 px - a smaller, denser code on the same screen.
-    qr = qrcode.QRCode(error_correction=ERROR_CORRECT_L, border=0)
-    qr.add_data(payload)
-    qr.make(fit=True)
-
-    matrix = qr.get_matrix()
+    # ECC L and no border are shared with the live endpoint; display.c adds the
+    # four-module quiet zone when it paints the matrix.
+    matrix = make_matrix(payload)
     n = len(matrix)
     assert all(len(row) == n for row in matrix), "matrix is not square"
 
@@ -71,7 +56,7 @@ def main() -> int:
     print(" *")
     print(" * Regenerate with:")
     print(f' *     python3 tools/make-qr.py "{shown_payload}" \\')
-    print(" *         > firmware/esp32-s3-cam/main/qr_code.h")
+    print(" *         > /tmp/qr_code.h")
     print(" *")
     print(" * One bit per module, bit 0 = leftmost column of that row, which is what")
     print(" * display.c walks when it paints the modules.")

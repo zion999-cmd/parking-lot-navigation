@@ -18,7 +18,7 @@
 #include <esp_log.h>
 
 #include "font8x16.h"
-#include "qr_code.h"
+#include "qr_dynamic.h"
 #include <sdkconfig.h>
 
 /*
@@ -101,6 +101,7 @@ static bool s_ready = false;
 static int s_flush_fail_streak = 0;
 static int64_t s_flush_paused_until_us = 0;
 static uint32_t s_flush_count = 0;
+static volatile bool s_qr_visible = false;
 
 /* ------------------------------------------------------------------------- */
 /* Message queue                                                              */
@@ -310,16 +311,9 @@ static void flush(void)
  *
  *   (25 + 2*4) modules * 7 px = 231 px of 240, leaving 32 px each side.
  *
- * The payload decides the version and therefore the module size, which is why the
- * QR points at /go on the Mac's .local name (38 characters, version 3, 6 px per
- * module) rather than straight at /web/navigation.html (55, version 4, 5 px).
- *
- * A name instead of an address is what makes the code survive a change of Wi-Fi:
- * no IP in it means nothing to go stale, and macOS already answers for
- * <hostname>.local on any network it joins. The price is one version - an address
- * would fit in version 2 and give 7 px per module - which is the trade taken
- * because a QR that has to be regenerated after every move is worse than one that
- * is 14% smaller.
+ * The current PC supplies both payload and matrix over /api/qr. Its short /go
+ * path keeps the QR version low and therefore the modules large. qr_dynamic
+ * invalidates stale data; this file only paints the latest validated snapshot.
  *
  * Anything bigger than 8 px per module would eat into the quiet zone, and a code
  * that is 12% larger but unreadable is not larger at all. The scale is computed
@@ -328,14 +322,20 @@ static void flush(void)
  */
 #define QR_QUIET_MODULES 4
 
-static void draw_qr(void)
+static void draw_qr(const qr_snapshot_t *qr)
 {
-    const int total_modules = QR_SIZE + 2 * QR_QUIET_MODULES;
+    if (!qr->valid) {
+        fill(COL_BG);
+        draw_text(TEXT_X, TEXT_Y, "QR unavailable", COL_WARN, 1);
+        draw_text(TEXT_X, TEXT_Y + LINE_H * 2, qr->error, COL_FG, 1);
+        return;
+    }
+    const int total_modules = qr->size + 2 * QR_QUIET_MODULES;
     int scale = LCD_W / total_modules;
     if (scale < 1) {
         scale = 1;                  /* pathological payload: draw it anyway */
     }
-    const int side = QR_SIZE * scale;
+    const int side = qr->size * scale;
     const int origin_x = (LCD_W - side) / 2;
     const int origin_y = (LCD_H - side) / 2;
 
@@ -343,9 +343,9 @@ static void draw_qr(void)
      * drawing dark-on-dark would be the one thing a scanner cannot fix. */
     fill(COL_QR_LIGHT);
 
-    for (int row = 0; row < QR_SIZE; row++) {
-        for (int col = 0; col < QR_SIZE; col++) {
-            if ((qr_rows[row][col / 8] >> (col % 8)) & 1) {
+    for (int row = 0; row < qr->size; row++) {
+        for (int col = 0; col < qr->size; col++) {
+            if ((qr->rows[row * qr->row_bytes + col / 8] >> (col % 8)) & 1) {
                 /* Integer-aligned squares at the module size: no scaling, no
                  * interpolation, sharp edges. */
                 fill_rect(origin_x + col * scale, origin_y + row * scale,
@@ -483,12 +483,13 @@ static void render(const disp_msg_t *m)
         break;
     }
 
-    case MSG_QR:
-        /* Nothing but the code: at 240 px there is no room for a code that can be
-         * scanned and a label that can be read, and the code is the one that has
-         * a job to do. m->a carries the payload for the log, not for the panel. */
-        draw_qr();
+    case MSG_QR: {
+        /* Copy under the qr lock; no network access and no stale fallback. */
+        qr_snapshot_t qr;
+        qr_dynamic_snapshot(&qr);
+        draw_qr(&qr);
         break;
+    }
     }
 
     flush();
@@ -501,6 +502,7 @@ static void display_task(void *arg)
 
     while (true) {
         if (xQueueReceive(s_queue, &m, portMAX_DELAY) == pdTRUE) {
+            s_qr_visible = m.kind == MSG_QR;
             render(&m);
         }
     }
@@ -753,15 +755,21 @@ void display_show_error(const char *title, const char *hint)
 
 void display_show_qr(const char *payload)
 {
+    (void)payload;                 /* legacy diagnostic argument; matrix is dynamic */
+    qr_snapshot_t qr;
+    qr_dynamic_snapshot(&qr);
     disp_msg_t m = make_msg(MSG_QR);
-    /*
-     * The payload does not reach the panel - the modules are a baked constant, so
-     * there is nothing to encode at runtime and nothing to allocate. It is carried
-     * in the message anyway so that the log says which code is on the glass, which
-     * is the thing that a "cannot scan it" report needs to be checked against.
-     */
-    snprintf(m.a, sizeof(m.a), "%s", payload ? payload : QR_PAYLOAD);
-    ESP_LOGI(TAG, "showing QR code: \"%s\" (%d x %d modules)",
-             m.a, QR_SIZE, QR_SIZE);
+    ESP_LOGI(TAG, "show QR overlay: %s", qr.valid ? qr.url : qr.error);
     post(&m);
+}
+
+void display_qr_data_changed(void)
+{
+    /* The original boot/gate timer still owns overlay duration. While the overlay
+     * is up, repaint a new validated matrix or an unavailable message; never keep
+     * painting the old address after the worker has invalidated it. */
+    if (s_qr_visible) {
+        disp_msg_t m = make_msg(MSG_QR);
+        enqueue(&m);
+    }
 }

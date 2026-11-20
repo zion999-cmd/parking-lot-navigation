@@ -42,8 +42,9 @@ cd ../../tools/ota-server
 ```
 
 `publish.sh` copies the image to `firmware/0.2.1/parking-lot-cam.bin`, computes
-its SHA-256 and writes `manifest.json`. Both are gitignored: they are release
-artifacts, not source.
+its SHA-256 and writes a signed `manifest.json`. Both are gitignored: they are release
+artifacts, not source. The key comes from `~/.config/parking-lot/ota.key` (or
+`PARKING_OTA_KEY_FILE`) and is never copied into the manifest or repository.
 
 To publish a specific image instead of the default build output:
 
@@ -61,13 +62,17 @@ Deliberately small:
   "version": "0.2.1",
   "firmware_url": "/firmware/0.2.1/parking-lot-cam.bin",
   "sha256": "3b1f...e9",
-  "size": 906112
+  "size": 906112,
+  "signature_algorithm": "HMAC-SHA256",
+  "signature": "<64 lowercase hex characters>"
 }
 ```
 
 | field | required | meaning |
 |---|---|---|
-| `project` | no | informational only; the device ignores it |
+| `project` | no | informational only; included in the signed canonical form |
+| `signature_algorithm` | **yes** | `HMAC-SHA256` |
+| `signature` | **yes** | Publisher authentication; missing or invalid signatures are rejected |
 | `version` | **yes** | `major.minor.patch`, compared as integers |
 | `firmware_url` | **yes** | absolute, or relative to the manifest URL |
 | `sha256` | **yes** | lowercase hex digest of the binary |

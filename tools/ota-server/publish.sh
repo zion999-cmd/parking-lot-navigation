@@ -90,6 +90,8 @@ cat > "$HERE/manifest.json" <<EOF
 }
 EOF
 
+python3 "$HERE/manifest_sign.py" "$HERE/manifest.json"
+
 echo "published $VERSION"
 echo "  binary      : $DEST ($SIZE bytes, embedded version $BIN_VERSION)"
 echo "  sha256      : $SHA"
