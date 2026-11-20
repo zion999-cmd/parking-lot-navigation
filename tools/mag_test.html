@@ -112,7 +112,9 @@ function renderCards(bays, thresholds) {
     const enter = thresholds.enter === null ? null : thresholds.enter;
     const exit = thresholds.exit === null ? null : thresholds.exit;
     document.getElementById("rules-" + id).textContent =
-      enter === null ? "阈值未加载" : `进入 ≥ ${enter.toFixed(1)} · 退出 < ${exit.toFixed(1)} µT`;
+      (enter === null ? "阈值未加载" : `进入 ≥ ${enter.toFixed(1)} · 退出 < ${exit.toFixed(1)} µT`)
+      + (bay.baseline_field_ut === null || bay.baseline_field_ut === undefined
+          ? "" : `  · 基线 ${bay.baseline_field_ut.toFixed(0)} µT`);
     document.getElementById("detail-" + id).textContent = bay.detail || "";
   }
 }

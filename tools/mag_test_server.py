@@ -189,6 +189,29 @@ class TestState:
                 self.poller, self.mapping, duration=duration, source=self.source,
                 log=lambda _text: None)
             valid = sum(1 for entry in baseline.bays.values() if entry.get("valid"))
+            # A baseline captured with a magnet nearby is internally consistent and passes every
+            # other check, but its field is not the local geomagnetic field: measured here, B1 came
+            # back at 153 uT while the other three read 73-88, and that bay could never return to
+            # empty because "empty" had been recorded at 153 uT. The sensors were fine.
+            #
+            # Only an absolute bound is used. A ratio against the other channels was tried and
+            # removed: this rig genuinely varies from 29 to 86 uT between channels, so any ratio
+            # tight enough to catch the polluted baseline also flagged healthy ones. The natural
+            # field is 25-65 uT and the largest legitimate value measured on this sandbox is 86,
+            # so a baseline above 120 uT cannot be an empty bay.
+            field = {}
+            for bay, entry in baseline.bays.items():
+                if entry.get("valid"):
+                    mean = entry.get("mean_xyz_ut") or {}
+                    field[bay] = (mean.get("x", 0.0) ** 2 + mean.get("y", 0.0) ** 2
+                                  + mean.get("z", 0.0) ** 2) ** 0.5
+            odd = {bay: value for bay, value in field.items() if value > 120.0 or value < 15.0}
+            suspect = ""
+            if odd:
+                detail = ", ".join(f"{bay} {value:.0f} uT" for bay, value in sorted(odd.items()))
+                suspect = (f" | SUSPECT baseline: {detail} is not a plausible empty-bay field "
+                           "(25-65 uT is natural). Was a magnet near those sensors when you pressed "
+                           "the button? Recapture with it well away.")
             if valid == 0:
                 reasons = "; ".join(f"{bay}: {entry.get('reason') or 'invalid'}"
                                     for bay, entry in baseline.bays.items()
@@ -198,7 +221,7 @@ class TestState:
                 baseline.save(BASELINE_PATH)
                 self.baseline = baseline
                 self.judge = mag_baseline.MagJudge(baseline)
-                note = f"captured {valid}/{len(baseline.bays)} bay(s)"
+                note = f"captured {valid}/{len(baseline.bays)} bay(s){suspect}"
         except Exception as exc:                             # noqa: BLE001
             note = f"failed: {type(exc).__name__}: {exc}"
         with self.lock:
@@ -228,8 +251,15 @@ class TestState:
             entry = states.get(bay) or {}
             delta = entry.get("delta_ut")
             threshold = self.baseline.threshold_ut if self.baseline else 3.8
+            entry_baseline = (self.baseline.bays.get(bay) or {}) if self.baseline else {}
+            mean_xyz = entry_baseline.get("mean_xyz_ut") or {}
+            field_ut = None
+            if mean_xyz:
+                field_ut = round((mean_xyz.get("x", 0.0) ** 2 + mean_xyz.get("y", 0.0) ** 2
+                                  + mean_xyz.get("z", 0.0) ** 2) ** 0.5, 1)
             bays.append({
                 "bay": bay,
+                "baseline_field_ut": field_ut,
                 "channel": self.mapping.get(bay),
                 "state": entry.get("state", "UNKNOWN"),
                 "delta_ut": None if delta is None else round(delta, 2),
