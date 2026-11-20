@@ -30,7 +30,8 @@
            border:1px solid var(--line); }
   .fill { height:100%; width:0; background:var(--accent); transition:width .18s linear; }
   .fill.hot { background:var(--warn); }
-  .detail { color:var(--dim); font-size:11px; margin-top:7px; min-height:15px; }
+  .detail { color:var(--dim); font-size:11px; margin-top:6px; min-height:15px; }
+  .rules { color:var(--dim); font-size:11px; margin-top:6px; font-variant-numeric:tabular-nums; }
   table { border-collapse:collapse; width:100%; max-width:820px; font-variant-numeric:tabular-nums; }
   th, td { text-align:left; padding:7px 10px; border-bottom:1px solid var(--line); font-size:13px; }
   th { color:var(--dim); font-weight:600; }
@@ -76,7 +77,7 @@ async function post(path, body) {
 
 function stateClass(state) { return state === "EMPTY" ? "EMPTY" : state === "OCCUPIED" ? "OCCUPIED" : "UNKNOWN"; }
 
-function renderCards(bays) {
+function renderCards(bays, thresholds) {
   const host = document.getElementById("cards");
   if (host.children.length !== bays.length) {
     host.innerHTML = bays.map(bay => `
@@ -85,6 +86,7 @@ function renderCards(bays) {
         <div class="ch" id="ch-${bay.bay}"></div>
         <div class="state" id="state-${bay.bay}">—</div>
         <div class="delta"><span id="delta-${bay.bay}">—</span><small> µT</small></div>
+        <div class="rules" id="rules-${bay.bay}"></div>
         <div class="track"><div class="fill" id="fill-${bay.bay}"></div></div>
         <div class="detail" id="detail-${bay.bay}"></div>
       </div>`).join("");
@@ -101,6 +103,12 @@ function renderCards(bays) {
     const fill = document.getElementById("fill-" + id);
     fill.style.width = Math.round((bay.bar || 0) * 100) + "%";
     fill.className = "fill" + (bay.state === "OCCUPIED" ? " hot" : "");
+    // The card has to show why it says what it says: with a magnet in play the delta can be tens of
+    // uT, and "still OCCUPIED" is then either hysteresis or a baseline that contains the magnet.
+    const enter = thresholds.enter === null ? null : thresholds.enter;
+    const exit = thresholds.exit === null ? null : thresholds.exit;
+    document.getElementById("rules-" + id).textContent =
+      enter === null ? "阈值未加载" : `进入 ≥ ${enter.toFixed(1)} · 退出 < ${exit.toFixed(1)} µT`;
     document.getElementById("detail-" + id).textContent = bay.detail || "";
   }
 }
@@ -200,7 +208,10 @@ async function tick() {
                      + "就在最后一列把那个车位选上。至少映射一个车位后才能建立 Baseline。";
     note.className = "note bad";
     document.getElementById("baseline").disabled = false;
-    renderCards(data.bays || []);
+    const enter = data.threshold_ut === null || data.threshold_ut === undefined ? null : data.threshold_ut;
+  const hysteresis = data.hysteresis_ut === null || data.hysteresis_ut === undefined ? 0 : data.hysteresis_ut;
+  renderCards(data.bays || [],
+              { enter, exit: enter === null ? null : Math.max(0, enter - hysteresis) });
     renderChannels(data.channels || [], mapping);
     return;
   }
