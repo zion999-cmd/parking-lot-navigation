@@ -202,6 +202,15 @@ async function tick() {
                   : `板子 ${data.board || "?"} 无响应 ${data.error ? "(" + data.error + ")" : ""}`;
   document.getElementById("build").textContent = data.build ? ` · 后台版本 ${data.build}` : "";
   const base = data.baseline || {};
+  // Computed once, here, and used by every renderCards call: an earlier patch put this inside one
+  // branch only, so the normal path passed null and every card said "thresholds not loaded" while
+  // the server was sending 3.8 all along.
+  const enterUt = (data.threshold_ut === null || data.threshold_ut === undefined)
+    ? null : data.threshold_ut;
+  const hysteresisUt = (data.hysteresis_ut === null || data.hysteresis_ut === undefined)
+    ? 0 : data.hysteresis_ut;
+  const thresholds = { enter: enterUt,
+                       exit: enterUt === null ? null : Math.max(0, enterUt - hysteresisUt) };
   document.getElementById("baseinfo").textContent = base.loaded
     ? ` · Baseline: ${base.valid}/${base.total} 有效 · 阈值 ${data.threshold_ut} µT`
     : " · 还没有 Baseline";
@@ -213,10 +222,7 @@ async function tick() {
                      + "就在最后一列把那个车位选上。至少映射一个车位后才能建立 Baseline。";
     note.className = "note bad";
     document.getElementById("baseline").disabled = false;
-    const enter = data.threshold_ut === null || data.threshold_ut === undefined ? null : data.threshold_ut;
-  const hysteresis = data.hysteresis_ut === null || data.hysteresis_ut === undefined ? 0 : data.hysteresis_ut;
-  renderCards(data.bays || [],
-              { enter, exit: enter === null ? null : Math.max(0, enter - hysteresis) });
+    renderCards(data.bays || [], thresholds);
     renderChannels(data.channels || [], mapping);
     return;
   }
@@ -230,7 +236,7 @@ async function tick() {
     note.className = "note" + (/failed/.test(data.capture_note || "") ? " bad" : "");
     document.getElementById("baseline").disabled = false;
   }
-  renderCards(data.bays || [], { enter: null, exit: null });
+  renderCards(data.bays || [], thresholds);
   renderChannels(data.channels || [], mapping);
 }
 
