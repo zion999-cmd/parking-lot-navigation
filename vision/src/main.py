@@ -171,8 +171,18 @@ class MagHelper:
             if self.hysteresis is not None:
                 self.baseline.hysteresis_ut = self.hysteresis
             valid = sum(1 for entry in self.baseline.bays.values() if entry.get("valid"))
+            # An old baseline is only safe if you can tell where and when it came from: the two ways
+            # to misuse one are a baseline captured with a car already parked, and a baseline from
+            # another venue. Neither is refused here - that is the operator's call - but both are
+            # visible before a single judgement is printed.
+            when = self.baseline.calibrated_at
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(when)) if when else "unknown time"
             print(f"  mag: baseline loaded ({valid}/{len(self.baseline.bays)} bay(s) valid), "
                   f"threshold {self.baseline.threshold_ut:.1f} uT")
+            print(f"  mag: calibrated {stamp} from {self.baseline.source or 'unknown source'}")
+            if self.baseline.source and self.source and self.baseline.source != self.source:
+                print(f"  mag: WARNING baseline came from a different source than --source "
+                      f"({self.source}) - recapture with r if the sandbox or the PC moved")
             for bay, reason in self.baseline.invalid_bays().items():
                 print(f"    {bay}: {reason}")
         else:

@@ -247,6 +247,7 @@ class MagJudge:
         self._history = {}
         self._state = {}
         self._last_reads = {}
+        self._last_result = {}
 
     def update(self, frame, now=None):
         """frame is MagPoller.snapshot(). Returns {bay: {state, delta_ut, channel, reason}}."""
@@ -277,12 +278,22 @@ class MagJudge:
                 result[bay] = out
                 continue
 
-            # Only a reading the chip has actually refreshed belongs in the window. Appending the
-            # same reading on every call let the window collapse back to one point whenever the
-            # poller had not ticked yet, which flipped the bay to UNKNOWN between updates.
+            # Only a reading the chip has actually refreshed belongs in the window: two calls that
+            # see the same counter are one sample, and adding it twice would shrink the window's
+            # noise instead of measuring it.
             reads = reading.get("reads")
             if reads is not None and self._last_reads.get(bay) == reads:
-                out["reason"] = "no fresh sample yet"
+                # But a repeated reading is not a reason to discard the verdict. The poller and the
+                # frame loop run at different rates, so consecutive updates legitimately see the
+                # same sample, and returning UNKNOWN for those made the bay flicker between a real
+                # judgement and no judgement at all. The staleness check above has already run, so
+                # reaching here means the data is current: hold the last judgement.
+                held = self._last_result.get(bay)
+                if held is not None:
+                    out.update(held)
+                    out["reason"] = "no new sample; holding the last judgement"
+                else:
+                    out["reason"] = "no fresh sample yet"
                 result[bay] = out
                 continue
             self._last_reads[bay] = reads
@@ -315,5 +326,6 @@ class MagJudge:
                 state = "OCCUPIED" if delta >= threshold else "EMPTY"
             self._state[bay] = state
             out["state"] = state
+            self._last_result[bay] = dict(out)         # what a repeat-read update holds
             result[bay] = out
         return result

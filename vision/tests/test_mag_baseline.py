@@ -203,3 +203,100 @@ def test_baseline_round_trip(tmp_path=None):
 
 def test_missing_baseline_file_loads_as_none():
     assert M.MagBaseline.load("/nonexistent/mag_baseline.json") is None
+
+
+# --- P0005.1: a repeated read counter must not throw away a valid judgement ------------------
+
+def _frame(value, reads, when, observed=None):
+    """A frame whose sample was taken at `when`, observed at `observed` (default: same instant)."""
+    return FakePoller({1: reading(value, 0, 0, reads=reads, t=when)}).snapshot(
+        now=when if observed is None else observed)
+
+
+def test_new_sample_reports_occupied():
+    baseline = make_baseline(B1=valid_entry(1, x=0.0), threshold=3.8, hysteresis=0.6)
+    judge = M.MagJudge(baseline, window_s=5.0)
+    now = time.time()
+    judge.update(_frame(60, 1, now), now=now)
+    states = judge.update(_frame(60, 2, now + 0.1), now=now + 0.1)
+    assert states["B1"]["state"] == "OCCUPIED"
+
+
+def test_repeated_read_holds_the_last_judgement():
+    """The fix: same counter, still fresh -> hold, do not fall back to UNKNOWN."""
+    baseline = make_baseline(B1=valid_entry(1, x=0.0), threshold=3.8, hysteresis=0.6)
+    judge = M.MagJudge(baseline, window_s=5.0)
+    now = time.time()
+    judge.update(_frame(60, 1, now), now=now)
+    decided = judge.update(_frame(60, 2, now + 0.1), now=now + 0.1)
+    assert decided["B1"]["state"] == "OCCUPIED"
+
+    held = judge.update(_frame(60, 2, now + 0.1), now=now + 0.3)
+    assert held["B1"]["state"] == "OCCUPIED"
+    assert held["B1"]["delta_ut"] == decided["B1"]["delta_ut"]
+    assert "holding the last judgement" in held["B1"]["reason"]
+
+
+def test_no_flicker_across_repeated_reads():
+    """Ten updates on one sample must give ten identical states, not UNKNOWN in between."""
+    baseline = make_baseline(B1=valid_entry(1, x=0.0))
+    judge = M.MagJudge(baseline, window_s=5.0)
+    now = time.time()
+    judge.update(_frame(0, 1, now), now=now)
+    first = judge.update(_frame(0, 2, now + 0.1), now=now + 0.1)
+    assert first["B1"]["state"] == "EMPTY"
+    for step in range(10):
+        held = judge.update(_frame(0, 2, now + 0.1), now=now + 0.1 + step * 0.01)
+        assert held["B1"]["state"] == "EMPTY", f"flickered at step {step}"
+        assert held["B1"]["delta_ut"] == first["B1"]["delta_ut"]
+        assert held["B1"]["reason"] == "no new sample; holding the last judgement"
+
+
+def test_held_judgement_expires_to_unknown():
+    """Holding lasts only while the data is inside STALE_S; then it must say UNKNOWN."""
+    baseline = make_baseline(B1=valid_entry(1, x=0.0))
+    judge = M.MagJudge(baseline, window_s=5.0, stale_s=2.0)
+    now = time.time()
+    judge.update(_frame(0, 1, now), now=now)
+    decided = judge.update(_frame(0, 2, now + 0.1), now=now + 0.1)
+    assert decided["B1"]["state"] == "EMPTY"
+
+    later = now + 0.1 + 2.5
+    expired = judge.update(_frame(0, 2, now + 0.1, observed=later), now=later)
+    assert expired["B1"]["state"] == "UNKNOWN"
+    assert "stale" in expired["B1"]["reason"]
+
+
+def test_new_sample_after_a_hold_recomputes():
+    """A fresh sample must be used, not ignored because a judgement was being held."""
+    baseline = make_baseline(B1=valid_entry(1, x=0.0), threshold=3.8, hysteresis=0.6)
+    judge = M.MagJudge(baseline, window_s=5.0)
+    now = time.time()
+    judge.update(_frame(60, 1, now), now=now)
+    assert judge.update(_frame(60, 2, now + 0.1), now=now + 0.1)["B1"]["state"] == "OCCUPIED"
+    assert judge.update(_frame(60, 2, now + 0.1), now=now + 0.3)["B1"]["state"] == "OCCUPIED"
+
+    # Field returns to baseline on a new counter: recomputed, and outside the old window.
+    later = now + 20.0
+    judge.update(_frame(0, 3, later), now=later)
+    back = judge.update(_frame(0, 4, later + 0.1), now=later + 0.1)
+    assert back["B1"]["state"] == "EMPTY"
+    assert back["B1"]["delta_ut"] < 0.01
+
+
+def test_recalibration_does_not_inherit_the_old_state():
+    """A new baseline gets a new judge; the latched OCCUPIED from before must not survive."""
+    baseline = make_baseline(B1=valid_entry(1, x=0.0), threshold=3.8, hysteresis=0.6)
+    judge = M.MagJudge(baseline, window_s=5.0)
+    now = time.time()
+    judge.update(_frame(60, 1, now), now=now)
+    assert judge.update(_frame(60, 2, now + 0.1), now=now + 0.1)["B1"]["state"] == "OCCUPIED"
+
+    recaptured = make_baseline(B1=valid_entry(1, x=6.0), threshold=3.8, hysteresis=0.6)
+    fresh = M.MagJudge(recaptured, window_s=5.0)
+    # The field is now at the new baseline (6 uT), so it is empty, and nothing is latched yet.
+    later = now + 30.0
+    fresh.update(_frame(60, 10, later), now=later)
+    states = fresh.update(_frame(60, 11, later + 0.1), now=later + 0.1)
+    assert states["B1"]["state"] == "EMPTY"
+    assert fresh._state.get("B1") == "EMPTY"
