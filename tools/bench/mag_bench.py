@@ -115,7 +115,8 @@ def main(argv):
         return 2
     channels = sorted({r["ch"] for r in probe.get("sensors") or []})
     if not channels:
-        print("error: the board answered but reports no sensors; run GET /api/mag?rescan=1",
+        print("error: the board answered but reports no sensors - power-cycle it so it re-runs\n"
+              "       discovery, then check GET /api/mag",
               file=sys.stderr)
         return 2
     say(f"  {len(channels)} sensor(s) on channels {channels}\n\n")

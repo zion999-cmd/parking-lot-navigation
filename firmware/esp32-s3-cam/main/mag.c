@@ -53,6 +53,7 @@ static mag_reading_t s_readings[MAG_MAX_SENSORS];
 static float s_qmcp_scale[MAG_MAX_SENSORS];
 static int s_zero_streak[MAG_MAX_SENSORS];
 static volatile int s_rescan;
+static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;   /* guards s_count/s_readings */
 
 /* The scan results travel over HTTP, not only over the console. A board mounted on a wall has no
  * serial port, and these lines are the difference between "no sensor" and "the wrong chip". */
@@ -614,7 +615,7 @@ static esp_err_t bus_up(void)
     return ESP_OK;
 }
 
-static void bus_down(void)
+static void __attribute__((unused)) bus_down(void)
 {
     if (s_bus) {
         i2c_del_master_bus(s_bus);
@@ -623,7 +624,7 @@ static void bus_down(void)
     }
 }
 
-static void discover(void);
+static void discover(bool full);
 
 void mag_request_rescan(void) { s_rescan = 2; }
 
@@ -633,19 +634,10 @@ static void mag_task(void *arg)
     const uint32_t period_ms = 1000u / (CONFIG_MAG_SAMPLE_HZ > 0 ? CONFIG_MAG_SAMPLE_HZ : 1);
     uint32_t tick = 0;
     while (true) {
-        if (s_rescan) {
-            bool hard = s_rescan == 2;
-            s_rescan = false;
-            ESP_LOGI(TAG, "rescan requested%s", hard ? " (with bus recovery)" : "");
-            if (hard) {
-                bus_down();
-                bus_recover();
-                if (bus_up() != ESP_OK) {
-                    ESP_LOGW(TAG, "bus did not come back up");
-                }
-            }
-            discover();
-        }
+        /* There is deliberately no runtime rescan. Two implementations were measured and both were
+         * worse than a reboot: rebuilding the master bus left every sensor unreachable, and
+         * re-probing the channels degraded the set of sensors one rescan at a time (4, then 2, then
+         * 1, then 0). Discovery runs at boot, where it is proven; after changing a wire, reboot. */
         for (uint8_t i = 0; i < s_count; i++) {
             mag_reading_t *r = &s_readings[i];
             if (mux_select(r->channel) != ESP_OK) {
@@ -701,20 +693,33 @@ static void mag_task(void *arg)
 
 /* Discover once at boot and again on demand, so a hardware fix (a re-seated wire, a sensor moved
  * to another channel) can be checked without an OTA just to reboot the board. */
-static void discover(void)
+static void discover(bool full)
 {
-    s_count = 0;
+    /* Build into a staging array and publish once at the end. Writing s_count as channels are found
+     * let an HTTP read land mid-discovery and see 1 of 4 sensors - which reads exactly like a
+     * hardware failure and cost a second round of chasing. */
+    static mag_reading_t staging[MAG_MAX_SENSORS];
+    static float staging_scale[MAG_MAX_SENSORS];
+    uint8_t found = 0;
+    memset(staging, 0, sizeof(staging));
+    memset(staging_scale, 0, sizeof(staging_scale));
     memset(s_zero_streak, 0, sizeof(s_zero_streak));
-    ESP_LOGI(TAG, "diagnostics on I2C%d (sda=%d scl=%d, %d Hz):",
-             MAG_PORT, CONFIG_MAG_SDA_GPIO, CONFIG_MAG_SCL_GPIO, CONFIG_MAG_CLK_HZ);
-    bus_scan();
-    mux_sweep();
-    channel_scan();
-    if (mux_select(0) != ESP_OK) {
-        ESP_LOGW(TAG, "mux 0x%02x did not ACK a channel write; probing channels anyway", MAG_HUB_ADDR);
+    if (full) {
+        /* Boot-time diagnostics: a full address sweep, a per-channel ACK map, and the QMC5883P
+         * register search inside configure_qmcp(). They take seconds and hold the bus, and re-running
+         * them on a rescan made the sensors disappear one at a time - 4, then 2, then 0 - so a
+         * rescan only answers the question it was added for: does this channel acknowledge now? */
+        ESP_LOGI(TAG, "diagnostics on I2C%d (sda=%d scl=%d, %d Hz):",
+                 MAG_PORT, CONFIG_MAG_SDA_GPIO, CONFIG_MAG_SCL_GPIO, CONFIG_MAG_CLK_HZ);
+        bus_scan();
+        mux_sweep();
+        channel_scan();
+        if (mux_select(0) != ESP_OK) {
+            ESP_LOGW(TAG, "mux 0x%02x did not ACK a channel write; probing channels anyway", MAG_HUB_ADDR);
+        }
     }
 
-    for (uint8_t ch = 0; ch < CONFIG_MAG_CHANNELS && s_count < MAG_MAX_SENSORS; ch++) {
+    for (uint8_t ch = 0; ch < CONFIG_MAG_CHANNELS && found < MAG_MAX_SENSORS; ch++) {
         /* Give the RF/I2C switch time to settle and retry once: a channel whose sensor is marginal
          * - long leads, a weak pull-up - can miss the first probe and answer the second. If it still
          * does not answer, that channel is genuinely empty or dead, and the log says which. */
@@ -727,24 +732,37 @@ static void discover(void)
             ESP_LOGW(TAG, "ch%u: nothing answered (0x1E or 0x0D) - check that channel's wiring", ch);
             continue;
         }
-        s_qmcp_scale[s_count] = 0.0f;
+        staging_scale[found] = 0.0f;
         if (chip == MAG_CHIP_QMC5883P) {
-            configure_qmcp(ch, &s_qmcp_scale[s_count]);
+            if (full) {
+                configure_qmcp(ch, &staging_scale[found]);
+            } else {
+                /* Keep the 30 G scale the boot-time search settled on and only re-apply the
+                 * configuration: the search itself is the slow, bus-hogging part. */
+                staging_scale[found] = 0.1f;
+                configure_qmcp(ch, &staging_scale[found]);
+            }
         } else {
             configure(chip);
-            s_qmcp_scale[s_count] = 0.0f;
+            staging_scale[found] = 0.0f;
         }
-        s_readings[s_count].channel = ch;
-        s_readings[s_count].chip = chip;
-        s_readings[s_count].ut_per_lsb = s_qmcp_scale[s_count];
-        s_readings[s_count].ok = false;
-        s_count++;
+        staging[found].channel = ch;
+        staging[found].chip = chip;
+        staging[found].ut_per_lsb = staging_scale[found];
+        staging[found].ok = false;
+        found++;
         ESP_LOGI(TAG, "ch%u: %s found", ch,
                  chip == MAG_CHIP_HMC5883L ? "HMC5883L (0x1E)"
                  : chip == MAG_CHIP_QMC5883P ? "QMC5883P (0x2C)"
                  : "QMC5883L (0x0D)");
     }
 
+    /* One publish, under the same lock the reader takes. */
+    portENTER_CRITICAL(&s_lock);
+    memcpy(s_readings, staging, sizeof(staging));
+    memcpy(s_qmcp_scale, staging_scale, sizeof(staging_scale));
+    s_count = found;
+    portEXIT_CRITICAL(&s_lock);
 }
 
 esp_err_t mag_start(void)
@@ -764,7 +782,7 @@ esp_err_t mag_start(void)
     /* No mux-presence gate. An earlier version asked the TCA9548A for a register (it has none),
      * failed, and returned before probing a single sensor - so a working setup reported "no mux".
      * The honest test is the one that matters: select each channel and ask the sensor. */
-    discover();
+    discover(true);
 
     ESP_LOGI(TAG, "hub 0x%02x ok, %u/%u sensors, %d Hz on I2C%d (sda=%d scl=%d)",
              MAG_HUB_ADDR, s_count, (unsigned)CONFIG_MAG_CHANNELS, CONFIG_MAG_SAMPLE_HZ,
@@ -782,11 +800,17 @@ uint8_t mag_count(void)   { return s_count; }
 
 bool mag_get(uint8_t index, mag_reading_t *out)
 {
-    if (index >= s_count || out == NULL) {
+    if (out == NULL) {
         return false;
     }
-    *out = s_readings[index];
-    return true;
+    bool ok = false;
+    portENTER_CRITICAL(&s_lock);
+    if (index < s_count) {
+        *out = s_readings[index];
+        ok = true;
+    }
+    portEXIT_CRITICAL(&s_lock);
+    return ok;
 }
 
 #else  /* !CONFIG_MAG_ENABLE */

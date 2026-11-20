@@ -731,14 +731,6 @@ static esp_err_t rfid_handler(httpd_req_t *req)
 
 static esp_err_t mag_handler(httpd_req_t *req)
 {
-    char query[64];
-    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
-        char value[8];
-        if (httpd_query_key_value(query, "rescan", value, sizeof(value)) == ESP_OK && value[0] != '0') {
-            mag_request_rescan();
-            httpd_resp_set_hdr(req, "X-Mag-Rescan", "queued");
-        }
-    }
     char body[2048];   /* 4 sensors + a 600-char diag does not fit in 1024: the
                         JSON was being cut mid-string, which is what made
                         python -m json.tool report a control character at 1023. */
