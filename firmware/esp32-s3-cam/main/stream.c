@@ -731,6 +731,14 @@ static esp_err_t rfid_handler(httpd_req_t *req)
 
 static esp_err_t mag_handler(httpd_req_t *req)
 {
+    char query[64];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        char value[8];
+        if (httpd_query_key_value(query, "rescan", value, sizeof(value)) == ESP_OK && value[0] != '0') {
+            mag_request_rescan();
+            httpd_resp_set_hdr(req, "X-Mag-Rescan", "queued");
+        }
+    }
     char body[2048];   /* 4 sensors + a 600-char diag does not fit in 1024: the
                         JSON was being cut mid-string, which is what made
                         python -m json.tool report a control character at 1023. */
@@ -743,7 +751,8 @@ for (uint8_t i = 0; i < mag_count() && n < (int)sizeof(body) - 220; i++) {
         continue;
     }
     const char *chip = r.chip == MAG_CHIP_HMC5883L ? "hmc5883l"
-                     : r.chip == MAG_CHIP_QMC5883L ? "qmc5883l" : "none";
+                         : r.chip == MAG_CHIP_QMC5883L ? "qmc5883l"
+                         : r.chip == MAG_CHIP_QMC5883P ? "qmc5883p" : "none";
     n += snprintf(body + n, sizeof(body) - n,
                   "%s{\"ch\":%u,\"chip\":\"%s\",\"ok\":%s,\"x\":%d,\"y\":%d,\"z\":%d,"
                   "\"field_ut\":%.1f,\"ut_per_lsb\":%.5f,\"reads\":%lu,\"errors\":%lu}",

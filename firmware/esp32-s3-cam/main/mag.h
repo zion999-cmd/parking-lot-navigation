@@ -40,6 +40,9 @@ typedef struct {
 
 esp_err_t mag_start(void);
 bool mag_available(void);
+
+/* Re-run discovery on the next sample tick; no reboot needed. */
+void mag_request_rescan(void);
 uint8_t mag_count(void);
 bool mag_get(uint8_t index, mag_reading_t *out);
 const char *mag_diag(void);

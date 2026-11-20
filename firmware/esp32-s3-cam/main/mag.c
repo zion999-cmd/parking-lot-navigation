@@ -26,6 +26,8 @@
 #include "sdkconfig.h"
 
 #include "mag.h"
+#include "driver/gpio.h"
+#include "esp_rom_sys.h"
 
 #if CONFIG_MAG_ENABLE
 
@@ -49,6 +51,8 @@ static bool s_ready;
 static uint8_t s_count;
 static mag_reading_t s_readings[MAG_MAX_SENSORS];
 static float s_qmcp_scale[MAG_MAX_SENSORS];
+static int s_zero_streak[MAG_MAX_SENSORS];
+static volatile int s_rescan;
 
 /* The scan results travel over HTTP, not only over the console. A board mounted on a wall has no
  * serial port, and these lines are the difference between "no sensor" and "the wrong chip". */
@@ -548,12 +552,100 @@ static bool read_sample(mag_reading_t *r)
     return false;
 }
 
+/* A bus can be held hostage by one slave: after the 5 V excursion a chip kept SDA low, so every
+ * address probes as absent - the mux itself looked dead. Nine clocks plus a STOP is the standard
+ * way to make such a slave let go, and reading the idle levels says whether it worked. Do this
+ * with the peripheral detached, because the I2C driver owns the pads. */
+static void bus_recover(void)
+{
+    const gpio_num_t sda = CONFIG_MAG_SDA_GPIO, scl = CONFIG_MAG_SCL_GPIO;
+    gpio_config_t io = {
+        .pin_bit_mask = (1ULL << sda) | (1ULL << scl),
+        .mode = GPIO_MODE_INPUT_OUTPUT_OD,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&io);
+    gpio_set_level(sda, 1);
+    gpio_set_level(scl, 1);
+    esp_rom_delay_us(200);
+    diag_add("idle sda=%d scl=%d", gpio_get_level(sda), gpio_get_level(scl));
+    for (int i = 0; i < 9; i++) {
+        gpio_set_level(scl, 0);
+        esp_rom_delay_us(50);
+        gpio_set_level(scl, 1);
+        esp_rom_delay_us(50);
+    }
+    gpio_set_level(scl, 0);
+    esp_rom_delay_us(50);
+    gpio_set_level(sda, 0);
+    esp_rom_delay_us(50);
+    gpio_set_level(scl, 1);
+    esp_rom_delay_us(50);
+    gpio_set_level(sda, 1);
+    esp_rom_delay_us(50);
+    diag_add("cleared sda=%d", gpio_get_level(sda));
+}
+
+static esp_err_t bus_up(void)
+{
+    i2c_master_bus_config_t cfg = {
+        .i2c_port = MAG_PORT,
+        .sda_io_num = CONFIG_MAG_SDA_GPIO,
+        .scl_io_num = CONFIG_MAG_SCL_GPIO,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = true,
+    };
+    esp_err_t err = i2c_new_master_bus(&cfg, &s_bus);
+    if (err != ESP_OK) {
+        diag_add("bus_up:new=%s", esp_err_to_name(err));
+        return err;
+    }
+    if (add_device(MAG_HUB_ADDR, &s_hub) != ESP_OK) {
+        diag_add("bus_up:add_dev failed");
+        return ESP_ERR_NOT_FOUND;
+    }
+    diag_add("bus_up ok");
+    add_device(HMC_ADDR, &s_hmc);
+    add_device(QMC_ADDR, &s_qmc);
+    add_device(QMCP_ADDR, &s_qmcp);
+    return ESP_OK;
+}
+
+static void bus_down(void)
+{
+    if (s_bus) {
+        i2c_del_master_bus(s_bus);
+        s_bus = NULL;
+        s_hub = s_hmc = s_qmc = s_qmcp = NULL;
+    }
+}
+
+static void discover(void);
+
+void mag_request_rescan(void) { s_rescan = 2; }
+
 static void mag_task(void *arg)
 {
     (void)arg;
     const uint32_t period_ms = 1000u / (CONFIG_MAG_SAMPLE_HZ > 0 ? CONFIG_MAG_SAMPLE_HZ : 1);
     uint32_t tick = 0;
     while (true) {
+        if (s_rescan) {
+            bool hard = s_rescan == 2;
+            s_rescan = false;
+            ESP_LOGI(TAG, "rescan requested%s", hard ? " (with bus recovery)" : "");
+            if (hard) {
+                bus_down();
+                bus_recover();
+                if (bus_up() != ESP_OK) {
+                    ESP_LOGW(TAG, "bus did not come back up");
+                }
+            }
+            discover();
+        }
         for (uint8_t i = 0; i < s_count; i++) {
             mag_reading_t *r = &s_readings[i];
             if (mux_select(r->channel) != ESP_OK) {
@@ -565,6 +657,22 @@ static void mag_task(void *arg)
             if (read_sample(r)) {
                 r->ok = true;
                 r->reads++;
+                /* All-zero counts from a chip that answers is what a disturbed register set looks
+                 * like: measured after a 5 V excursion, three sensors kept ACKing and reporting
+                 * 0.0 uT until they were reconfigured. Self-heal rather than requiring a power
+                 * cycle, and say so once per episode. */
+                if (r->x == 0 && r->y == 0 && r->z == 0) {
+                    if (++s_zero_streak[i] == 10) {
+                        ESP_LOGW(TAG, "ch%u: all-zero readings, re-initialising the sensor", r->channel);
+                        if (r->chip == MAG_CHIP_QMC5883P) {
+                            float scale = 0.0f;
+                            configure_qmcp(r->channel, &scale);
+                            s_qmcp_scale[i] = scale;
+                        }
+                    }
+                } else {
+                    s_zero_streak[i] = 0;
+                }
             } else {
                 r->ok = false;
                 r->errors++;
@@ -575,12 +683,15 @@ static void mag_task(void *arg)
         if (tick % (10 * (CONFIG_MAG_SAMPLE_HZ > 0 ? CONFIG_MAG_SAMPLE_HZ : 1)) == 0) {
             for (uint8_t i = 0; i < s_count; i++) {
                 const mag_reading_t *r = &s_readings[i];
-                ESP_LOGI(TAG, "ch%u %s %s x=%d y=%d z=%d B=%.1fuT reads=%lu err=%lu",
+                ESP_LOGI(TAG, "ch%u %s %s x=%d y=%d z=%d B=%.1fuT reads=%lu err=%lu%s",
                          r->channel,
                          r->chip == MAG_CHIP_HMC5883L ? "HMC5883L" : "QMC5883L",
                          r->ok ? "ok  " : "FAIL",
                          r->x, r->y, r->z, (double)r->field_ut,
-                         (unsigned long)r->reads, (unsigned long)r->errors);
+                         (unsigned long)r->reads, (unsigned long)r->errors,
+                         (r->reads > 20 && r->errors * 100 > r->reads)
+                             ? "   <- over 1% errors: check the supply, QMC5883P is a 3.3 V part"
+                             : "");
             }
         }
         tick++;
@@ -588,37 +699,12 @@ static void mag_task(void *arg)
     }
 }
 
-esp_err_t mag_start(void)
+/* Discover once at boot and again on demand, so a hardware fix (a re-seated wire, a sensor moved
+ * to another channel) can be checked without an OTA just to reboot the board. */
+static void discover(void)
 {
-    /* The new driver, not the legacy one. The legacy driver's conflict check calls abort() when
-     * it believes the port belongs to someone else, which turns a wiring mistake into a boot loop -
-     * the board became unreachable after the first flash of this file. The new driver returns an
-     * error instead, so a failed install is a log line and nothing more. */
-    i2c_master_bus_config_t cfg = {
-        .i2c_port = MAG_PORT,
-        .sda_io_num = CONFIG_MAG_SDA_GPIO,
-        .scl_io_num = CONFIG_MAG_SCL_GPIO,
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = true,
-    };
-    esp_err_t err = i2c_new_master_bus(&cfg, &s_bus);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "i2c bus on port %d failed: %s (camera SCCB may own it)",
-                 MAG_PORT, esp_err_to_name(err));
-        return err;
-    }
-    if (add_device(MAG_HUB_ADDR, &s_hub) != ESP_OK) {
-        ESP_LOGW(TAG, "could not add mux 0x%02x", MAG_HUB_ADDR);
-        return ESP_ERR_NOT_FOUND;
-    }
-    add_device(HMC_ADDR, &s_hmc);
-    add_device(QMC_ADDR, &s_qmc);
-    add_device(QMCP_ADDR, &s_qmcp);
-
-    /* No mux-presence gate. An earlier version asked the TCA9548A for a register (it has none),
-     * failed, and returned before probing a single sensor - so a working setup reported "no mux".
-     * The honest test is the one that matters: select each channel and ask the sensor. */
+    s_count = 0;
+    memset(s_zero_streak, 0, sizeof(s_zero_streak));
     ESP_LOGI(TAG, "diagnostics on I2C%d (sda=%d scl=%d, %d Hz):",
              MAG_PORT, CONFIG_MAG_SDA_GPIO, CONFIG_MAG_SCL_GPIO, CONFIG_MAG_CLK_HZ);
     bus_scan();
@@ -629,7 +715,14 @@ esp_err_t mag_start(void)
     }
 
     for (uint8_t ch = 0; ch < CONFIG_MAG_CHANNELS && s_count < MAG_MAX_SENSORS; ch++) {
-        mag_chip_t chip = probe(ch);
+        /* Give the RF/I2C switch time to settle and retry once: a channel whose sensor is marginal
+         * - long leads, a weak pull-up - can miss the first probe and answer the second. If it still
+         * does not answer, that channel is genuinely empty or dead, and the log says which. */
+        mag_chip_t chip = MAG_CHIP_NONE;
+        for (int attempt = 0; attempt < 2 && chip == MAG_CHIP_NONE; attempt++) {
+            vTaskDelay(pdMS_TO_TICKS(5));
+            chip = probe(ch);
+        }
         if (chip == MAG_CHIP_NONE) {
             ESP_LOGW(TAG, "ch%u: nothing answered (0x1E or 0x0D) - check that channel's wiring", ch);
             continue;
@@ -651,6 +744,27 @@ esp_err_t mag_start(void)
                  : chip == MAG_CHIP_QMC5883P ? "QMC5883P (0x2C)"
                  : "QMC5883L (0x0D)");
     }
+
+}
+
+esp_err_t mag_start(void)
+{
+    /* The new driver, not the legacy one. The legacy driver's conflict check calls abort() when
+     * it believes the port belongs to someone else, which turns a wiring mistake into a boot loop -
+     * the board became unreachable after the first flash of this file. The new driver returns an
+     * error instead, so a failed install is a log line and nothing more. */
+    bus_recover();
+    esp_err_t err = bus_up();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "i2c bus on port %d failed: %s (camera SCCB may own it)",
+                 MAG_PORT, esp_err_to_name(err));
+        return err;
+    }
+
+    /* No mux-presence gate. An earlier version asked the TCA9548A for a register (it has none),
+     * failed, and returned before probing a single sensor - so a working setup reported "no mux".
+     * The honest test is the one that matters: select each channel and ask the sensor. */
+    discover();
 
     ESP_LOGI(TAG, "hub 0x%02x ok, %u/%u sensors, %d Hz on I2C%d (sda=%d scl=%d)",
              MAG_HUB_ADDR, s_count, (unsigned)CONFIG_MAG_CHANNELS, CONFIG_MAG_SAMPLE_HZ,
@@ -679,6 +793,7 @@ bool mag_get(uint8_t index, mag_reading_t *out)
 
 esp_err_t mag_start(void) { return ESP_ERR_NOT_SUPPORTED; }
 bool mag_available(void)  { return false; }
+void mag_request_rescan(void) {}
 uint8_t mag_count(void)   { return 0; }
 bool mag_get(uint8_t i, mag_reading_t *out) { (void)i; (void)out; return false; }
 
