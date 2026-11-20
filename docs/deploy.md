@@ -166,3 +166,34 @@ Octal PSRAM 33–37。真正空闲：0、3、46、48（其中 0/3/46 是 strappi
 
 ⚠️ **外部 JTAG 不可用**（39/41/40/42 全被占用），**原生 USB 不可用**（19/20 被 LCD 占用）
 → **43/44 是唯一的烧录与调试通道**，任何新外设都不能占这两个脚。
+
+---
+
+## 8. 换一台电脑（或换一个网络）时
+
+`192.168.3.102` 这类地址在仓库里只是**默认模板**：板子会用 UDP beacon（`CONFIG_DISCOVERY_PORT`，默认 9999）
+找到 PC，然后改写 `QR_DATA_URL` / LED 状态 / OTA manifest 的 host。所以换机器本身不需要改固件，
+但下面每一条都要成立，否则表现各不相同、都不像原因本身。
+
+**启动后 60 秒内逐条确认：**
+
+| # | 检查 | 命令 | 失败时的现象 |
+|---|---|---|---|
+| 1 | **Python 依赖装齐** | `python -c "import qrcode, cv2, numpy"` | **`serve` 起不来 → 屏幕 "QR unavailable"** ← 最容易漏 |
+| 2 | beacon 在跑 | `./start.sh status`（`beacon up`）| 板子用回编译时的默认 IP → 页面/QR/OTA 全指向不存在的机器 |
+| 3 | serve 在跑 | `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8010/` → 200 | 同上 |
+| 4 | 本机在板子的网段 | `ipconfig getifaddr en0` | 板子上报 `PC_NOT_FOUND` |
+| 5 | 板子 IP 与 `--source` 一致 | `./start.sh status` 里 `camera:` 一行 | vision 拉不到流，画面卡住 |
+| 6 | QR 端点对 LAN 可服务 | `curl -H "Host: <本机IP>:8010" http://127.0.0.1:8010/api/qr` → 200 | 用 `127.0.0.1` 当 Host 会被**故意**拒成 400（`loopback Host is not reachable by a phone`）|
+
+**一个真实的排查顺序**（2026-11-16 换第三台机器时走的）：
+
+```
+屏幕显示 "QR unavailable"
+  → 红外正常、道闸正常        ⇒ 固件本地逻辑没坏，问题在 PC 侧
+  → ./start.sh status         ⇒ serve DOWN
+  → tail run/serve.log        ⇒ ModuleNotFoundError: No module named 'qrcode'
+  → pip install qrcode        ⇒ serve up，QR 恢复
+```
+
+**先看 `run/serve.log` 的最后 20 行**，PC 侧的问题几乎都能在里面直接读到，不用去猜固件。
