@@ -108,6 +108,24 @@ def delta(empty_stats, bay_stats):
     return result
 
 
+def check_cleared(host, empty_stats, scales, seconds=2.0, rate=4.0, tolerance=2.0):
+    """Confirm the field is back at the empty baseline before starting a bay phase.
+
+    The first run of this tool was invalidated by exactly this: the car stayed on one bay for the
+    whole session, so "empty" was not empty and every later phase measured noise. Comparing against
+    the empty baseline before each phase turns that silent mistake into a printed warning.
+    """
+    raw, _scales, _dupes, _misses, _fresh = sample(host, seconds, rate, "check", False)
+    current = stats(raw)
+    drift = {}
+    for (channel, axis), (mean, _sigma) in current.items():
+        if (channel, axis) in empty_stats:
+            change = abs(mean - empty_stats[(channel, axis)][0]) * (scales.get(channel) or 0.0)
+            drift[channel] = max(drift.get(channel, 0.0), change)
+    moved = {channel: value for channel, value in drift.items() if value > tolerance}
+    return moved
+
+
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -142,7 +160,21 @@ def main(argv):
     findings = {}
     matrix = {}
     for bay in args.bays:
-        input(f"  put ONE car on {bay} and nothing else, then press Enter... ")
+        input(f"  put ONE car on {bay} and NOTHING else, then press Enter... ")
+        moved = check_cleared(args.host, empty, scales)
+        if moved:
+            detail = ", ".join(f"ch{channel} +{value:.2f} uT" for channel, value in moved.items())
+            print(f"  ⚠ something other than {bay} is still loaded ({detail} vs the empty baseline)")
+            answer = input("     move it away and press Enter, or type 'skip' to skip this bay: ")
+            if answer.strip().lower() in ("skip", "s", "q"):
+                print(f"  {bay}: skipped by the operator\n")
+                findings[bay] = None
+                continue
+            moved = check_cleared(args.host, empty, scales)
+            if moved:
+                print("  ✗ still not clear - not trusting this phase")
+                findings[bay] = None
+                continue
         raw, scales_here, dupes, misses, fresh = sample(args.host, args.seconds, args.rate, bay, True)
         scales.update(scales_here)
         change = delta(empty, stats(raw))
