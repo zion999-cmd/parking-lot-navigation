@@ -83,7 +83,14 @@ def annotate(frame: np.ndarray, spots: List[Spot], results: Dict[str, SpotResult
         x, y, w, h = pose.bbox
         cv2.rectangle(canvas, (x, y), (x + w, y + h), COL_CAR, 2)
         length = max(w, h) * 0.7
-        if (pose.heading_from_arrow or pose.elongation >= vehicle.AXIS_MIN_ELONGATION):
+        # An axis can only be drawn when there is one. The heading can be None - the arrow is
+        # on screen but its direction has never been read - and the old condition did not
+        # notice, so math.radians(None) took the whole process down on the first frame.
+        has_axis = (pose.heading is not None
+                    and (pose.heading_from_arrow
+                         or pose.elongation >= vehicle.AXIS_MIN_ELONGATION))
+        dx = dy = 0.0
+        if has_axis:
             # Only draw an axis when there is one. A line through a square is a claim the mask
             # cannot support, and on screen it reads as confidently as a real one.
             rad = math.radians(pose.heading)
@@ -103,7 +110,7 @@ def annotate(frame: np.ndarray, spots: List[Spot], results: Dict[str, SpotResult
                     int(pose.y - half * math.sin(facing)))
             cv2.circle(canvas, fx, 7, COL_CAR, -1)      # filled = the front
             cv2.circle(canvas, rear, 7, COL_CAR, 2)     # hollow = the back
-        elif (pose.heading_from_arrow or pose.elongation >= vehicle.AXIS_MIN_ELONGATION):
+        elif has_axis:
             # No front known: both ends get a ring, so the drawing does not claim a direction it
             # does not have. Which needs an axis to put them on: with no axis there are no ends
             # to mark, and dx/dy above were never computed - wrapping the axis line in the same
@@ -124,18 +131,23 @@ def annotate(frame: np.ndarray, spots: List[Spot], results: Dict[str, SpotResult
         # The numbers that say whether the reading can be trusted at all: an axis only means
         # something if the shape is elongated, and if the two independent estimates disagree
         # the blob is not car shaped, whatever the angle says.
-        agree = min(abs(pose.heading - pose.heading_pca),
-                    180 - abs(pose.heading - pose.heading_pca))
+        #
+        # With no heading there is nothing to compare, so the disagreement is undefined rather
+        # than zero - saying "they agree" when there is only one reading would be a claim.
+        agree = 0.0
+        if pose.heading is not None and pose.heading_pca is not None:
+            agree = min(abs(pose.heading - pose.heading_pca),
+                        180 - abs(pose.heading - pose.heading_pca))
         if pose.front_is_known and pose.front_heading is not None:
             text = (f"car ({pose.x:.0f},{pose.y:.0f}) FRONT {pose.front_heading:.0f}deg"
                     f"  (axis {pose.heading:.0f}){where}")
         else:
-            axis_txt = (f"{pose.heading:.0f}deg" if (pose.heading_from_arrow or pose.elongation >= vehicle.AXIS_MIN_ELONGATION)
-                        else "unknown")
+            axis_txt = (f"{pose.heading:.0f}deg" if has_axis else "unknown")
             text = (f"car ({pose.x:.0f},{pose.y:.0f}) axis {axis_txt}"
                     f"  front unknown{where}")
         ev = f"{pose.front_evidence:+.2f}" if pose.front_evidence is not None else "  -  "
-        detail = (f"elon {pose.elongation:.2f}  pca {pose.heading_pca:.0f}deg  d{agree:.0f}deg"
+        pca_txt = (f"{pose.heading_pca:.0f}deg" if pose.heading_pca is not None else "unknown")
+        detail = (f"elon {pose.elongation:.2f}  pca {pca_txt}  d{agree:.0f}deg"
                   f"  ends {pose.ends_grey:+.1f}  taper {pose.taper:+.2f}  ev {ev}"
                   f"  turn {pose.observed_turn:+.0f}°")
         if pose.elongation < 1.6:
@@ -1021,7 +1033,12 @@ def main() -> int:
                 elif pose is None:
                     car_text = "not visible"
                 else:
-                    car_text = f"({pose.x:.0f},{pose.y:.0f}) axis {pose.heading:.0f}deg"
+                    if pose.heading is not None:
+                        car_text = f"({pose.x:.0f},{pose.y:.0f}) axis {pose.heading:.0f}deg"
+                    else:
+                        # The arrow is there but its direction has never been read. Saying
+                        # "axis 0deg" would be a claim the pixels do not support.
+                        car_text = f"({pose.x:.0f},{pose.y:.0f}) axis unknown"
                     if getattr(pose, "heading_stale", False):
                         car_text += " STALE"
                     if location:

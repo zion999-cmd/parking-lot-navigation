@@ -146,7 +146,11 @@ class VehiclePose:
 
     x: float
     y: float
-    heading: float
+    # None when the arrow was found but its direction has not been committed yet. That is a
+    # real state, not a failure: the car is on screen and its position is known, but nobody can
+    # say which way it points. The type says Optional because the value really can be None, and
+    # every consumer has to cope with that instead of crashing on it.
+    heading: Optional[float]
     area: int
     elongation: float
     fill: float
@@ -197,7 +201,11 @@ class VehiclePose:
         # number is kept on the dataclass because the overlay and the diagnostic tools print it
         # next to "NO CLEAR AXIS", but the contract is what a consumer acts on, and a consumer
         # cannot tell a meaningless 87.6 from a real one.
-        axis_known = self.heading_from_arrow or self.elongation >= AXIS_MIN_ELONGATION
+        # The heading can also be None - the arrow is there but its direction has never been
+        # read - and then there is no axis to report either, whatever the elongation says.
+        axis_known = (self.heading is not None
+                      and (self.heading_from_arrow
+                           or self.elongation >= AXIS_MIN_ELONGATION))
         out = {"id": "hero", "x": round(self.x, 1), "y": round(self.y, 1),
                "heading": round(self.heading, 1) if axis_known else None,
                "visible": True,
@@ -729,6 +737,13 @@ class VehicleTracker:
         # The detector is already steady frame to frame (0.993 score at the same pixel on
         # four consecutive frames), so there is nothing here for a filter to do.
         if getattr(pose, "heading_from_arrow", False):
+            self._x, self._y = pose.x, pose.y
+            return pose
+
+        # No heading at all: the arrow is visible but its direction has never been committed, so
+        # there is no axis to smooth. Report the position and leave the heading None rather than
+        # feeding a None into the doubled-angle average below.
+        if pose.heading is None:
             self._x, self._y = pose.x, pose.y
             return pose
 

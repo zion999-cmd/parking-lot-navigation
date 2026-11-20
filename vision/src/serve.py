@@ -3,10 +3,11 @@
     python src/serve.py
     # then open http://localhost:8010/web/index.html and click a bay
 
-It serves the static files - the page and the contract documents - and exactly one endpoint:
+It serves the static files and these small endpoints:
 
     GET /api/route?spot=38      ->  the route document, as src/plan.py writes it
     GET /api/route?clear=1      ->  the same document, saying there is no target any more
+    GET /api/qr                 ->  current /go URL and QR module matrix
 
 That is the whole of it. The handler reads the two contract documents, calls route.plan() and
 writes out/route.json, the same call src/plan.py makes. No vision, no bay selection, no state
@@ -38,10 +39,12 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import contract                                                 # noqa: E402
+import qr_data                                                  # noqa: E402
 import route                                                    # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 API_PATH = "/api/route"
+QR_PATH = "/api/qr"
 GO_PATH = "/go"
 NAV_PATH = "/web/navigation.html"
 
@@ -70,9 +73,21 @@ class Handler(SimpleHTTPRequestHandler):
             return self._index()
         if parsed.path == GO_PATH:
             return self._go()
+        if parsed.path == QR_PATH:
+            return self._qr()
         if parsed.path != API_PATH:
             return super().do_GET()
         self._api_route(urllib.parse.parse_qs(parsed.query))
+
+    def _qr(self) -> None:
+        """Return the current PC's navigation URL and its QR module matrix."""
+        try:
+            payload = qr_data.navigation_url(self.headers.get("Host", ""))
+            document = qr_data.document(payload)
+        except ValueError as exc:
+            return self._json(400, {"error": str(exc),
+                                    "hint": "use this PC's LAN address in the Host header"})
+        self._json(200, document)
 
     def _go(self) -> None:
         """Short path for the QR code on the gate's panel.
