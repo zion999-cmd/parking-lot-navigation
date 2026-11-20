@@ -201,6 +201,8 @@ camera ──GET http://<pc>:8010/out/parking_state.json──▶ PC Vision
 | 升级 | `GET <ota-server>/manifest.json` → `GET firmware_url` → SHA256 → A/B 槽位 |
 | 车位状态（P0008，出站） | 设备→PC：`GET http://<pc>:8010/out/parking_state.json`（`parking_state/1`，只看 `spots[id].state`） |
 | 导航目标（P0008，出站） | 设备→PC：`GET http://<pc>:8010/out/route.json`（`route/1`，先 `ok` 再 `target_spot`）；PC 侧取消/到达时 `GET /api/route?clear=1` |
+| 二维码矩阵（出站） | 设备→PC：`GET http://<pc>:8010/api/qr`（`parking_qr/1`，当前 `/go` URL + 模块行）；host 跟随 beacon，失败不显示旧码 |
+| 二维码诊断 | 设备：`GET /api/qr-status`（有效位、URL、最后成功时间、错误原因） |
 | 车位状态灯的接线 | DIN = GPIO14，RMT（不使用 LEDC，已与相机 XCLK / 屏幕背光错开） |
 
 选择理由：MJPEG over HTTP 是最简单、最成熟、后续 Python/OpenCV 最容易消费的方案

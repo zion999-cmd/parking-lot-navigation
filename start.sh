@@ -9,21 +9,17 @@
 #   ./start.sh edit [--source URL]   open the bay editor (stops the stack, restarts it on exit)
 #   ./start.sh logs [name]     follow one log (serve, vision, beacon, ota, label)
 #   ./start.sh label           start the labelling page (:8030) as a managed service
-#   ./start.sh beacon          start the discovery beacon (UDP 9999) - NOT started by default: the
-#                              board was stable for 180 s with it down and resetting every 20-30 s
-#                              with it up. Without it the device uses its compiled-in address.
-#   ./start.sh ota             start the OTA server (:8000) - NOT started by default, because the
-#                              board polls it in a loop and a published build then updates the
-#                              hardware unattended
+#   ./start.sh beacon          start the discovery beacon (UDP 9999); also started by default
+#   ./start.sh ota             start the OTA server (:8000); also started by default
 #   ./start.sh stop --all      stop the stack AND every test/experiment process of this
 #                              project (tools/hero_lab, vision/tests, the labeller, ...)
 #
 # Options (for `start` / `restart`):
 #   --source URL     camera stream; default: find the camera on the LAN
-#   --no-ota         keep the OTA server down (it is down by default now; flag kept for old commands)
-#   --ota            also start the OTA server with `start`
-#   --no-beacon      leave the beacon alone (the device then uses the addresses
-#                    compiled into it)
+#   --no-ota         do not start the OTA server (it starts by default)
+#   --ota            compatibility flag; OTA already starts by default
+#   --no-beacon      do not start the beacon (the device then uses its compiled-in addresses)
+#   --beacon         compatibility flag; the beacon already starts by default
 #
 # Four background services, and what each one is for:
 #
@@ -32,10 +28,10 @@
 #   main.py     :8020   vision: turns the camera stream into parking_state.json.
 #                       Without it there is no fresh state, and the strip blanks
 #                       itself on purpose (that is the rule, not a bug).
-#   beacon.py   :9999   tells the device where this PC is, so moving to another
-#                       Wi-Fi does not need a firmware rebuild. Optional by
-#                       design: without it the device uses its configured URLs.
-#   ota-server  :8000   serves firmware images. Only needed when upgrading.
+#   beacon.py   :9999   tells the device where this PC is, so the LED state and
+#                       route URLs follow a new computer or Wi-Fi automatically.
+#   ota-server  :8000   serves firmware images. A published newer image can update
+#                       the board automatically; use --no-ota when that is unwanted.
 #
 # Logs and pid files land in run/ (gitignored). Running this script twice is safe:
 # a service that is already up - including one somebody started by hand - is
@@ -59,8 +55,11 @@ ANNOTATED_PORT=8020
 OTA_PORT=8000
 BEACON_PORT=9999
 
-# Set by the option parser; empty means "not given".
+# The normal stack is serve + vision + beacon + OTA. label is always opt-in.
+# --no-ota / --no-beacon are the explicit escape hatches.
 OPT_SOURCE=""
+OPT_OTA=1
+OPT_BEACON=1
 OPT_NO_OTA=0
 OPT_NO_BEACON=0
 
@@ -463,24 +462,17 @@ cmd_start() {
     say "starting stack (logs in $RUN/)"
     print_services
 
-    # The OTA server is not started by default, and that is a deliberate change: the firmware
-    # polls /manifest.json in a `while (true)` loop, so a resident server means that publishing a
-    # build updates the board unattended. This project has already lost an evening to an OTA rollback
-    # loop. The usage line always said "(only needed for upgrades)"; now the default agrees with it.
-    # Start it with ./start.sh ota, or ./start.sh start --ota.
-    if [ "${OPT_OTA:-0}" = "1" ] && [ "$OPT_NO_OTA" = "0" ]; then
+    # OTA is part of the normal stack. Publishing a newer image while it is running
+    # can update the board automatically; --no-ota is the explicit way to prevent that.
+    if [ "$OPT_OTA" = "1" ] && [ "$OPT_NO_OTA" = "0" ]; then
         start_one ota "port_answers $OTA_PORT" "port:$OTA_PORT" \
             "$PY_SYS" -u "$ROOT/tools/ota-server/server.py" --port "$OTA_PORT" || true
     fi
 
-    # Not started by default. The board was measured stable for 180 s with the beacon down and
-    # resetting every 20-30 s with it up, on two separate runs; a UDP packet every 2 s is a radio
-    # wake-up every 2 s plus a firmware path that has already panicked once (the Invalid mbox assert
-    # fixed in 0.2.23). Whether the packet or the current it costs is what tips it over is not
-    # settled, and until it is the safer default is off - the device then uses its compiled-in
-    # address, which is what it does when nothing answers anyway. ./start.sh beacon starts it.
-    # This flag was parsed and never consulted before today: --no-beacon did nothing at all.
-    if [ "${OPT_BEACON:-0}" = "1" ] && [ "$OPT_NO_BEACON" = "0" ]; then
+    # The beacon is required when the PC address can change: the LED state and
+    # route URLs follow its source address. --no-beacon restores the old behaviour
+    # of using only the addresses compiled into the firmware.
+    if [ "$OPT_BEACON" = "1" ] && [ "$OPT_NO_BEACON" = "0" ]; then
         start_one beacon "" "cmd:tools/beacon.py" \
             "$PY_SYS" -u "$ROOT/tools/beacon.py" --port "$BEACON_PORT" || true
     fi

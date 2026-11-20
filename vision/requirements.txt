@@ -8,3 +8,4 @@
 # and cv2 4.13.0 + numpy 2.0.2 in /usr/bin/python3.
 opencv-python>=4.8
 numpy>=1.24
+qrcode>=7.0

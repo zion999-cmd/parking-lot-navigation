@@ -4,7 +4,12 @@
 深入细节看 `README.md`（硬件证据链、设计取舍、踩坑全过程）和 `vision/README.md`。
 代码审计记录：`docs/audit-2026-10-20.md`（含结构总结、修复清单与剩余风险）。
 
-当前固件版本：**0.2.55**　｜　车位标定：**48 个**（`vision/config/parking_spots.json`）
+当前源码固件版本：**0.2.77**（设备实际版本以其状态页为准）　｜　车位标定：**48 个**（`vision/config/parking_spots.json`）
+
+> **当前启动约定**：`./start.sh` / `./start.sh restart` 默认启动 serve、vision、beacon、
+> OTA 四项服务；只有 label 默认不启动。`--no-beacon` / `--no-ota` 可显式关闭对应服务。
+> 下文较长章节保留各阶段的实施与实测记录；若历史启动方式与此处不一致，以本节和
+> `README.md` §0、§21 为准。
 
 ---
 
@@ -51,18 +56,47 @@ ESP32 导航小车（车位级导航）              ⏳ 还没做
 
 ### 1.3 怎么跑起来
 
+在项目根目录运行，不要分别手动启动两个 Python 进程：
+
 ```zsh
-cd /Users/bx/Esp32/parking-lot-navigation/vision
-P=/usr/local/Caskroom/miniconda/base/envs/vision-dev/bin/python
-
-$P src/main.py --annotated-port 8020   # 分析 + 把分析画面发出去（不开窗口 ✓）
-$P src/serve.py                        # 页面 + 规划接口
-# 浏览器打开：http://localhost:8010/web/board.html     ← 给观众看：分析画面 + 点车位
-#            http://localhost:8010/web/navigation.html ← 车载导航视角（也可 ?spot=10 直接开始）
-
-# 要改车位 / 道路时才开窗口（另开一个终端 ✓）：
-$P src/calibration.py --frame data/reference/reference.jpg
+./start.sh start --source http://<板子IP>/stream
+# 或不写 --source，让脚本自己找相机：
+./start.sh
+./start.sh status
 ```
+
+默认主动启动：
+
+| 服务 | 端口 | 少了它的表现 |
+|---|---|---|
+| serve | 8010 | 页面、状态文档和路线接口不可用 |
+| vision | 8020 / 8021 | 看板无视频、状态停止更新、LED 熄灭 |
+| beacon | UDP 9999 | 换电脑/IP 后 ESP32 仍访问旧电脑，LED 熄灭 |
+| OTA | 8000 | 设备无法取得新 manifest/固件 |
+
+只有标注工具 label 需要单独执行 `./start.sh label`。`--no-beacon`、`--no-ota`
+用于临时关闭对应默认服务。
+
+```text
+看板：    http://<电脑IP>:8010/web/board.html
+车载导航：http://<电脑IP>:8010/web/navigation.html
+```
+
+要改车位/道路或拍参考图时运行 `./start.sh edit`。参考图在后台 vision 启动后才生成时，
+必须 `./start.sh restart` 让后台重新加载；`vision up` 只说明守护进程存在，不能代替
+`state document` 新鲜且 `UNKNOWN = 0` 的验收。
+
+#### 换电脑 / IP 变化
+
+| 环节 | 处理方式 |
+|---|---|
+| 新电脑 → ESP32 视频 | `./start.sh restart` 自动校验缓存并重新发现；也可显式 `--source http://<板子IP>/stream` |
+| ESP32 → 新电脑 LED 状态/导航 | 保持默认 beacon 运行，设备跟随 UDP 源地址；用 `./start.sh status` 确认 |
+| 空车位参考图 | 文件不会随源码迁移。全空后 `./start.sh edit` 按 `r`，再重启后台 vision |
+| OTA manifest | 0.2.76 起跟随 beacon；新 PC 使用同一 `ota.key` 发布，HMAC 认证后每 30 秒自动恢复 |
+| LCD 二维码 | 0.2.74 起跟随 beacon：ESP32 请求当前 PC 的 `/api/qr`，自动更新 URL 和矩阵，无需重烧 |
+
+完整命令和故障验收见 `README.md` §0.1；首次部署另见 `docs/deploy.md`。
 
 > **模式说明** ✓：`--annotated-port` **默认不开窗口** ✓（看板就是窗口 ✓）；加 `--window` 才开 ✓。
 > 编辑**不需要停掉分析** ✓：单独跑的编辑器一保存 ✓，正在跑的分析会**自己重载车位、重发地图** ✓✓，

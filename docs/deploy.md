@@ -68,7 +68,7 @@ cd firmware/esp32-s3-cam
 idf.py build
 idf.py -p /dev/cu.usbserial-XXXX flash      # 串口烧录
 # 或者走 OTA：
-cd ../.. && ./tools/ota-server/publish.sh 0.2.73
+cd ../.. && ./tools/ota-server/publish.sh 0.2.77
 ```
 
 ⚠️ **两件事**：

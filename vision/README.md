@@ -27,7 +27,7 @@ perspective transform, OTA.
 
 ## 1. Environment
 
-`cv2` is needed. On this machine it is already installed in
+`cv2`, `numpy` and `qrcode` are needed. On this machine they are already installed in
 `/usr/local/Caskroom/miniconda/base/envs/vision-dev/bin/python` (cv2 4.13.0,
 numpy 2.4.6). Everything below assumes that interpreter; substitute your own.
 
