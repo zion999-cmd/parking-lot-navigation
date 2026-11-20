@@ -1,0 +1,19 @@
+{
+  "comment": "Bay -> magnetometer channel. `null` until measured: P0005 forbids assuming B1=CH0. Fill it with tools/bench/mag_map.py, which puts one car on one bay at a time and attributes the channel that actually moves.",
+  "established_by": null,
+  "established_at": null,
+  "bays": {
+    "B1": {
+      "channel": null
+    },
+    "B2": {
+      "channel": null
+    },
+    "B3": {
+      "channel": null
+    },
+    "B4": {
+      "channel": null
+    }
+  }
+}

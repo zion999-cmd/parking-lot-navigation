@@ -51,10 +51,18 @@ def read_once(url, timeout=2.0):
 
 
 def collect(url, seconds, rate_hz, label, say):
-    """Sample for a fixed window. Returns {(ch, 'x'|'y'|'z'|'B'): [values]} plus miss count."""
+    """Sample for a fixed window.
+
+    Returns (samples, scales, misses, taken) where samples is {(ch, axis): [raw counts]}. The board's
+    own read counter is used to drop repeated polls: the HTTP rate and the sensor rate are unrelated,
+    so two polls can return the same reading, and a duplicate is not an independent sample.
+    """
     interval = 1.0 / max(rate_hz, 0.5)
     deadline = time.time() + seconds
     samples = {}
+    scales = {}
+    last_reads = {}
+    duplicates = 0
     misses = 0
     taken = 0
     # A progress line that stays on one row: a bench run is watched, not read.
@@ -65,8 +73,15 @@ def collect(url, seconds, rate_hz, label, say):
         else:
             for reading in doc.get("sensors") or []:
                 channel = reading.get("ch")
-                if channel is None:
+                if channel is None or not reading.get("ok", True):
                     continue
+                reads = reading.get("reads")
+                if reads is not None and last_reads.get(channel) == reads:
+                    duplicates += 1
+                    continue
+                last_reads[channel] = reads
+                # Per-sensor scale from the board: QMC5883L and HMC5883L are not 0.1 uT/count.
+                scales[channel] = float(reading.get("ut_per_lsb") or 0.0)
                 for axis in ("x", "y", "z"):
                     samples.setdefault((channel, axis), []).append(float(reading.get(axis, 0)))
                 samples.setdefault((channel, "B"), []).append(float(reading.get("field_ut", 0.0)))
@@ -75,11 +90,11 @@ def collect(url, seconds, rate_hz, label, say):
         # Progress only on a terminal: piped through tee or a log the carriage returns pile up into
         # one unreadable line per sample.
         if sys.stdout.isatty():
-            say(f"\r  {label}: {taken:4d} samples, {remaining:4.1f} s left   ")
+            say(f"\r  {label}: {taken:4d} polls, {duplicates} dup, {remaining:4.1f} s left   ")
         time.sleep(interval)
     if sys.stdout.isatty():
         say("\n")
-    return samples, misses, taken
+    return samples, scales, misses, taken
 
 
 def window_means(values, size):
@@ -159,22 +174,25 @@ def main(argv):
     say(f"  {len(channels)} sensor(s) on channels {channels}\n\n")
 
     rows = []
+    scales = {}
     empty_runs, car_runs = [], []
     empty_raw, car_raw = [], []
     for rnd in range(args.rounds):
         say(f"round {rnd + 1}/{args.rounds}\n")
         if not args.yes:
             input("  make sure the bay is EMPTY, then press Enter... ")
-        samples, misses, taken = collect(url, args.seconds, args.rate, "empty", say)
+        samples, scales_empty, misses, taken = collect(url, args.seconds, args.rate, "empty", say)
         empty_runs.append(summarise(samples))
         empty_raw.append(samples)
+        scales.update(scales_empty)
         say(f"  {taken} samples, {misses} miss(es)\n")
 
         if not args.yes:
             input("  put the car on the sensor, then press Enter... ")
-        samples, misses, taken = collect(url, args.seconds, args.rate, "car  ", say)
+        samples, scales_car, misses, taken = collect(url, args.seconds, args.rate, "car  ", say)
         car_runs.append(summarise(samples))
         car_raw.append(samples)
+        scales.update(scales_car)
         say(f"  {taken} samples, {misses} miss(es)\n\n")
 
     # Pool the rounds rather than averaging means: with few rounds a mean of means hides how much
@@ -242,7 +260,7 @@ def main(argv):
                                                  sigma_sample)
                 if delta is None:
                     continue
-                scale = 1.0 if axis == "B" else 0.1     # raw counts -> uT at the 30 G scale
+                scale = 1.0 if axis == "B" else (scales.get(channel) or 0.0)
                 print(f"{channel:>3} {axis:>5} {delta * scale:>+10.2f} {sigma * scale:>10.2f} "
                       f"{(snr or 0):>6.1f}")
 
