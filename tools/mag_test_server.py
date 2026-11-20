@@ -158,6 +158,12 @@ class TestState:
                 return False, "already sampling"
             if self.poller is None:
                 return False, "no board"
+            if not any(channel is not None for channel in self.mapping.values()):
+                # Sampling nothing can only produce nothing. Say it here, with the fix, instead of
+                # letting the capture run three seconds and report "no bay produced a baseline".
+                return False, ("no bay is mapped to a channel yet - in the table below, watch which "
+                               "channel moves when a car sits on B4, then pick that bay in the last "
+                               "column")
             self.capturing = True
             self.capture_note = f"sampling {duration:g} s"
         threading.Thread(target=self._capture, args=(duration,), daemon=True).start()
@@ -171,7 +177,10 @@ class TestState:
                 log=lambda _text: None)
             valid = sum(1 for entry in baseline.bays.values() if entry.get("valid"))
             if valid == 0:
-                note = "failed: no bay produced a usable baseline (previous one kept)"
+                reasons = "; ".join(f"{bay}: {entry.get('reason') or 'invalid'}"
+                                    for bay, entry in baseline.bays.items()
+                                    if not entry.get("valid"))
+                note = f"failed: no usable baseline, previous one kept - {reasons}"
             else:
                 baseline.save(BASELINE_PATH)
                 self.baseline = baseline

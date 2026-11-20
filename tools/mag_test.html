@@ -155,6 +155,17 @@ async function tick() {
     ? ` · Baseline: ${base.valid}/${base.total} 有效 · 阈值 ${data.threshold_ut} µT`
     : " · 还没有 Baseline";
   const note = document.getElementById("note");
+  const unmapped = BAYS.filter(bay => mapping[bay] === null || mapping[bay] === undefined);
+  if (!data.capturing && unmapped.length === BAYS.length) {
+    // Nothing mapped means nothing can be captured; say what to do before the button is pressed.
+    note.textContent = "还没有把通道指给车位：在下面的表格里，把车放到某个车位，看哪一列的数值跳动最大，"
+                     + "就在最后一列把那个车位选上。至少映射一个车位后才能建立 Baseline。";
+    note.className = "note bad";
+    document.getElementById("baseline").disabled = false;
+    renderCards(data.bays || []);
+    renderChannels(data.channels || [], mapping);
+    return;
+  }
   if (data.capturing) {
     note.textContent = "正在采集 Baseline…（约 3 秒，别动车）";
     note.className = "note";
