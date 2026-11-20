@@ -115,7 +115,12 @@ def main(argv):
     parser.add_argument("--bays", nargs="+", default=["B1", "B2", "B3", "B4"])
     parser.add_argument("--seconds", type=float, default=10.0, help="seconds per phase")
     parser.add_argument("--rate", type=float, default=4.0)
-    parser.add_argument("--write", action="store_true", help="rewrite the mapping config")
+    parser.add_argument("--write", action="store_true",
+                        help="rewrite the mapping from what the phases agreed on (needs a clean result)")
+    parser.add_argument("--matrix", action="store_true",
+                        help="only print the full channel x bay magnitude matrix and stop")
+    parser.add_argument("--write-map", metavar="B4=4,B2=1",
+                        help="write an explicit mapping, for when the matrix has been read by hand")
     parser.add_argument("--config", default=DEFAULT_CONFIG)
     args = parser.parse_args(argv)
 
@@ -135,11 +140,14 @@ def main(argv):
     print(f"  {fresh} fresh samples, {dupes} duplicate polls dropped, {misses} miss(es)\n")
 
     findings = {}
+    matrix = {}
     for bay in args.bays:
         input(f"  put ONE car on {bay} and nothing else, then press Enter... ")
         raw, scales_here, dupes, misses, fresh = sample(args.host, args.seconds, args.rate, bay, True)
         scales.update(scales_here)
         change = delta(empty, stats(raw))
+        matrix[bay] = {ch: abs(v.get("norm", 0.0)) * (scales.get(ch) or 0.0)
+                       for ch, v in change.items()}
         scored = sorted(((abs(v.get("norm", 0.0)), ch, v) for ch, v in change.items()), reverse=True)
         print(f"  {bay}: {fresh} fresh samples, {dupes} duplicate polls dropped")
         for magnitude, channel, axes in scored:
@@ -160,6 +168,56 @@ def main(argv):
         else:
             findings[bay] = top[0][1]
             print(f"    -> ch{top[0][1]} (margin {margin:.2f})\n")
+
+    if matrix:
+        all_channels = sorted({ch for row in matrix.values() for ch in row})
+        print("\nchannel x bay, |delta| in uT (rows = bays, columns = channels)")
+        print("      " + "".join(f"{'ch%d' % ch:>9}" for ch in all_channels))
+        for bay in args.bays:
+            row = matrix.get(bay, {})
+            cells = "".join(f"{row.get(ch, 0.0):>9.2f}" for ch in all_channels)
+            best = max(row.items(), key=lambda kv: kv[1])[0] if row else None
+            print(f"  {bay:<4}{cells}   -> ch{best}")
+
+    if args.write_map:
+        pairs = {}
+        for item in args.write_map.split(","):
+            bay, _, channel = item.partition("=")
+            bay, channel = bay.strip(), channel.strip()
+            if not bay or not channel.isdigit():
+                print(f"error: cannot parse {item!r}, want BAY=CHANNEL", file=sys.stderr)
+                return 2
+            pairs[bay] = int(channel)
+        clashes = {}
+        for bay, channel in pairs.items():
+            clashes.setdefault(channel, []).append(bay)
+        duplicated = {c: b for c, b in clashes.items() if len(b) > 1}
+        if duplicated:
+            print(f"error: one channel for several bays: {duplicated}", file=sys.stderr)
+            return 1
+        document = {
+            "comment": ("Bay -> TCA9548A channel, established by measurement with "
+                        "tools/bench/mag_map.py. Never assume B1=CH0."),
+            "established_by": "tools/bench/mag_map.py --write-map",
+            "established_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "bays": {bay: {"channel": pairs.get(bay)} for bay in args.bays},
+        }
+        os.makedirs(os.path.dirname(args.config), exist_ok=True)
+        tmp = args.config + ".writing"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(document, fh, indent=2)
+            fh.write("\n")
+        os.replace(tmp, args.config)
+        print(f"\n  wrote {args.config}")
+        print(f"  mapped: {pairs}")
+        for bay in args.bays:
+            if bay not in pairs:
+                print(f"  {bay} left null - it will read UNKNOWN, not occupied")
+        return 0
+
+    if args.matrix:
+        print("\n  (matrix only - nothing written)")
+        return 0
 
     print("mapping:")
     used = {}
