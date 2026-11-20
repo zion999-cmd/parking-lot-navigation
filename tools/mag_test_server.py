@@ -273,7 +273,13 @@ def make_handler(state):
             if self.path in ("/", "/index.html"):
                 try:
                     with open(HTML_PATH, encoding="utf-8") as handle:
-                        self._send(200, handle.read(), "text/html; charset=utf-8")
+                        payload = handle.read().encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.send_header("Cache-Control", "no-store")   # always the current page
+                    self.end_headers()
+                    self.wfile.write(payload)
                 except OSError as exc:
                     self._send(500, f"cannot read {HTML_PATH}: {exc}", "text/plain")
                 return

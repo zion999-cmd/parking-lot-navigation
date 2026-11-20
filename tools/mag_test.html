@@ -105,22 +105,32 @@ function renderCards(bays) {
   }
 }
 
-function renderChannels(channels, currentMapping) {
+function bayForChannel(channel, currentMapping) {
+  const hit = Object.entries(currentMapping).find(([, value]) => value === channel);
+  return hit ? hit[0] : "";
+}
+
+function ensureChannelRows(channels) {
+  // Rows are built once per set of channels. Rebuilding them on every refresh destroyed any <select>
+  // the operator had just opened, which is why the bay column could not be used at all.
   const body = document.getElementById("channels");
-  const options = ch => {
-    const selected = Object.entries(currentMapping).find(([, value]) => value === ch);
-    return `<option value="">—</option>` + BAYS.map(bay =>
-      `<option value="${bay}" ${selected && selected[0] === bay ? "selected" : ""}>${bay}</option>`).join("");
-  };
+  const signature = channels.map(c => c.ch).join(",");
+  if (body.dataset.channels === signature) return;
+  body.dataset.channels = signature;
   body.innerHTML = channels.map(c => `
     <tr>
       <td>ch${c.ch}</td>
-      <td>${c.x}</td>
-      <td>${c.y}</td>
-      <td>${c.z}</td>
-      <td>${c.field_ut === null ? "—" : c.field_ut.toFixed(2)}</td>
-      <td class="${c.age > 2 ? "stale" : ""}">${c.age.toFixed(1)} s</td>
-      <td><select data-ch="${c.ch}">${options(c.ch)}</select></td>
+      <td id="cx-${c.ch}">—</td>
+      <td id="cy-${c.ch}">—</td>
+      <td id="cz-${c.ch}">—</td>
+      <td id="cf-${c.ch}">—</td>
+      <td id="ca-${c.ch}">—</td>
+      <td>
+        <select id="cmap-${c.ch}" data-ch="${c.ch}">
+          <option value="">—</option>
+          ${BAYS.map(bay => `<option value="${bay}">${bay}</option>`).join("")}
+        </select>
+      </td>
     </tr>`).join("");
   for (const select of body.querySelectorAll("select")) {
     select.onchange = async event => {
@@ -128,13 +138,41 @@ function renderChannels(channels, currentMapping) {
       const bay = event.target.value;
       const pairs = {};
       for (const name of BAYS) {
-        if (mapping[name] === channel) pairs[name] = null;      // one channel, one bay
+        if (mapping[name] === channel) pairs[name] = null;     // one channel, one bay
       }
       if (bay) pairs[bay] = channel;
       await post("/api/map", { pairs });
       await tick();
     };
   }
+}
+
+function updateChannelRows(channels, currentMapping) {
+  for (const c of channels) {
+    const cells = { x: `cx-${c.ch}`, y: `cy-${c.ch}`, z: `cz-${c.ch}`,
+                    f: `cf-${c.ch}`, a: `ca-${c.ch}` };
+    const set = (id, text, stale) => {
+      const node = document.getElementById(id);
+      if (!node) return;
+      node.textContent = text;
+      if (id === cells.a) node.className = stale ? "stale" : "";
+    };
+    set(cells.x, c.x);
+    set(cells.y, c.y);
+    set(cells.z, c.z);
+    set(cells.f, c.field_ut === null ? "—" : c.field_ut.toFixed(2));
+    set(cells.a, c.age.toFixed(1) + " s", c.age > 2);
+    const select = document.getElementById(`cmap-${c.ch}`);
+    // Never move a dropdown the operator is using.
+    if (select && document.activeElement !== select) {
+      select.value = bayForChannel(c.ch, currentMapping);
+    }
+  }
+}
+
+function renderChannels(channels, currentMapping) {
+  ensureChannelRows(channels);
+  updateChannelRows(channels, currentMapping);
 }
 
 async function tick() {
