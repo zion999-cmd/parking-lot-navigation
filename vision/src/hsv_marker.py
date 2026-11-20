@@ -54,6 +54,13 @@ MAX_SHAPE = 0.300
 # The arrow does not leave the table, so anything outside this is not it.
 ROI = (0, 60, 800, 560)
 
+# The bottom strip of the picture is the LED band on the table edge, and a red blob there is the
+# single most persistent false positive this detector has. Narrowing the whole ROI to exclude it
+# (60, 80, 640, 460) also cut off the left and right columns, which is where five of the eight
+# calibrated arrow positions sit - measured: 32/32 positions inside the old ROI, 9/32 inside the
+# narrow one. So the guard is a band, not a smaller rectangle.
+BOTTOM_GUARD_Y = 550      # nothing whose centre is below this is the arrow (measured y max: 490)
+
 _reference: Optional[np.ndarray] = None
 _reference_failed = False
 
@@ -252,6 +259,8 @@ def candidates(frame: np.ndarray, centre: Optional[Tuple[float, float]] = None,
             if w < MIN_WIDTH or h < MIN_HEIGHT:
                 continue
             cx, cy = float(cents[i][0]) + x0, float(cents[i][1]) + y0
+            if cy >= BOTTOM_GUARD_Y:
+                continue                      # the LED band, not the car
             aspect = w / float(h)
             if aspect < MIN_ASPECT or aspect > MAX_ASPECT:
                 continue
