@@ -28,6 +28,7 @@ Exit status is 0 when every channel cleared the SNR bar, 1 otherwise, so this ca
 import argparse
 import csv
 import json
+import math
 import statistics
 import sys
 import time
@@ -81,6 +82,42 @@ def collect(url, seconds, rate_hz, label, say):
     return samples, misses, taken
 
 
+def window_means(values, size):
+    """Means of consecutive groups of `size` samples.
+
+    A bay decision never rests on one sample: the detector averages, and averaging shrinks white
+    noise by sqrt(n). Reporting only the per-sample sigma makes a perfectly usable channel look
+    hopeless - measured here at 1.0-1.5 uT per sample around a 2 uT signal, i.e. SNR 2, which
+    becomes SNR 6 over a one-second window and 12 over five.
+    """
+    size = max(1, int(size))
+    return [statistics.fmean(values[i:i + size])
+            for i in range(0, len(values) - size + 1, size)]
+
+
+def windowed_snr(empty, car, rate, seconds, sigma_sample=None):
+    """delta, sigma and SNR after averaging over `seconds`.
+
+    sigma comes from the spread of the windowed baseline when there are enough windows to measure it,
+    and otherwise from the per-sample sigma divided by sqrt(n) - the whole point being that averaging
+    a longer window shrinks the noise even when a short phase yields only one or two windows.
+    """
+    size = max(1, round(rate * seconds))
+    e = window_means(empty, size)
+    c = window_means(car, size)
+    if not e or not c:
+        return None, None, None
+    delta = statistics.fmean(c) - statistics.fmean(e)
+    if len(e) > 1:
+        sigma = statistics.stdev(e)
+    elif sigma_sample:
+        sigma = sigma_sample / math.sqrt(size)
+    else:
+        sigma = 0.0
+    snr = abs(delta) / sigma if sigma > 0 else None
+    return delta, sigma, snr
+
+
 def summarise(samples):
     """mean and sample sigma per key; sigma is None when there are fewer than two samples."""
     out = {}
@@ -123,18 +160,21 @@ def main(argv):
 
     rows = []
     empty_runs, car_runs = [], []
+    empty_raw, car_raw = [], []
     for rnd in range(args.rounds):
         say(f"round {rnd + 1}/{args.rounds}\n")
         if not args.yes:
             input("  make sure the bay is EMPTY, then press Enter... ")
         samples, misses, taken = collect(url, args.seconds, args.rate, "empty", say)
         empty_runs.append(summarise(samples))
+        empty_raw.append(samples)
         say(f"  {taken} samples, {misses} miss(es)\n")
 
         if not args.yes:
             input("  put the car on the sensor, then press Enter... ")
         samples, misses, taken = collect(url, args.seconds, args.rate, "car  ", say)
         car_runs.append(summarise(samples))
+        car_raw.append(samples)
         say(f"  {taken} samples, {misses} miss(es)\n\n")
 
     # Pool the rounds rather than averaging means: with few rounds a mean of means hides how much
@@ -178,6 +218,33 @@ def main(argv):
             snr = (abs(delta) / sigma) if sigma > 0 else 0.0
             cells.append(f"{delta:>+9.1f} {snr:>6.1f}")
         print(f"{channel:>3} " + " ".join(cells))
+
+    # The per-sample table above answers "is there a signal at all"; this one answers the question the
+    # detector actually asks - can a threshold live here once the samples are averaged?
+    for seconds in (1.0, 3.0):
+        print(f"\naveraged over {seconds:g} s (sigma of the windowed baseline, SNR per axis and |B|)")
+        print(f"{'ch':>3} {'axis':>5} {'delta_uT':>10} {'sigma_uT':>10} {'SNR':>6}")
+        for channel in channels:
+            for axis in ("x", "y", "z", "B"):
+                # Window the raw samples, not the per-round means: a mean per round would leave one
+                # value per round and nothing to average within.
+                empty_vals, car_vals = [], []
+                for run in empty_raw:
+                    empty_vals.extend(run.get((channel, axis), []))
+                for run in car_raw:
+                    car_vals.extend(run.get((channel, axis), []))
+                if not empty_vals or not car_vals:
+                    continue
+                sample_sigmas = [r[(channel, axis)][1] for r in empty_runs
+                                 if (channel, axis) in r and r[(channel, axis)][1] is not None]
+                sigma_sample = statistics.fmean(sample_sigmas) if sample_sigmas else None
+                delta, sigma, snr = windowed_snr(empty_vals, car_vals, args.rate, seconds,
+                                                 sigma_sample)
+                if delta is None:
+                    continue
+                scale = 1.0 if axis == "B" else 0.1     # raw counts -> uT at the 30 G scale
+                print(f"{channel:>3} {axis:>5} {delta * scale:>+10.2f} {sigma * scale:>10.2f} "
+                      f"{(snr or 0):>6.1f}")
 
     if args.csv:
         with open(args.csv, "w", newline="", encoding="utf-8") as fh:
