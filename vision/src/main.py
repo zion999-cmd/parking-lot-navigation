@@ -35,6 +35,7 @@ import math
 import os
 import shutil
 import sys
+import threading
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -46,6 +47,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import contract                                                # noqa: E402
 import emit_map                                                # noqa: E402
 import live_view                                               # noqa: E402
+import mag_baseline                                             # noqa: E402
 import vehicle                                                 # noqa: E402
 from road_network import RoadNetwork                            # noqa: E402
 from alignment import Aligner                                    # noqa: E402
@@ -101,6 +103,171 @@ def fetch_mag(source, timeout=1.5):
             return json.loads(response.read().decode("utf-8"))
     except Exception as exc:                        # noqa: BLE001 - any failure is "no reading"
         return {"error": f"{type(exc).__name__}: {exc}", "url": url}
+
+
+def load_mag_mapping(path, override=None):
+    """Bay -> channel mapping, from the measured config plus an optional CLI override.
+
+    A bay without a channel stays None, which the judge reports as UNKNOWN. That is the whole point
+    of P0005 section 3: an unmapped bay must never be guessed into OCCUPIED.
+    """
+    mapping = {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            document = json.load(handle)
+        for bay, entry in (document.get("bays") or {}).items():
+            mapping[bay] = (entry or {}).get("channel")
+    except (OSError, ValueError):
+        pass
+    if override:
+        for item in override.split(","):
+            bay, _, channel = item.partition("=")
+            bay, channel = bay.strip(), channel.strip()
+            if bay and channel.isdigit():
+                mapping[bay] = int(channel)
+    return {bay: channel for bay, channel in mapping.items() if bay}
+
+
+class MagHelper:
+    """P0005: the magnetometer baseline and per-bay judgement beside the vision run.
+
+    Deliberately a bystander. It polls /api/mag in its own thread and reports; it never writes into
+    `results`, never changes the detector threshold, and never touches the strip or the route. If the
+    magnetometers are missing, unmapped or stale, it says UNKNOWN and the vision run is unaffected.
+    """
+
+    BASELINE_PATH = os.path.join(ROOT, "data", "mag_baseline.json")
+    MAPPING_PATH = os.path.join(ROOT, "config", "mag_bays.json")
+
+    def __init__(self, source, mapping, log_path=None, threshold=None, hysteresis=None):
+        self.url = mag_baseline.mag_url(source)
+        self.source = source
+        self.mapping = mapping
+        self.log_path = log_path
+        self.threshold = threshold
+        self.hysteresis = hysteresis
+        self.poller = None
+        self.baseline = None
+        self.judge = None
+        self._capturing = False
+        self._lock = threading.Lock()
+        self._last_report = 0.0
+        self._log_fh = None
+        self._log = None
+
+    @property
+    def available(self):
+        return self.url is not None
+
+    def start(self):
+        if not self.available:
+            return False
+        self.poller = mag_baseline.MagPoller(self.url)
+        self.poller.start()
+        self.baseline = mag_baseline.MagBaseline.load(self.BASELINE_PATH)
+        if self.baseline is not None:
+            if self.threshold is not None:
+                self.baseline.threshold_ut = self.threshold
+            if self.hysteresis is not None:
+                self.baseline.hysteresis_ut = self.hysteresis
+            valid = sum(1 for entry in self.baseline.bays.values() if entry.get("valid"))
+            print(f"  mag: baseline loaded ({valid}/{len(self.baseline.bays)} bay(s) valid), "
+                  f"threshold {self.baseline.threshold_ut:.1f} uT")
+            for bay, reason in self.baseline.invalid_bays().items():
+                print(f"    {bay}: {reason}")
+        else:
+            print("  mag: no baseline yet - press r with B1-B4 empty to capture one")
+        self.judge = mag_baseline.MagJudge(self.baseline)
+        if self.log_path:
+            os.makedirs(os.path.dirname(os.path.abspath(self.log_path)), exist_ok=True)
+            new = not os.path.exists(self.log_path)
+            self._log_fh = open(self.log_path, "a", newline="", encoding="utf-8")
+            self._log = csv.writer(self._log_fh)
+            if new:
+                self._log.writerow(["t", "bay", "vision", "vision_ratio", "mag", "delta_ut",
+                                    "channel"])
+        unmapped = [bay for bay, channel in self.mapping.items() if channel is None]
+        if unmapped:
+            print(f"  mag: no channel mapped for {', '.join(unmapped)} - they will read UNKNOWN")
+        return True
+
+    def calibrate(self, duration=3.0):
+        """Start the magnetometer baseline in a thread; returns immediately.
+
+        The capture is three seconds of polling the poller already does, so nothing here can delay a
+        frame. A failed capture leaves the previous baseline in place rather than overwriting it.
+        """
+        with self._lock:
+            if self._capturing:
+                print("  mag: already sampling a baseline")
+                return False
+            self._capturing = True
+        threading.Thread(target=self._calibrate_worker, args=(duration,), daemon=True,
+                         name="mag-calibrate").start()
+        print(f"  mag: sampling {duration:g} s of baseline in the background - "
+              f"every bay must be EMPTY")
+        return True
+
+    def _calibrate_worker(self, duration):
+        try:
+            baseline = mag_baseline.MagBaseline.capture(
+                self.poller, self.mapping, duration=duration, source=self.source,
+                threshold_ut=self.threshold, hysteresis_ut=self.hysteresis)
+            valid = sum(1 for entry in baseline.bays.values() if entry.get("valid"))
+            if valid == 0:
+                print("  mag: baseline failed for every bay - the previous one is untouched")
+                for bay, reason in baseline.invalid_bays().items():
+                    print(f"    {bay}: {reason}")
+                return
+            baseline.save(self.BASELINE_PATH)
+            self.baseline = baseline
+            self.judge = mag_baseline.MagJudge(baseline)
+            print(f"  mag: baseline saved ({valid}/{len(baseline.bays)} bay(s) valid, "
+                  f"threshold {baseline.threshold_ut:.1f} uT) -> {self.BASELINE_PATH}")
+            for bay, reason in baseline.invalid_bays().items():
+                print(f"    {bay}: {reason}")
+        except Exception as exc:                     # noqa: BLE001 - never take the viewer down
+            print(f"  mag: baseline failed: {type(exc).__name__}: {exc}")
+        finally:
+            with self._lock:
+                self._capturing = False
+
+    def report(self, results, every=2.0, now=None):
+        """Print and log vision vs magnetometer, throttled. Never raises into the frame loop."""
+        now = time.time() if now is None else now
+        if self.judge is None or now - self._last_report < every:
+            return
+        self._last_report = now
+        try:
+            states = self.judge.update(self.poller.snapshot(), now)
+        except Exception as exc:                     # noqa: BLE001
+            print(f"  mag: judgement failed: {type(exc).__name__}: {exc}")
+            return
+        parts = []
+        for bay in sorted(self.mapping):
+            entry = states.get(bay) or {}
+            vision = results.get(bay)
+            vision_state = vision.state if vision is not None else "-"
+            delta = entry.get("delta_ut")
+            text = f"{bay} vis={vision_state} mag={entry.get('state', '?')}"
+            if delta is not None:
+                text += f" {delta:.1f}uT"
+            parts.append(text)
+            if self._log is not None:
+                self._log.writerow([f"{now:.3f}", bay, vision_state,
+                                    f"{vision.changed_ratio:.5f}" if vision is not None else "",
+                                    entry.get("state", ""),
+                                    "" if delta is None else f"{delta:.3f}",
+                                    entry.get("channel")])
+        if self._log_fh is not None:
+            self._log_fh.flush()
+        print("  mag  " + "   ".join(parts))
+
+    def close(self):
+        if self.poller is not None:
+            self.poller.stop()
+        if self._log_fh is not None:
+            self._log_fh.close()
 
 
 def annotate(frame: np.ndarray, spots: List[Spot], results: Dict[str, SpotResult],
@@ -668,6 +835,12 @@ def main() -> int:
                     help="show the cv2 window even when serving the board. Serving implies no "
                          "window: the board is the window, and the one here is only wanted to "
                          "edit bays and roads, which is a job for src/calibration.py")
+    ap.add_argument("--mag-map", metavar="B4=4,B2=1",
+                    help="override vision/config/mag_bays.json: bay=channel pairs")
+    ap.add_argument("--mag-log", metavar="CSV",
+                    help="append vision-vs-magnetometer rows (P0005 comparison table)")
+    ap.add_argument("--mag-threshold", type=float, default=None,
+                    help="occupied threshold in uT (default: the measured 3.8)")
     ap.add_argument("--capture-reference", action="store_true",
                     help="capture the empty-bay reference from the next frame, then exit. Takes "
                          "the place of pressing r in the window, for runs that have none")
@@ -787,6 +960,13 @@ def main() -> int:
               f"{aligner._work_size[0]}px, bay pitch ~{pitch:.0f}px, "
               f"min correlation {args.align_min_corr}")
 
+    mapping = load_mag_mapping(MagHelper.MAPPING_PATH, args.mag_map)
+    mag = None
+    if mag_baseline.mag_url(args.source) is not None and mapping:
+        mag = MagHelper(args.source, mapping, log_path=args.mag_log,
+                        threshold=args.mag_threshold)
+        mag.start()
+
     if not have_reference and not args.capture_reference:
         msg = (f"no empty-bay reference yet ({args.reference}).\n"
                f"  With all bays empty, run the windowed mode and press 'r'.")
@@ -873,6 +1053,8 @@ def main() -> int:
         while True:
             if frame is not None and args.capture_reference:
                 ok = capture_reference(frame, args.reference)
+                if ok and mag is not None:
+                    mag.calibrate()
                 if ok:
                     print(f"captured the empty reference -> {args.reference}")
                     print("  (all bays must have been empty, or the reference contains a car)")
@@ -1013,6 +1195,9 @@ def main() -> int:
                 snapshot_done = True
                 break            # --save-debug is a one-shot diagnostic
 
+            if mag is not None:
+                mag.report(results)
+
             if elapsed - last_print >= print_every:
                 last_print = elapsed
                 if have_reference:
@@ -1096,6 +1281,11 @@ def main() -> int:
                     capture_reference(frame, args.reference)
                     detector.set_reference(frame, spots)
                     have_reference = True
+                    # P0005: the same key starts the magnetometer baseline, in its own thread, so
+                    # the picture and the field are captured at the same moment without stalling
+                    # the frame loop for three seconds.
+                    if mag is not None:
+                        mag.calibrate()
                 elif key == ord('e'):
                     # Correct the calibration without leaving the viewer: the offset is
                     # plainly visible here, which is the whole point.
@@ -1202,6 +1392,9 @@ def main() -> int:
             cv2.destroyAllWindows()
 
     # -- summary -------------------------------------------------------------
+    if mag is not None:
+        mag.close()
+
     elapsed = time.time() - started
     print(f"\nran {elapsed:.1f}s, {frames} frames ({frames / max(elapsed, 1e-6):.1f} fps)")
     if cam is not None:

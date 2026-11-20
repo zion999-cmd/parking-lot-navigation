@@ -58,3 +58,8 @@ tools/hero_lab/data/
 vision/data/hsv_marker/calibration.jsonl
 vision/data/hsv_marker/calibration.recovered.jsonl
 vision/data/hsv_marker/frames/
+
+# P0005 runtime data: baselines and comparison logs are produced per session and per venue.
+vision/data/mag_baseline.json
+vision/data/mag_baseline.json.writing
+mag_bench.csv
