@@ -79,6 +79,9 @@ async function post(path, body) {
 function stateClass(state) { return state === "EMPTY" ? "EMPTY" : state === "OCCUPIED" ? "OCCUPIED" : "UNKNOWN"; }
 
 function renderCards(bays, thresholds) {
+  // A missing argument here used to throw and abort the whole refresh, which left every dropdown
+  // unassigned and looked exactly like the bay mapping disappearing.
+  thresholds = thresholds || { enter: null, exit: null };
   const host = document.getElementById("cards");
   if (host.children.length !== bays.length) {
     host.innerHTML = bays.map(bay => `
@@ -227,7 +230,7 @@ async function tick() {
     note.className = "note" + (/failed/.test(data.capture_note || "") ? " bad" : "");
     document.getElementById("baseline").disabled = false;
   }
-  renderCards(data.bays || []);
+  renderCards(data.bays || [], { enter: null, exit: null });
   renderChannels(data.channels || [], mapping);
 }
 
