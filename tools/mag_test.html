@@ -46,6 +46,7 @@
 <div class="sub">
   <span id="board">连接中…</span>
   <span id="baseinfo"></span>
+  <span id="build" style="opacity:.6"></span>
 </div>
 
 <div class="bar">
@@ -196,6 +197,7 @@ async function tick() {
   document.getElementById("board").textContent =
     data.board_ok ? `板子 ${data.board} · 轮询 ${data.polls} 次 · 重复 ${data.duplicates} 次`
                   : `板子 ${data.board || "?"} 无响应 ${data.error ? "(" + data.error + ")" : ""}`;
+  document.getElementById("build").textContent = data.build ? ` · 后台版本 ${data.build}` : "";
   const base = data.baseline || {};
   document.getElementById("baseinfo").textContent = base.loaded
     ? ` · Baseline: ${base.valid}/${base.total} 有效 · 阈值 ${data.threshold_ut} µT`

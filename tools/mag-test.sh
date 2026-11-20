@@ -32,12 +32,15 @@ if [ -z "$PY" ]; then
     exit 1
 fi
 
-# Already running? Just bring the page up again.
+# Always restart the backend. An older process on the port keeps serving the old page and the old
+# judging code - which reads exactly like a hardware or algorithm failure and wasted a round of
+# debugging once. This is a bench tool; starting it means starting it fresh.
 if curl -sf --max-time 2 "${URL}api/state" >/dev/null 2>&1; then
-    echo "already running: ${URL}"
-    if [ "${1:-}" != "--no-open" ]; then open "$URL"; fi
-    exit 0
+    echo "restarting the backend on port ${PORT} (old instance found)"
+    pkill -f "mag_test_server.py --port ${PORT}" 2>/dev/null || true
+    sleep 1
 fi
+pkill -f "mag_test_server.py --port ${PORT}" 2>/dev/null || true
 
 # The server opens the browser itself, so pass --no-open through and let it decide.
 # -u so the banner appears immediately even when the output is piped to a log.

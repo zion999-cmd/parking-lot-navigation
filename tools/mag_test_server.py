@@ -26,6 +26,19 @@ MAPPING_PATH = os.path.join(ROOT, "vision", "config", "mag_bays.json")
 BASELINE_PATH = os.path.join(ROOT, "vision", "data", "mag_baseline.json")
 CAMERA_CACHE = os.path.join(ROOT, "run", "camera.txt")
 HTML_PATH = os.path.join(ROOT, "tools", "mag_test.html")
+
+
+def build_stamp():
+    newest = 0.0
+    for path in (os.path.abspath(__file__), HTML_PATH):
+        try:
+            newest = max(newest, os.path.getmtime(path))
+        except OSError:
+            pass
+    return time.strftime("%H:%M:%S", time.localtime(newest))
+
+
+BUILD = build_stamp()
 BAYS = ("B1", "B2", "B3", "B4")
 
 
@@ -245,6 +258,9 @@ class TestState:
             "bays": bays,
             "channels": channels,
             "mapping": self.mapping,
+            # Which code is running, so a stale page or a stale backend is visible on the screen
+            # instead of being mistaken for a measurement.
+            "build": BUILD,
         }
 
 
@@ -336,6 +352,7 @@ def main(argv):
         print("         ./tools/mag-test.sh --host 192.168.3.118", file=sys.stderr)
         return 2
     print(f"board      {board}  ({origin})")
+    print(f"build      {BUILD}")
     if not mag_answers(board):
         print(f"error: {board}/api/mag does not answer; the page will show UNKNOWN",
               file=sys.stderr)
