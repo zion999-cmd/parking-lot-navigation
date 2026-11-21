@@ -1,18 +1,56 @@
 #!/usr/bin/env bash
 #
-# Start the stack. This is a thin wrapper around ./start.sh and nothing else.
+# Run main.py by hand, in the conda environment that has cv2 and numpy.
 #
-#   ./run.sh                       # whole stack: serve + vision (+ relays 8020/8021) + beacon + ota
-#   ./run.sh --source http://x/stream
-#   ./run.sh stop --all
-#   ./run.sh status
+#   ./run.sh                              # default camera, windowed
+#   ./run.sh --source http://192.168.3.118/stream
+#   ./run.sh --headless --duration 10     # no window, print the per-bay summary and exit
+#   ./run.sh --help                       # every main.py flag
 #
-# It used to `exec main.py` itself, with different arguments from the ones start.sh uses: no
-# --annotated-port/--raw-port, no log file, no restart loop, and no record in the stack's pid files.
-# That is how two main.py processes ended up writing vision/out/parking_state.json at the same time
-# and the tracked vehicle appeared to jump between two positions on board.html. One entry point, one
-# set of arguments, one owner of the state file.
+# This is the *manual* entry point: it runs main.py in the foreground, shows the OpenCV window, and
+# returns when main.py does. The system stack - serve.py, the restart supervisor, the relays, the
+# pid files, the logs, beacon and the OTA server - is ./start.sh. Do not run both: main.py writes
+# vision/out/parking_state.json, and two writers make the tracked vehicle jump on every page, so
+# main.py refuses to start while another live copy owns that file.
+#
+#   ./run.sh          <- one main.py, foreground, you watch it
+#   ./start.sh        <- the whole system, supervised, logs in run/
 
 set -euo pipefail
-here="$(cd "$(dirname "$0")" && pwd)"
-exec "$here/start.sh" "$@"
+
+VISION_PYTHON="${PY_VISION:-/usr/local/Caskroom/miniconda/base/envs/vision-dev/bin/python}"
+PROJECT="/Users/bx/Esp32/parking-lot-navigation"
+MAIN="$PROJECT/vision/src/main.py"
+
+if [ ! -x "$VISION_PYTHON" ]; then
+    echo "error: interpreter not found: $VISION_PYTHON" >&2
+    echo "       override with PY_VISION=/path/to/vision-dev/bin/python" >&2
+    exit 1
+fi
+if [ ! -f "$MAIN" ]; then
+    echo "error: main.py not found: $MAIN" >&2
+    exit 1
+fi
+
+# Default camera: whatever start.sh last found, else the board's usual address. An explicit
+# --source on the command line wins, because it comes after these.
+SOURCE="${PARKING_SOURCE:-}"
+if [ -z "$SOURCE" ] && [ -f "$PROJECT/run/camera.txt" ]; then
+    SOURCE="$(cat "$PROJECT/run/camera.txt")"
+fi
+if [ -z "$SOURCE" ]; then
+    SOURCE="http://192.168.3.118/stream"
+fi
+
+for arg in "$@"; do
+    if [ "$arg" = "--source" ] || [ "${arg#--source=}" != "$arg" ]; then
+        SOURCE=""                      # already given; do not add a second one
+        break
+    fi
+done
+
+cd "$PROJECT"
+if [ -n "$SOURCE" ]; then
+    exec "$VISION_PYTHON" "$MAIN" --source "$SOURCE" "$@"
+fi
+exec "$VISION_PYTHON" "$MAIN" "$@"
