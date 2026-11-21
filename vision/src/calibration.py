@@ -171,6 +171,7 @@ class CalibrationApp:
         # layer here rather than only in tools/pick_region.py because this is where a person goes to
         # calibrate, and an outline nobody can see in this window is an outline nobody trusts.
         self.lot = self._load_lot_region()
+        self._lot_drag = None          # index of the point being dragged, or None
         # Set while a bay's derived entrance is being dragged, so that drag is not taken for
         # moving a road point or for drawing a new one.
         self._access_drag: Optional[str] = None
@@ -410,6 +411,13 @@ class CalibrationApp:
         import math
         return sorted(points, key=lambda p: math.atan2(p[1] - cy, p[0] - cx))
 
+    def _lot_point_at(self, x, y, tolerance=12.0):
+        """Which corner is under the cursor, if any."""
+        for index, (px, py) in enumerate(self.lot):
+            if abs(px - x) <= tolerance and abs(py - y) <= tolerance:
+                return index
+        return None
+
     def _draw_lot_region(self, canvas, faint=False):
         if len(self.lot) < 2:
             return
@@ -462,12 +470,25 @@ class CalibrationApp:
                 if key is not None:
                     self.act(key)
                     return
-                if len(self.lot) < 4:
+                hit = self._lot_point_at(x, y)
+                if hit is not None:
+                    self._lot_drag = hit          # grab an existing corner and move it
+                    self.ed.message = f"moving point {hit + 1}"
+                elif len(self.lot) < 4:
                     self.lot.append((float(x), float(y)))
+                    self._lot_drag = len(self.lot) - 1
                     self.ed.message = (f"lot region: {len(self.lot)}/4 points"
                                        + ("  -  Enter or s to save" if len(self.lot) == 4 else ""))
+            elif event == cv2.EVENT_MOUSEMOVE and flags & cv2.EVENT_FLAG_LBUTTON:
+                if self._lot_drag is not None and self._lot_drag < len(self.lot):
+                    self.lot[self._lot_drag] = (float(x), float(y))
+            elif event == cv2.EVENT_LBUTTONUP:
+                if self._lot_drag is not None:
+                    self._lot_drag = None
                     if len(self.lot) == 4:
                         self.lot = self._ordered_quad(self.lot)
+                    self.ed.message = (f"lot region: {len(self.lot)}/4 points"
+                                       + ("  -  Enter or s to save" if len(self.lot) == 4 else ""))
             return
 
         if event == cv2.EVENT_LBUTTONDOWN:
@@ -732,19 +753,22 @@ class CalibrationApp:
             order = ("spots", "roads", "lot")
             self.switch_layer(order[(order.index(self.layer) + 1) % len(order)])
             return True
+        # The lot layer handles only its own keys and lets everything else through: swallowing the
+        # whole keyboard here is why q could not leave the editor from this layer.
         if self.layer == "lot":
             if key in ("s", "\r", "\n"):
                 self._save_lot_region()
                 return True
             if key == "c":
                 self.lot = []
+                self._lot_drag = None
                 self.ed.message = "lot region cleared - click four corners"
                 return True
             if key == "z" and self.lot:
                 self.lot.pop()
+                self._lot_drag = None
                 self.ed.message = f"lot region: {len(self.lot)}/4 points"
                 return True
-            return True
         if key in ("q", "\x1b"):
             self._save_all()
             return False

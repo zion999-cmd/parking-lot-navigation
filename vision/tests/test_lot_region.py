@@ -100,3 +100,54 @@ def test_editor_renders_a_region_without_crashing():
             app.switch_layer(layer)
             canvas = app.render(frame)
             assert canvas.shape == frame.shape
+
+
+def _lot_app():
+    import calibration as C
+    import spot_editor
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    editor = spot_editor.SpotEditor((600, 800))
+    editor.load(os.path.join(root, "config", "parking_spots.json"))
+    app = C.CalibrationApp(editor, os.path.join(root, "config", "parking_spots.json"))
+    app.switch_layer("lot")
+    return app
+
+
+def test_q_and_escape_quit_from_the_lot_layer():
+    """The lot layer used to swallow every key, which made q do nothing there."""
+    for key in ("q", "\x1b"):
+        app = _lot_app()
+        assert app.act(key) is False, key
+
+
+def test_t_still_cycles_layers_from_the_lot_layer():
+    app = _lot_app()
+    assert app.act("t") is True
+    assert app.layer == "spots"
+
+
+def test_a_corner_can_be_dragged():
+    app = _lot_app()
+    app.lot = [(200.0, 200.0), (600.0, 200.0), (600.0, 500.0), (200.0, 500.0)]
+    app.on_mouse(1, 203, 197, 0, None)          # press near the first corner
+    assert app._lot_drag == 0
+    app.on_mouse(0, 320, 260, 1, None)          # drag with the button held
+    assert app.lot[0] == (320.0, 260.0)
+    app.on_mouse(4, 320, 260, 0, None)          # release
+    assert app._lot_drag is None
+    assert len(app.lot) == 4
+
+
+def test_pressing_away_from_a_corner_adds_one():
+    app = _lot_app()
+    app.lot = [(200.0, 200.0)]
+    app.on_mouse(1, 500, 400, 0, None)
+    assert len(app.lot) == 2 and app.lot[1] == (500.0, 400.0)
+
+
+def test_no_more_than_four_points():
+    app = _lot_app()
+    app.lot = [(100.0, 100.0), (500.0, 100.0), (500.0, 400.0), (100.0, 400.0)]
+    app.on_mouse(1, 300, 300, 0, None)          # inside the quad, not near a corner
+    assert len(app.lot) == 4
