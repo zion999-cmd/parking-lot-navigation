@@ -594,6 +594,7 @@ const trustedFix = (v) => !!v && v.visible !== false && !v.position_stale &&
 // ============================================================ planning
 async function startNavigation(id) {
   targetId = String(id);
+  lastRefusalNote = null;          // a new navigation starts with nothing said yet
   PHASE = "NAVIGATING";
   document.body.classList.remove("arrived");
   lastPlan = { x: null, y: null, at: 0 };
@@ -643,6 +644,10 @@ async function requestRoute(manual) {
   }
   if (doc) {
     ROUTE = doc;
+    // A working plan clears the "already said" state, so the same refusal can be reported again
+    // if it comes back. Without this the note stayed from the first refusal for the rest of the
+    // page life and the second occurrence was silently swallowed.
+    lastRefusalNote = null;
     const v = vehicleOf();
     lastPlan = { x: v?.x ?? null, y: v?.y ?? null, at: Date.now() };
   } else {
@@ -671,6 +676,7 @@ async function requestRoute(manual) {
 }
 
 function cancelNavigation() {
+  lastRefusalNote = null;
   PHASE = "IDLE"; targetId = null; ROUTE = null;
   document.body.classList.remove("arrived");
   updateHud();
