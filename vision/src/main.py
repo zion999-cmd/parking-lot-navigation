@@ -439,6 +439,76 @@ def status_line(spots: List[Spot], results: Dict[str, SpotResult],
     return head + " ".join(parts)
 
 
+REFERENCE_TRUST_QUIET_PCT = 70.0   # the same number the audit already printed its verdict with
+
+
+def reference_trust(ref: np.ndarray, live: np.ndarray, spots: List[Spot],
+                    detector: OccupancyDetector) -> float:
+    """What fraction of bays still read exactly zero against the reference.
+
+    This is the audit's own deciding number, extracted so the running loop can use it instead of only
+    printing it at startup. Measured today: with the room darker than when the reference was captured,
+    the global brightness was 7.3 grey levels lower and only 62% of bays matched - and the bays whose
+    own area had gone darker were published as OCCUPIED all night, turning the strip red.
+    """
+    p = detector.params.normalized()
+    a = detector._prep(ref)
+    b = detector._prep(live)
+    if a.shape != b.shape:
+        return 0.0
+    results = detector.evaluate(live, spots)
+    if not results:
+        return 0.0
+    quiet = sum(1 for r in results.values() if r.changed_ratio < 0.01)
+    return 100.0 * quiet / len(results)
+
+
+# The reference check runs on the live loop, not only at startup: the light can change while the
+# processor is running, and the startup audit was a one-off print that nothing acted on.
+_REFERENCE_HEALTH = {"at": 0.0, "ok": True, "pct": 100.0, "ref": None, "detector": None, "frame": None}
+
+
+def set_reference_for_health(ref, detector):
+    """Give the health check the reference and detector it should compare against."""
+    _REFERENCE_HEALTH.update({"ref": ref, "detector": detector, "at": 0.0})
+
+
+def reference_health(frame=None, force=False):
+    """(trusted, quiet_pct): is the reference still a description of this room?
+
+    Re-evaluated every few seconds. Called with no arguments it uses the frame the loop published.
+    """
+    state = _REFERENCE_HEALTH
+    if frame is not None:
+        state["frame"] = frame
+    now = time.time()
+    if not force and now - state["at"] < 3.0:
+        return state["ok"], state["pct"]
+    state["at"] = now
+    ref, det, live = state.get("ref"), state.get("detector"), state.get("frame")
+    if ref is None or det is None or live is None:
+        return state["ok"], state["pct"]
+    try:
+        pct = reference_trust(ref, live, _REFERENCE_HEALTH_SPOTS, det)
+    except Exception as exc:                       # noqa: BLE001 - never stop the loop for a check
+        print(f"  reference check failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return state["ok"], state["pct"]
+    trusted = pct >= REFERENCE_TRUST_QUIET_PCT
+    if trusted != state["ok"]:
+        print(("reference is usable again" if trusted else
+               f"reference no longer matches the room ({pct:.0f}% of bays still match): publishing "
+               "UNKNOWN instead of bay states - press r with every bay empty"), file=sys.stderr)
+    state["ok"], state["pct"] = trusted, pct
+    return trusted, pct
+
+
+_REFERENCE_HEALTH_SPOTS = []
+
+
+def set_reference_health_spots(spots):
+    global _REFERENCE_HEALTH_SPOTS
+    _REFERENCE_HEALTH_SPOTS = list(spots)
+
 def reference_audit(ref: np.ndarray, live: np.ndarray, spots: List[Spot],
                     detector: OccupancyDetector) -> str:
     """Say whether the reference frame is still usable, and if not, why.
@@ -773,9 +843,9 @@ def state_key(document: dict) -> str:
 
 
 def write_state(args, results, spots, have_reference: bool, stall: float,
-                last_written: float, vehicle_doc: Optional[dict] = None,
-                last_key: Optional[str] = None
-                ) -> Optional[Tuple[float, str]]:
+                  last_written: float, vehicle_doc: Optional[dict] = None,
+                  last_key: Optional[str] = None, frame=None
+                  ) -> Optional[Tuple[float, str]]:
     """Write the live half of the P0002 contract. Returns (when, key) if it wrote, else None.
 
     Written when the state has changed, and otherwise on the heartbeat. A change may go out after
@@ -804,7 +874,18 @@ def write_state(args, results, spots, have_reference: bool, stall: float,
         document = contract.unknown_state([s.id for s in spots], reason,
                                           vehicle=vehicle_doc)
     else:
-        document = contract.build_state(results, vehicle=vehicle_doc)
+        set_reference_health_spots(spots)
+        # A reference that no longer matches the room is not evidence about any bay. Publishing
+        # OCCUPIED for bays that merely went darker is how the strip turned red with the table empty;
+        # publishing EMPTY would be the opposite lie. Say UNKNOWN and name the reason.
+        reference_ok, quiet_pct = reference_health(frame)
+        if not reference_ok:
+            document = contract.build_state(
+                results, vehicle=vehicle_doc,
+                unknown_reason=(f"reference does not match the room ({quiet_pct:.0f}% of bays still "
+                                "match; press r with every bay empty)"))
+        else:
+            document = contract.build_state(results, vehicle=vehicle_doc)
 
     every = max(args.state_every, 0.0)
     key = state_key(document)
@@ -1369,10 +1450,12 @@ def main() -> int:
                 if pose is not None and any((spots, road_net)):
                     location = vehicle.location_of(pose, spots, road_net)
 
+            if detector_ref_frame is not None and detector.has_reference:
+                set_reference_for_health(detector_ref_frame, detector)
             wrote = write_state(args, results, spots, have_reference, stall,
                                 state_written[0],
                                 vehicle_state(pose, location, args.hero_min_confidence) if pose else None,
-                                state_written[1])
+                                state_written[1], frame=frame)
             if wrote is not None:
                 state_written[0], state_written[1] = wrote
 
