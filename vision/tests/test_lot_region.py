@@ -282,3 +282,36 @@ def test_saving_the_bays_does_not_delete_the_lot_region():
         assert document.get("lot_region") == [[210, 120], [700, 120], [700, 520], [210, 520]]
         assert len(document["spots"]) == 48
         assert spot_config.load_lot_region(path) is not None
+
+
+def test_recovery_candidates_are_also_confined_to_the_lot():
+    """The second candidate source used to ignore the outline entirely."""
+    import vehicle
+
+    class Pose:
+        bbox = (60, 300, 30, 20)          # outside REGION
+        centre = (75.0, 310.0)
+        area = 600
+        aspect = 1.5
+        score = 0.9
+        heading = None
+
+    import types
+
+    def fake_detect(frame):
+        return Pose()
+
+    real_arrow, real_aruco = vehicle.red_arrow.detect, vehicle.aruco_hero.detect
+    vehicle.red_arrow.detect = fake_detect
+    vehicle.aruco_hero.detect = fake_detect
+    try:
+        vehicle.set_lot_region(None)
+        assert vehicle._recovery_candidates(np.zeros((600, 800, 3), np.uint8)), "baseline: pose accepted"
+        vehicle.set_lot_region(REGION)
+        assert vehicle._recovery_candidates(np.zeros((600, 800, 3), np.uint8)) == [], "outside dropped"
+        Pose.centre = (400.0, 350.0)      # inside REGION
+        Pose.bbox = (385, 340, 30, 20)
+        assert vehicle._recovery_candidates(np.zeros((600, 800, 3), np.uint8)), "inside kept"
+    finally:
+        vehicle.red_arrow.detect, vehicle.aruco_hero.detect = real_arrow, real_aruco
+        vehicle.set_lot_region(None)

@@ -88,6 +88,9 @@ _DEFAULT_VEHICLE_CONFIG = {
 # The parking-lot outline, set once from the calibration at startup. None means "no outline
 # configured", which keeps the old behaviour: search the whole frame.
 _LOT_REGION = None
+# The last belief verdict, so main.py can publish its confidence in the state document instead of the
+# consumer having to guess whether a position is trustworthy.
+last_verdict = None
 
 
 def set_lot_region(polygon) -> None:
@@ -1061,6 +1064,8 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
                                      max_shape=None, region=_LOT_REGION)
 
     verdict = _belief.update(pool, dt)
+    global last_verdict
+    last_verdict = verdict
 
     if verdict["state"] == hero_belief.LOST or verdict["position"] is None:
         # Nothing trustworthy. Say so. A car reported at the wrong place is worse than a car
@@ -1111,6 +1116,12 @@ def _recovery_candidates(frame: np.ndarray) -> List[dict]:
                  aruco_hero.detect(frame)):
         if pose is None:
             continue
+        # Same outline as the HSV pool. Without this the recovery path could hand the belief a pose
+        # from anywhere in the frame, which is a second way to "find" the car where it cannot be.
+        if _LOT_REGION is not None:
+            cx, cy = float(pose.centre[0]), float(pose.centre[1])
+            if not hsv_marker._inside(_LOT_REGION, cx, cy):
+                continue
         x, y, w, h = pose.bbox
         out.append({
             "bbox": (int(x), int(y), int(w), int(h)),

@@ -706,6 +706,14 @@ def vehicle_state(pose: Optional[vehicle.VehiclePose],
     out = pose.as_dict()
     if location:
         out["location"] = location
+    # Publish the tracker's own confidence and state. Without them a consumer cannot tell a firm fix
+    # from a guess that happened to clear the threshold, and "is this position trustworthy" becomes a
+    # question for guesswork - which is what it was.
+    verdict = getattr(vehicle, "last_verdict", None) or {}
+    if "confidence" in verdict:
+        out["confidence"] = round(float(verdict["confidence"]), 3)
+    if "state" in verdict:
+        out["state"] = verdict["state"]
     return out
 
 
