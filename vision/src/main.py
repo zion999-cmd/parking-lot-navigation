@@ -57,6 +57,7 @@ from camera import CameraError, open_camera                      # noqa: E402
 from detector import DetectorParams                              # noqa: E402
 from occupancy import (EMPTY, OCCUPIED, OccupancyDetector,        # noqa: E402
                        OccupancyParams, SpotResult)
+import spot_config
 from spot_config import Spot, SpotConfigError, load_spots         # noqa: E402
 import zoom
 from spot_editor import SpotEditor                                # noqa: E402
@@ -1050,7 +1051,10 @@ def main() -> int:
     # filters in a single frame, which is what made the tracked car hop between them.
     try:
         _lot = spot_config.load_lot_region(args.config)
-    except Exception as exc:                       # noqa: BLE001
+    except (OSError, ValueError) as exc:
+        # Narrow on purpose. This used to catch Exception and Swallow a NameError from a missing
+        # import, so the outline silently never reached the detector and the only symptom was a red
+        # box drawn outside it.
         _lot = None
         print(f"  lot_region ignored: {exc}", file=sys.stderr)
     vehicle.set_lot_region(_lot)
