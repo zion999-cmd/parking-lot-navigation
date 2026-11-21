@@ -42,6 +42,18 @@ def local_address() -> str:
     A UDP socket connect() sends nothing; it only asks the routing table which
     source address would be used, which is the one the device can reach.
     """
+    # The primary interface first. Asking the routing table for an unroutable TEST-NET address
+    # returned 192.168.3.72 on a machine that had long since moved to a 172.20.10.x hotspot: the
+    # stale route won, so the beacon announced an address the board on the new network cannot reach,
+    # and the QR kept timing out against a host that was never going to answer.
+    try:
+        import subprocess
+        primary = subprocess.run(["ipconfig", "getifaddr", "en0"], capture_output=True, text=True,
+                                 timeout=3).stdout.strip()
+        if primary.count(".") == 3:
+            return primary
+    except Exception:                                    # noqa: BLE001 - not macOS, or no en0
+        pass
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("192.0.2.1", 9))         # TEST-NET-1, reserved and unroutable

@@ -195,6 +195,23 @@ kill_pids() {
 # ("src/main.py"), and the sweep only matched "vision/src/main.py", so an orphan from 01:29 was
 # still holding a second camera connection hours later - visible as Clients 2 on the board's status
 # page and as two entries in lsof. Second camera clients are exactly what this project cannot have.
+# Extra beacon targets, because a plain 255.255.255.255 broadcast is not enough on every network.
+# Phone hotspots in particular isolate clients from each other, so the broadcast never arrives and the
+# board keeps using the address compiled into the firmware: the QR fetch then times out against a host
+# that is not there, every three seconds, forever. A directed broadcast for this subnet, plus a unicast
+# to the board itself, gets through where the global broadcast does not - and a unicast is exactly what
+# discovery needs, since the device takes the PC's address from the packet's source.
+beacon_targets() {
+    local pc ip
+    pc="$(ipconfig getifaddr en0 2>/dev/null || true)"
+    if [ -n "$pc" ]; then printf -- '--to %s.255 ' "${pc%.*}"; fi
+    if [ -f "$RUN/camera.txt" ]; then
+        ip="$(sed -e 's#^http://##' -e 's#^https://##' -e 's#/.*$##' -e 's#:.*$##' \
+                  "$RUN/camera.txt" 2>/dev/null || true)"
+        if [ -n "$ip" ]; then printf -- '--to %s ' "$ip"; fi
+    fi
+}
+
 SERVICE_SCRIPTS="tools/run-vision.sh vision/src/main.py src/main.py vision/src/serve.py src/serve.py tools/beacon.py tools/ota-server"
 TEST_SCRIPTS="tools/hero_lab tools/label_server.py vision/tests vision/src/calibration.py vision/src/emit_map.py vision/src/plan.py src/calibration.py src/emit_map.py src/plan.py tools/serial_capture.py tools/watch_device.py"
 
@@ -477,8 +494,9 @@ cmd_start() {
     # route URLs follow its source address. --no-beacon restores the old behaviour
     # of using only the addresses compiled into the firmware.
     if [ "$OPT_BEACON" = "1" ] && [ "$OPT_NO_BEACON" = "0" ]; then
+        # shellcheck disable=SC2046  (targets never contain spaces)
         start_one beacon "" "cmd:tools/beacon.py" \
-            "$PY_SYS" -u "$ROOT/tools/beacon.py" --port "$BEACON_PORT" || true
+            "$PY_SYS" -u "$ROOT/tools/beacon.py" --port "$BEACON_PORT" $(beacon_targets) || true
     fi
 
     # serve.py must be on 0.0.0.0: the device and the phone are other machines.
@@ -593,7 +611,7 @@ cmd_beacon() {
         return 0
     fi
     start_one beacon "" "cmd:tools/beacon.py" \
-        "$PY_SYS" -u "$ROOT/tools/beacon.py" --port "$BEACON_PORT" || true
+        "$PY_SYS" -u "$ROOT/tools/beacon.py" --port "$BEACON_PORT" $(beacon_targets) || true
     say "  broadcasting every 2 s on UDP $BEACON_PORT; watch the board: ./start.sh status"
 }
 
