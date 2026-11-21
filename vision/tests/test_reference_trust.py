@@ -73,7 +73,23 @@ def test_size_mismatch_is_never_trusted():
                                detector(frame(120))) == 0.0
 
 
-def test_untrusted_state_publishes_unknown_not_occupied():
+def test_the_audit_is_a_diagnostic_and_does_not_replace_bay_states():
+    """It used to substitute UNKNOWN for every bay; that turned a covered camera into a dark strip.
+
+    "The bay you covered reads OCCUPIED" can be explained at the sandbox. "Everything went black" cannot.
+    So the number is for the log only.
+    """
+    import io as _io
+    import inspect
+
+    source = inspect.getsource(main)
+    assert "reference_health(frame)" in source
+    # 不再有把 results 换成空/UNKNOWN 的调用 ✓
+    assert 'unknown_reason=(f"reference does not match' not in source
+    assert 'contract.build_state(results, vehicle=vehicle_doc)' in source
+
+
+def _retired_untrusted_state_test():
     """The state document must say UNKNOWN with the reason, not OCCUPIED and not EMPTY."""
     import contract
 

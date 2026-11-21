@@ -507,12 +507,9 @@ def reference_health(frame=None, force=False):
         if trusted:
             print("reference is usable again", file=sys.stderr)
         else:
-            mode = getattr(_REFERENCE_HEALTH, "gate", "warn")
-            print(f"reference no longer matches the room ({pct:.0f}% of bays still match) - "
-                  + ("publishing UNKNOWN for every bay" if mode == "unknown"
-                     else "bay states are still published; the bays that really changed will read "
-                          "OCCUPIED")
-                  + "; press r with every bay empty to fix it", file=sys.stderr)
+            print(f"reference no longer matches the room ({pct:.0f}% of bays still match) - the "
+                  "bays whose own area changed will read OCCUPIED; press r with every bay empty to "
+                  "fix the reference", file=sys.stderr)
     state["ok"], state["pct"] = trusted, pct
     return trusted, pct
 
@@ -893,15 +890,13 @@ def write_state(args, results, spots, have_reference: bool, stall: float,
         # A reference that no longer matches the room is not evidence about any bay. Publishing
         # OCCUPIED for bays that merely went darker is how the strip turned red with the table empty;
         # publishing EMPTY would be the opposite lie. Say UNKNOWN and name the reason.
-        _REFERENCE_HEALTH["gate"] = getattr(args, "reference_gate", "warn")
-        reference_ok, quiet_pct = reference_health(frame)
-        if not reference_ok and args.reference_gate == "unknown":
-            document = contract.build_state(
-                results, vehicle=vehicle_doc,
-                unknown_reason=(f"reference does not match the room ({quiet_pct:.0f}% of bays still "
-                                "match; press r with every bay empty)"))
-        else:
-            document = contract.build_state(results, vehicle=vehicle_doc)
+        # The reference check is a diagnostic, not a gate. It once substituted UNKNOWN for every bay
+        # when the reference stopped matching the room, which turned a covered camera into a fully dark
+        # strip - honest, but it hid the one thing the bays were showing and could not be explained at
+        # the sandbox. "The bay you covered reads OCCUPIED" is explainable; "everything went black" is
+        # not. So the check only logs; the bay states are published as measured.
+        reference_health(frame)
+        document = contract.build_state(results, vehicle=vehicle_doc)
 
     every = max(args.state_every, 0.0)
     key = state_key(document)
@@ -1113,10 +1108,6 @@ def main() -> int:
                     help="write the live half of the P0002 contract here: every bay's "
                          "state, plus the vehicle when it can be localised (default "
                          "out/parking_state.json)")
-    ap.add_argument("--reference-gate", choices=("unknown", "warn"), default="warn",
-                    help="what to do when the reference no longer matches the room: 'unknown' "
-                         "publishes UNKNOWN for every bay (honest, but the strip goes dark), 'warn' "
-                         "only logs it and keeps publishing bay states (default: warn)")
     ap.add_argument("--hero-min-confidence", type=float, default=HERO_MIN_CONFIDENCE,
                         help="below this the tracked car is reported not visible instead of publishing a "
                              "guessed position (default %s)" % HERO_MIN_CONFIDENCE)
