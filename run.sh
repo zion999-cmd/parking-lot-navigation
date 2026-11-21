@@ -5,9 +5,9 @@
 #   ./run.sh                              # default camera, windowed
 #   ./run.sh --source http://192.168.3.118/stream
 #   ./run.sh --headless --duration 10     # no window, print the per-bay summary and exit
-#   ./run.sh --take-over                  # stop the background stack, run main.py in the
-#                                         # foreground, and bring the stack back when it exits
-#                                         # (same handover as ./start.sh edit)
+#   ./run.sh                              # stops the background stack if it is running, runs main.py
+#                                         # in the foreground, restarts the stack when it exits
+#   ./run.sh --no-take-over               # refuse instead of taking over (old behaviour)
 #   ./run.sh --help                       # every main.py flag
 #
 # This is the *manual* entry point: it runs main.py in the foreground, shows the OpenCV window, and
@@ -38,15 +38,23 @@ fi
 # --take-over: the stack holds the camera and writes the same state file, so it has to step aside
 # first. This is the one-command version of "stop the stack, run main.py yourself, start it again" -
 # ./start.sh edit does the same thing for the bay editor.
-TAKE_OVER=0
+# Take over by default. The guard in main.py exists because two writers make the vehicle jump, but
+# refusing to start while the stack runs meant the answer to "run main.py" was always "no" - asked
+# four times in a row. Taking over is what the person typing this wants: the stack steps aside, and
+# comes back when main.py exits.
+TAKE_OVER=1
 ARGS=()
 for arg in "$@"; do
-    if [ "$arg" = "--take-over" ]; then TAKE_OVER=1; else ARGS+=("$arg"); fi
+    case "$arg" in
+        --take-over)    TAKE_OVER=1 ;;
+        --no-take-over) TAKE_OVER=0 ;;
+        *)              ARGS+=("$arg") ;;
+    esac
 done
 set -- ${ARGS+"${ARGS[@]}"}
 
 if [ "$TAKE_OVER" = "1" ]; then
-    echo "stopping the background stack so this instance can own the camera and the state file"
+    echo "look: stopping the background stack so this instance owns the camera and the state file"
     "$PROJECT/start.sh" stop --all >/dev/null 2>&1 || true
     sleep 3
     restore() {
