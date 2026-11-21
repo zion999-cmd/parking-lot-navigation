@@ -1005,6 +1005,9 @@ def main() -> int:
                     help="write the live half of the P0002 contract here: every bay's "
                          "state, plus the vehicle when it can be localised (default "
                          "out/parking_state.json)")
+    ap.add_argument("--hero-min-confidence", type=float, default=HERO_MIN_CONFIDENCE,
+                        help="below this the tracked car is reported not visible instead of publishing a "
+                             "guessed position (default %s)" % HERO_MIN_CONFIDENCE)
     ap.add_argument("--window", action="store_true",
                     help="show the cv2 window even when serving the board. Serving implies no "
                          "window: the board is the window, and the one here is only wanted to "
