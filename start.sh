@@ -651,6 +651,21 @@ cmd_status() {
             fi
         fi
         printf '  %-8s %s\n' "$name" "$state"
+        # A bare "DOWN" sends people to look at the wrong thing. A supervisor that is alive but whose
+        # main.py keeps exiting shows as DOWN here, and the reason is in its log - usually the camera
+        # being unreachable.
+        if [ "$name" = "vision" ] && [ "$state" = "DOWN" ] && [ -f "$RUN/vision.log" ]; then
+            local why tries
+            # The reason first, the exit code only as a fallback: the last line of the log is always
+            # "rc=2", which says nothing about why.
+            why="$(grep -aoE 'error: could not open[^\n]*|could not read video stream[^\n]*' "$RUN/vision.log" 2>/dev/null | tail -1)"
+            [ -n "$why" ] || why="$(grep -aoE 'rc=[0-9]+' "$RUN/vision.log" 2>/dev/null | tail -1)"
+            [ -n "$why" ] && printf '  %-8s   why: %s\n' "" "${why:0:96}"
+            tries="$(grep -ac 'main.py exited' "$RUN/vision.log" 2>/dev/null || echo 0)"
+            if [ "${tries:-0}" -gt 0 ]; then
+                printf '  %-8s   main.py has exited and restarted %s time(s) - see run/vision.log\n' "" "$tries"
+            fi
+        fi
     done
 
     say ""

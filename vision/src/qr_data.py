@@ -11,8 +11,17 @@ import ipaddress
 import urllib.parse
 from functools import lru_cache
 
-import qrcode
-from qrcode.constants import ERROR_CORRECT_L
+try:
+    import qrcode
+    from qrcode.constants import ERROR_CORRECT_L
+except ImportError:                     # a missing optional dependency must not take serve down
+    qrcode = None
+    ERROR_CORRECT_L = None
+
+
+def available() -> bool:
+    """False when the QR library is not installed in this interpreter."""
+    return qrcode is not None
 
 SCHEMA = "parking_qr/1"
 

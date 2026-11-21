@@ -216,6 +216,12 @@ class Handler(SimpleHTTPRequestHandler):
 
     def _qr(self) -> None:
         """Return the current PC's navigation URL and its QR module matrix."""
+        if not qr_data.available():
+            return self._json(503, {
+                "error": "the QR library is not installed in this interpreter",
+                "hint": "pip install qrcode in the python that runs serve.py, "
+                        "or run serve.py with the vision-dev interpreter",
+                "interpreter": sys.executable})
         try:
             payload = qr_data.navigation_url(self.headers.get("Host", ""))
             document = qr_data.document(payload)
