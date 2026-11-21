@@ -293,3 +293,12 @@ def load_lot_region(path: str):
     except Exception:                                  # noqa: BLE001 - a bad region must not stop vision
         return None
 
+def save_lot_region(path: str, points) -> None:
+    """Add, replace or remove the lot outline, leaving every other section alone."""
+    sections = map_document.build(
+        path,
+        lot_region=[[int(round(x)), int(round(y))] for x, y in points] if points else None,
+    )
+    if points is None and "lot_region" in sections:
+        sections.pop("lot_region")
+    map_document.write(path, sections)

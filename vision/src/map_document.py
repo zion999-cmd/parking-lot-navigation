@@ -32,7 +32,11 @@ import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 
 # Order in which sections are written, so a diff shows the same thing every time.
-SECTION_ORDER = ("comment", "image_size", "spots", "nodes", "edges")
+# Every key the file may contain, in the order it is written. This list is the reason saving one layer
+# never destroys another: build() re-emits what it finds, but only for the keys named here, so a key
+# missing from this tuple is silently deleted by the next save of any layer. lot_region was missing, and
+# the parking-lot outline disappeared every time the bays were saved.
+SECTION_ORDER = ("comment", "image_size", "lot_region", "spots", "nodes", "edges")
 
 
 def read(path: str) -> Dict[str, Any]:

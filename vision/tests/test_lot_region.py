@@ -252,3 +252,33 @@ def test_dragging_skips_the_full_frame_blend():
     dragging = cost()
     app._lot_drag = None
     assert dragging <= still * 1.1, (still, dragging)
+
+
+def test_saving_the_bays_does_not_delete_the_lot_region():
+    """The reported bug: the outline had to be redrawn every time.
+
+    map_document.build re-emits only the keys in SECTION_ORDER, so a key missing from that tuple is
+    deleted by the next save of any layer. lot_region was missing, so saving the bays erased it.
+    """
+    import json
+    import shutil
+    import tempfile
+
+    import spot_config
+    import spot_editor
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with tempfile.TemporaryDirectory() as directory:
+        path = os.path.join(directory, "parking_spots.json")
+        shutil.copy(os.path.join(root, "config", "parking_spots.json"), path)
+        spot_config.save_lot_region(path, [[210, 120], [700, 120], [700, 520], [210, 520]])
+
+        editor = spot_editor.SpotEditor((600, 800))
+        assert editor.load(path)
+        assert editor.save(path)                       # saving the bays must not lose the outline
+
+        with open(path, encoding="utf-8") as handle:
+            document = json.load(handle)
+        assert document.get("lot_region") == [[210, 120], [700, 120], [700, 520], [210, 520]]
+        assert len(document["spots"]) == 48
+        assert spot_config.load_lot_region(path) is not None
