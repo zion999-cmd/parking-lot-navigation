@@ -223,8 +223,12 @@ pid_matches() {                              # pid, expected script fragment
     esac
     # The path alone is not proof: an editor with the file open also satisfies it.
     comm="$(ps -o comm= -p "$pid" 2>/dev/null | sed 's#.*/##')"
+        # Case-insensitive on purpose: the framework Python reports itself as "Python" with a
+        # capital P, so `python*` alone rejected services this same script had started via
+        # `start.sh ota` (system interpreter) - the stack then said "not from this script"
+        # and refused to stop them.
     case "$comm" in
-        python*|python3*|sh|bash|zsh|env) return 0 ;;
+        [Pp]ython*|sh|bash|zsh|env) return 0 ;;
         *) return 1 ;;
     esac
 }
