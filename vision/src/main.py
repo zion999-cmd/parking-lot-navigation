@@ -550,6 +550,43 @@ def capture_reference(frame: np.ndarray, path: str) -> bool:
     return True
 
 
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _parent_pid(pid: int) -> Optional[int]:
+    try:
+        import subprocess
+        out = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=3).stdout.strip()
+        return int(out) if out else None
+    except Exception:                                  # noqa: BLE001
+        return None
+
+
+def _other_main_pids(mine: int):
+    """Every live main.py of this project except ours."""
+    found = []
+    try:
+        import subprocess
+        out = subprocess.run(["ps", "-eo", "pid,command"], capture_output=True, text=True,
+                             timeout=5).stdout
+        for line in out.splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) != 2 or not parts[0].isdigit():
+                continue
+            pid, command = int(parts[0]), parts[1]
+            if pid != mine and "vision/src/main.py" in command:
+                found.append(pid)
+    except Exception:                                  # noqa: BLE001
+        pass
+    return found
+
+
 def _parent_command(pid: int) -> str:
     """The command line of `pid`'s parent, or "" - used to tell the stack's vision from a stray."""
     try:
@@ -608,33 +645,34 @@ def claim_state_ownership(state_path: str) -> Optional[str]:
                           f"  the camera and {state_path}\n"
                           "  serve / beacon / ota are left running; the stack's vision stays down\n"
                           "  until you run ./start.sh again", file=sys.stderr)
-                    try:
-                        os.kill(other, signal.SIGTERM)
-                        supervis = int(open(f"/proc/{other}/stat").read().split()[3])  # not macOS
-                    except Exception:                   # noqa: BLE001
-                        supervis = None
-                    if supervis is None:
-                        # macOS: find the supervisor by asking ps for the parent of `other`.
-                        try:
-                            import subprocess
-                            ppid = subprocess.run(["ps", "-o", "ppid=", "-p", str(other)],
-                                                  capture_output=True, text=True,
-                                                  timeout=3).stdout.strip()
-                            supervis = int(ppid) if ppid else None
-                        except Exception:               # noqa: BLE001
-                            supervis = None
+                    # Order matters: the supervisor restarts the child within seconds, so killing the
+                    # child first lets it spawn a replacement and we end up with the very two writers
+                    # this guard exists to prevent, plus one. Supervisor first, then the child.
+                    supervis = _parent_pid(other)
                     if supervis:
                         try:
                             os.kill(supervis, signal.SIGTERM)
                         except OSError:
                             pass
-                    for _ in range(30):
-                        try:
-                            os.kill(other, 0)
-                        except OSError:
+                        for _ in range(40):
+                            if not _alive(supervis):
+                                break
+                            time.sleep(0.1)
+                    try:
+                        os.kill(other, signal.SIGTERM)
+                    except OSError:
+                        pass
+                    for _ in range(40):
+                        if not _alive(other):
                             break
                         time.sleep(0.1)
-                    other = 0                       # it is gone; carry on
+                    # Post-condition, not hope: any main.py still alive means two writers again.
+                    still = _other_main_pids(os.getpid())
+                    if still:
+                        return ("could not stop the background vision (still running: %s).\n"
+                                "  Refusing rather than writing alongside it - two writers make the\n"
+                                "  vehicle jump. Stop the stack first: ./start.sh stop --all"
+                                % " ".join(str(p) for p in still))
                 else:
                     return (f"another main.py is already running (pid {other}) and writing "
                             f"{state_path}.\n  {command}\n"
