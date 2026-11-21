@@ -471,7 +471,11 @@ def test_the_route_is_replanned_when_the_car_moves() -> None:
         ("NAVIGATING", "10", (10, 300, 0), (15, 300, True), 200, True, "5 px is a move"),
         ("NAVIGATING", "10", (10, 300, 0), (10, 300, True), 1600, True, "the parked safety net"),
         ("NAVIGATING", "10", (10, 300, 0), (10, 300, False), 200, False, "hidden: hold still"),
-        ("NAVIGATING", "10", (10, 300, 0), (10, 300, False), 1600, True, "hidden and time is up"),
+        ("NAVIGATING", "10", (10, 300, 0), (10, 300, False), 1600, False,
+         "hidden: no fix, no request, whatever the timer says"),
+      # P0013: with the hero hidden there is nothing to plan from, and the server would
+      # refuse with hero-not-visible anyway. The old expectation described a request that
+      # could not do what it was written for: noticing a bay taken while the car is hidden.
         ("ARRIVED", "10", (10, 300, 0), (50, 300, True), 1600, False, "arrived stops replanning"),
     ]
     driver = (
