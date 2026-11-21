@@ -518,7 +518,7 @@ let waitingNote = 0;
 
 // The smoothly animated car: we render every frame and lerp this display pose towards the last
 // reported pose, so the icon glides instead of jumping on each 250 ms poll.
-const car = { x: null, y: null, h: null, visible: false };
+const car = { x: null, y: null, h: null, visible: false, lost: false };
 let cam = { scale: 1, cx: 400, cy: 300, rot: 0 };
 let CHAINS = [];        // open road runs, worked out once per map
 let LOOPS = [];        // closed road loops (the ring), drawn as one closed path
@@ -797,6 +797,32 @@ function lerpAngle(a, b, t) {
   return Nav.normDeg(a + d * t);
 }
 
+// A heading jump this large is not a turn between two polls: a car cannot rotate 90 degrees in
+// 250 ms on this table. Such a jump must be seen repeatedly before the icon follows it, because the
+// alternative - happening on the first sighting - is the icon spinning round on one bad observation.
+const HEADING_JUMP_DEG = 90;
+const HEADING_JUMP_POLLS = 2;          // ~0.5 s at the 250 ms poll
+let headingPending = null;
+let headingPendingCount = 0;
+
+function acceptHeading(current, next) {
+  if (current == null || next == null) return next == null ? current : next;
+  const delta = Math.abs(((next - current + 540) % 360) - 180);
+  if (delta <= HEADING_JUMP_DEG) {
+    headingPending = null; headingPendingCount = 0;
+    return next;                        // a plausible turn: follow it now
+  }
+  // Implausible: believe it only if it persists, counted against the same target so two unrelated
+  // bad readings do not add up to one believable one.
+  if (headingPending != null &&
+      Math.abs(((next - headingPending + 540) % 360) - 180) < 30) {
+    headingPendingCount += 1;
+  } else {
+    headingPending = next; headingPendingCount = 1;
+  }
+  return headingPendingCount >= HEADING_JUMP_POLLS ? next : current;
+}
+
 // Height of whatever sheet is docked at the bottom right now, so the fitted view avoids it.
 function sheetHeight() {
   const nav = document.getElementById("navSheet");
@@ -929,7 +955,16 @@ function drawWorld() {
   for (const s of MAP.spots) drawBayLabel(s);
   drawTarget();
   drawEntrances();
-  if (car.visible && car.x != null) drawCar(car.x, car.y, car.h ?? 0);
+  if (car.visible && car.x != null) {
+    if (car.lost) {
+      ctx.save();
+      ctx.globalAlpha = 0.35;         // obviously not live, still where it was
+      drawCar(car.x, car.y, car.h ?? 0);
+      ctx.restore();
+    } else {
+      drawCar(car.x, car.y, car.h ?? 0);
+    }
+  }
 
   ctx.restore();
 
@@ -1204,19 +1239,35 @@ function tick() {
   const v = vehicleOf();
   if (v && v.visible !== false && typeof v.x === "number") {
     const th = Nav.carHeading(v);
-    if (car.x == null) { car.x = v.x; car.y = v.y; car.h = th ?? 0; }
-    else {
+    if (car.x == null) {
+      car.x = v.x; car.y = v.y; car.h = th ?? 0;
+      headingPending = null; headingPendingCount = 0;
+      car.lost = false;
+    } else if (car.lost) {
+      // Reacquired after a loss: take the new fix as it is. Gliding from the old position would draw
+      // a route the car never drove.
+      car.x = followAxis(car.x, v.x, CAR_DEADBAND_PX, 1.0, 0.0);
+      car.y = followAxis(car.y, v.y, CAR_DEADBAND_PX, 1.0, 0.0);
+      car.h = acceptHeading(car.h, th ?? car.h);
+      car.lost = false;
+    } else {
       // Measured at rest: the hero fix wanders up to ~2.3 px between updates and the state file is
       // written ~1.3 times a second. A plain lerp turns that into a slow glide - the car looked
       // like it was floating. So: ignore movement inside the measured noise band, and catch up
       // proportionally outside it, snapping when the jump is far too big to be driving.
       car.x = followAxis(car.x, v.x, CAR_DEADBAND_PX, CAR_FOLLOW_K, CAR_SNAP_PX);
       car.y = followAxis(car.y, v.y, CAR_DEADBAND_PX, CAR_FOLLOW_K, CAR_SNAP_PX);
-      car.h = lerpAngle(car.h, th ?? car.h, 0.35);
+      car.h = lerpAngle(car.h, acceptHeading(car.h, th ?? car.h), 0.35);
     }
     car.visible = true;
+    car.lost = false;
+  } else if (car.x != null) {
+    // No trusted position this poll. Keep the last trusted pose on screen, marked lost: deleting the
+    // icon and re-creating it is what made a brief loss look like the car driving off the map. The
+    // pose is frozen and is a display artefact only - nothing downstream may read it as a position.
+    car.lost = true;
   } else {
-    car.visible = false;
+    car.visible = false;              // never seen since the page opened
   }
 
   updateCamera();
