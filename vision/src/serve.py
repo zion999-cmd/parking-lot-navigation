@@ -33,20 +33,124 @@ import argparse
 import json
 import os
 import sys
+import threading
+import time
 import urllib.parse
+import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import contract                                                 # noqa: E402
+import contract
+import overview                                                 # noqa: E402
+import mag_baseline                                             # noqa: E402
 import qr_data                                                  # noqa: E402
 import route                                                    # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 API_PATH = "/api/route"
+OVERVIEW_PATH = "/api/overview"
+OVERVIEW_PAGE = "/web/overview.html"
+MAG_BASELINE_PATH = os.path.join(ROOT, "data", "mag_baseline.json")
+RFID_TOOL_DIR = os.path.abspath(os.path.join(ROOT, "..", "tools", "rfid"))
 QR_PATH = "/api/qr"
 GO_PATH = "/go"
 NAV_PATH = "/web/navigation.html"
+
+
+class OverviewSources:
+    """Board-facing collectors for the overview page.
+
+    Reuses what already works instead of adding a second implementation: mag_baseline owns the
+    magnetometer baseline and judgement, tools/rfid/rfid_presence.py owns "is this tag still here".
+    Both are read-only; nothing here writes to main.py's state, the baseline or the reader.
+    """
+
+    def __init__(self):
+        self.board = _find_board()
+        self.poller = None
+        self.baseline = None
+        self.judge = None
+        self.mapping = {}
+        self.presence = None
+        self.presence_module = None
+        if self.board:
+            try:
+                self.poller = mag_baseline.MagPoller(f"{self.board}/api/mag")
+                self.poller.start()
+            except Exception:                          # noqa: BLE001
+                self.poller = None
+        self.baseline = mag_baseline.MagBaseline.load(MAG_BASELINE_PATH)
+        self.mapping = _load_mapping()
+        self.judge = mag_baseline.MagJudge(self.baseline)
+        # The judgement runs on its own beat, not on page requests: the 1 s window needs several
+        # samples, and a page that polls once a second would otherwise show UNKNOWN forever.
+        self._states = {}
+        self._stop = threading.Event()
+        threading.Thread(target=self._tick, daemon=True, name="overview-mag").start()
+        try:
+            sys.path.insert(0, RFID_TOOL_DIR)
+            import rfid_presence                        # noqa: PLC0415 - optional, tools-side
+            self.presence_module = rfid_presence
+            self.presence = rfid_presence.Presence()
+        except Exception:                              # noqa: BLE001
+            self.presence = None
+
+    def _tick(self, period=0.25):
+        while not self._stop.is_set():
+            try:
+                if self.poller is not None and self.judge is not None:
+                    now = time.time()
+                    self._states = self.judge.update(self.poller.snapshot(now), now)
+            except Exception:                          # noqa: BLE001
+                pass
+            self._stop.wait(period)
+
+    def magnetometers(self, now):
+        if self.poller is None:
+            return None, self.mapping, self.baseline
+        return self._states, self.mapping, self.baseline
+
+    def rfid(self):
+        if not self.board:
+            return None
+        document = _http_json(f"{self.board}/api/rfid")
+        if self.presence is not None:
+            self.presence.update(document)
+        return document
+
+
+def _http_json(url, timeout=2.0):
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except Exception:                                  # noqa: BLE001
+        return None
+
+
+def _find_board():
+    """Same discovery the other tools use: run/camera.txt first, then the usual address."""
+    cache = os.path.join(os.path.dirname(ROOT), "run", "camera.txt")
+    try:
+        with open(cache, encoding="utf-8") as handle:
+            cached = handle.read().strip()
+        if "://" in cached:
+            return cached.split("://", 1)[0] + "://" + cached.split("://", 1)[1].split("/", 1)[0]
+    except OSError:
+        pass
+    return "http://192.168.3.118"
+
+
+def _load_mapping():
+    path = os.path.join(ROOT, "config", "mag_bays.json")
+    mapping = {bay: None for bay in ("B1", "B2", "B3", "B4")}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            for bay, entry in (json.load(handle).get("bays") or {}).items():
+                mapping[bay] = (entry or {}).get("channel")
+    except (OSError, ValueError):
+        pass
+    return mapping
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -75,9 +179,39 @@ class Handler(SimpleHTTPRequestHandler):
             return self._go()
         if parsed.path == QR_PATH:
             return self._qr()
+        if parsed.path == OVERVIEW_PATH:
+            return self._overview()
         if parsed.path != API_PATH:
             return super().do_GET()
         self._api_route(urllib.parse.parse_qs(parsed.query))
+
+    def _overview(self) -> None:
+        """Vision, magnetometer and RFID in one document, each with its own freshness."""
+        try:
+            document = self._overview_document()
+        except Exception as exc:                       # noqa: BLE001 - the page must still load
+            return self._json(500, {"error": f"{type(exc).__name__}: {exc}"})
+        return self._json(200, document)
+
+    def _overview_document(self) -> dict:
+        now = time.time()
+        try:
+            with open(self.state_path, encoding="utf-8") as handle:
+                state_doc = json.load(handle)
+        except (OSError, ValueError):
+            state_doc = None
+
+        sources = self._sources()
+        mag_states, mapping, baseline = sources.magnetometers(now)
+        rfid_doc = sources.rfid()
+        return overview.build(state_doc, mag_states, mapping, baseline, rfid_doc,
+                              sources.presence, now=now, state_path=self.state_path)
+
+    def _sources(self):
+        """The board-facing collectors, created once per server rather than per request."""
+        if getattr(self.server, "overview_sources", None) is None:
+            self.server.overview_sources = OverviewSources()
+        return self.server.overview_sources
 
     def _qr(self) -> None:
         """Return the current PC's navigation URL and its QR module matrix."""
