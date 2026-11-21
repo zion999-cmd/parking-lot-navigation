@@ -54,6 +54,9 @@
 
 > HERO 识别链路的四层分工、全部实测数字与已否决方案，单独成文：[hero-pipeline.md](hero-pipeline.md)。
 >
+> HERO 只在标定文件里的 `lot_region`（停车场范围）内被搜索，且置信度低于 0.60 时不发布坐标 ——
+> 区域怎么画、门槛的实测依据见 [hero-pipeline.md §12](hero-pipeline.md#12-停车场范围lot_region与置信度门槛)。
+>
 > 地磁车位传感器（TCA9548A + 4× QMC5883P）的接线、固件与**测试方法**：[geomagnetic.md](geomagnetic.md)。
 
 | 模块 | 状态 | 职责 |
