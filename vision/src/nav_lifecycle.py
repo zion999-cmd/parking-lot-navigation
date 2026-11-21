@@ -79,7 +79,11 @@ class NavLifecycle:
         self._bay = None
         self._since = None
         self._positions = []
-        self._ended_for = None      # the target we already ended, so one arrival fires once
+        # Which navigation was already ended: (target, generated_at). Keying on the target alone
+        # made a new navigation to the same bay the same navigation - it would never end again, and
+        # the only way out was to cancel it by hand. The route document already carries
+        # generated_at, so a re-selection is distinguishable without adding a new field.
+        self._ended_for = None
         self.last_outcome = None
 
     def _reset_hold(self):
@@ -95,12 +99,16 @@ class NavLifecycle:
         if not track_active(state, route):
             self._reset_hold()
             # A new navigation (or a manual end) makes the previous ending irrelevant again.
-            if route is None or str(route.get("target_spot") or "") != self._ended_for:
+            # A cleared route, or a different navigation, makes the previous ending irrelevant.
+            if route is None or (str(route.get("target_spot") or ""),
+                                 route.get("generated_at")) != self._ended_for:
                 self._ended_for = None
             return None
 
         target = str(route.get("target_spot")).strip()
-        if target == self._ended_for:
+        started = route.get("generated_at")
+        key = (target, started)
+        if key == self._ended_for:
             return None                       # already ended this one; do not act twice
 
         bay = vehicle_bay(state)
@@ -136,7 +144,7 @@ class NavLifecycle:
             # The vision detector has not called the bay occupied yet, so "parked" is not established.
             return None
 
-        return self._end(target, bay, held, spread, state_of_bay)
+        return self._end(target, bay, held, spread, state_of_bay, key)
 
     def _spread(self):
         if len(self._positions) < 2:
@@ -145,7 +153,7 @@ class NavLifecycle:
         ys = [p[1] for p in self._positions]
         return math.hypot(max(xs) - min(xs), max(ys) - min(ys))
 
-    def _end(self, target, bay, held, spread, bay_state):
+    def _end(self, target, bay, held, spread, bay_state, key=None):
         if bay == target:
             code, reason = COMPLETED, f"arrived at {target}"
         else:
@@ -172,7 +180,7 @@ class NavLifecycle:
             os.replace(tmp, self.route_path)
         except OSError:
             return None
-        self._ended_for = target
+        self._ended_for = key if key is not None else target
         self._reset_hold()
         self.last_outcome = {"ended": code, "bay": bay, "target": target,
                              "held_s": round(held, 2), "spread_px": round(spread, 1),

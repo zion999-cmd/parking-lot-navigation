@@ -21,8 +21,20 @@
 
 set -euo pipefail
 
+# The project root is wherever this script lives, not a path typed on one machine. A checkout in
+# ~/work/parking, a copy in a directory with a space in its name, or the same repo on another laptop
+# all work; the absolute path it used to hold broke the moment any of that changed.
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do
+    LINK="$(readlink "$SELF")"
+    case "$LINK" in
+        /*) SELF="$LINK" ;;
+        *)  SELF="$(dirname "$SELF")/$LINK" ;;
+    esac
+done
+PROJECT="$(cd "$(dirname "$SELF")" && pwd -P)"
+
 VISION_PYTHON="${PY_VISION:-/usr/local/Caskroom/miniconda/base/envs/vision-dev/bin/python}"
-PROJECT="/Users/bx/Esp32/parking-lot-navigation"
 MAIN="$PROJECT/vision/src/main.py"
 
 if [ ! -x "$VISION_PYTHON" ]; then

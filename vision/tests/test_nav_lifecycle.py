@@ -170,3 +170,46 @@ def test_manual_end_then_new_target_works(tmp_path):
     steps = [(state(hero_bay="B1", occupied=("B1",)), 0.5)] * 6
     outcomes = run(None, lifecycle, fixture, steps)
     assert len(outcomes) == 1 and outcomes[0]["target"] == "B1"
+
+
+# --- P0009-B: the same target selected again is a new navigation ---------------------------
+
+def test_same_target_selected_again_is_a_new_navigation(tmp_path):
+    """Re-selecting B3 straight after finishing B3 used to be treated as the finished one.
+
+    The lifecycle remembered the target it ended, so a new navigation with the same target could
+    never end: the arrival was ignored and the only way out was cancelling by hand.
+    """
+    fixture, lifecycle = make(tmp_path)
+    steps = [(state(hero_bay="B3"), 0.5)] * 6
+    first = run(None, lifecycle, fixture, steps)
+    assert len(first) == 1 and first[0]["ended"] == "COMPLETED"
+
+    # A new navigation to the same bay. generated_at differs; nothing observed in between.
+    new_route = route(target="B3")
+    new_route["generated_at"] = fixture.route_doc().get("generated_at", 0) + 1
+    fixture.write(state(hero_bay=None, kind="road"), new_route)
+    assert lifecycle.step(now=2000.0) is None
+
+    second = run(None, lifecycle, fixture, [(state(hero_bay="B3"), 0.5)] * 6)
+    assert len(second) == 1, "the second navigation must end on its own"
+    assert second[0]["ended"] == "COMPLETED" and second[0]["target"] == "B3"
+
+
+def test_same_target_navigation_is_still_ended_only_once(tmp_path):
+    fixture, lifecycle = make(tmp_path)
+    steps = [(state(hero_bay="B3"), 0.5)] * 6
+    assert len(run(None, lifecycle, fixture, steps)) == 1
+    # Same document, more observations: no second ending, even though the target matches.
+    assert run(None, lifecycle, fixture, [(state(hero_bay="B3"), 0.5)] * 6) == []
+
+
+def test_cancel_then_same_target_again_works(tmp_path):
+    fixture, lifecycle = make(tmp_path)
+    fixture.write(state(hero_bay=None, kind="road"), {"schema": "route/1", "ok": False,
+                                                      "target_spot": "", "code": "navigation-ended"})
+    assert lifecycle.step(now=1000.0) is None
+    fixture.write(state(hero_bay=None, kind="road"), route(target="B3"))
+    assert lifecycle.step(now=1001.0) is None
+    outcomes = run(None, lifecycle, fixture, [(state(hero_bay="B3"), 0.5)] * 6)
+    assert len(outcomes) == 1 and outcomes[0]["target"] == "B3"

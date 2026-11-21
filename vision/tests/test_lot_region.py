@@ -345,3 +345,36 @@ def test_a_low_confidence_position_is_not_published():
         assert main.vehicle_state(Pose(), None, 0.60) is not None
     finally:
         main.vehicle = real
+
+
+def test_unusable_confidence_cannot_bypass_the_gate():
+    """C3: NaN, infinity and non-numbers must not publish a position.
+
+    NaN compares False against every limit and infinite compares greater than all of them, so both
+    slipped past `confidence < limit` and published a position nobody had accepted.
+    """
+    import math
+
+    import main
+
+    class Pose:
+        def as_dict(self):
+            return {"id": "hero", "x": 400.0, "y": 500.0, "visible": True}
+
+    class Vehicle:
+        last_verdict = {}
+
+    real = main.vehicle
+    main.vehicle = Vehicle()
+    try:
+        for bad in (float("nan"), float("inf"), float("-inf"), "bogus", object()):
+            Vehicle.last_verdict = {"confidence": bad, "state": "TRACKING"}
+            assert main.vehicle_state(Pose(), None, 0.60) is None, bad
+        Vehicle.last_verdict = {}                       # no evidence yet: allowed
+        assert main.vehicle_state(Pose(), None, 0.60) is not None
+        Vehicle.last_verdict = {"confidence": 0.30}
+        assert main.vehicle_state(Pose(), None, 0.60) is None
+        Vehicle.last_verdict = {"confidence": 0.85}
+        assert main.vehicle_state(Pose(), None, 0.60) is not None
+    finally:
+        main.vehicle = real

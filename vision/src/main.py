@@ -717,16 +717,27 @@ def vehicle_state(pose: Optional[vehicle.VehiclePose],
     # from a guess that happened to clear the threshold, and "is this position trustworthy" becomes a
     # question for guesswork - which is what it was.
     verdict = getattr(vehicle, "last_verdict", None) or {}
-    if "confidence" in verdict:
-        out["confidence"] = round(float(verdict["confidence"]), 3)
+    raw = verdict.get("confidence")
+    confidence = None
+    if raw is not None:
+        try:
+            candidate = float(raw)
+        except (TypeError, ValueError):
+            candidate = None
+        # Only a finite number is a confidence. NaN compares False against every limit and infinity
+        # compares greater than all of them, so an unusable value must be rejected here rather than
+        # left to a comparison that cannot fail.
+        if candidate is None or candidate != candidate or abs(candidate) == float("inf"):
+            return None                     # present but unusable: publish nothing
+        confidence = candidate
+    if confidence is not None:
+        out["confidence"] = round(confidence, 3)
     if "state" in verdict:
         out["state"] = verdict["state"]
-    # A position the tracker itself does not believe is not a position. Publishing it puts a red
-    # box on a page and a navigator would route to it; measured with nothing on the sandbox, the
-    # belief reported 0.25-0.49 for red things that were not the car while its settled readings
-    # were 0.65-0.86. Below the limit the car is simply not visible.
+    # A position the tracker itself does not believe is not a position: the state document says
+    # visible=false, the page draws no car, and nothing routes to a colour blob.
     limit = HERO_MIN_CONFIDENCE if min_confidence is None else min_confidence
-    if "confidence" in out and float(out["confidence"]) < limit:
+    if confidence is not None and confidence < limit:
         return None
     return out
 
