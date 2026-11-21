@@ -213,9 +213,24 @@ def _components(hsv: np.ndarray, s_min: int, v_min: int) -> tuple[np.ndarray, in
     return mask, n, stats, cents
 
 
+def _inside(region, cx: float, cy: float) -> bool:
+    """Is this point inside the lot outline? Ray casting, no cv2 needed and no numpy surprises."""
+    if region is None:
+        return True
+    inside = False
+    n = len(region)
+    for i in range(n):
+        x1, y1 = region[i]
+        x2, y2 = region[(i + 1) % n]
+        if (y1 > cy) != (y2 > cy):
+            if cx < (x2 - x1) * (cy - y1) / (y2 - y1) + x1:
+                inside = not inside
+    return inside
+
+
 def candidates(frame: np.ndarray, centre: Optional[Tuple[float, float]] = None,
                radius: Optional[float] = None, s_levels: Sequence[int] = S_LEVELS,
-               max_shape: float = 0.60) -> list[dict]:
+               max_shape: float = 0.60, region=None) -> list[dict]:
     """A pool of red blobs that could be the arrow, from several saturation levels.
 
     `centre`/`radius` restrict the search to a window - the caller's belief layer knows roughly
@@ -261,6 +276,11 @@ def candidates(frame: np.ndarray, centre: Optional[Tuple[float, float]] = None,
             cx, cy = float(cents[i][0]) + x0, float(cents[i][1]) + y0
             if cy >= BOTTOM_GUARD_Y:
                 continue                      # the LED band, not the car
+            # Outside the lot outline is not the car, however red it is. The sandbox has plenty of
+            # red that is not a vehicle - measured 13 blobs passing the area and aspect filters in
+            # one frame - and the tracker used to hop between them.
+            if not _inside(region, cx, cy):
+                continue
             aspect = w / float(h)
             if aspect < MIN_ASPECT or aspect > MAX_ASPECT:
                 continue

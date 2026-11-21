@@ -85,6 +85,24 @@ _DEFAULT_VEHICLE_CONFIG = {
 }
 
 
+# The parking-lot outline, set once from the calibration at startup. None means "no outline
+# configured", which keeps the old behaviour: search the whole frame.
+_LOT_REGION = None
+
+
+def set_lot_region(polygon) -> None:
+    """Restrict hero detection to this outline. Points in image coordinates, or None to disable.
+
+    Called once from main.py after loading the calibration. Kept as module state because
+    hsv_marker.candidates is reached from several places inside this module, and threading the
+    polygon through every call site would add a parameter that means the same thing everywhere.
+    """
+    global _LOT_REGION
+    _LOT_REGION = polygon
+    if polygon is not None:
+        print(f"  hero search limited to the lot outline ({len(polygon)} points)")
+
+
 def vehicle_config(path: str = VEHICLE_CONFIG_PATH) -> dict:
     """HSV ranges and morphology for the current hero car, loaded once.
 
@@ -1033,14 +1051,14 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
     #                        position history left to lean on
     state = _belief.state if _belief.position is not None else hero_belief.LOST
     if state in (hero_belief.LOST, hero_belief.REACQUIRING):
-        pool = hsv_marker.candidates(frame, max_shape=0.60)
+        pool = hsv_marker.candidates(frame, max_shape=0.60, region=_LOT_REGION)
         pool.extend(_recovery_candidates(frame))
     else:
         radius = _belief.search_radius()
         if state == hero_belief.UNCERTAIN:
             radius *= 1.6
         pool = hsv_marker.candidates(frame, centre=_belief.position, radius=radius,
-                                     max_shape=None)
+                                     max_shape=None, region=_LOT_REGION)
 
     verdict = _belief.update(pool, dt)
 

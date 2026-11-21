@@ -658,14 +658,20 @@ def claim_state_ownership(state_path: str) -> Optional[str]:
                             if not _alive(supervis):
                                 break
                             time.sleep(0.1)
-                    try:
-                        os.kill(other, signal.SIGTERM)
-                    except OSError:
-                        pass
-                    for _ in range(40):
-                        if not _alive(other):
+                    # The supervisor may have spawned a replacement between the two kills, and a
+                    # replacement of that may exist too. Keep going until nothing is left, rather
+                    # than assuming one kill each was enough.
+                    deadline = time.time() + 6.0
+                    while time.time() < deadline:
+                        remaining = _other_main_pids(os.getpid())
+                        if not remaining:
                             break
-                        time.sleep(0.1)
+                        for pid in remaining:
+                            try:
+                                os.kill(pid, signal.SIGTERM)
+                            except OSError:
+                                pass
+                        time.sleep(0.15)
                     # Post-condition, not hope: any main.py still alive means two writers again.
                     still = _other_main_pids(os.getpid())
                     if still:
@@ -1031,6 +1037,16 @@ def main() -> int:
     # would read as "every bay is occupied" rather than as a mistake.
     zoom_shape = _declared_image_size(args.config) or (600, 800)
     
+    # Restrict hero detection to the parking-lot outline when the calibration defines one. Without
+    # it every red object in the room is a candidate: measured 13 blobs passing the area and aspect
+    # filters in a single frame, which is what made the tracked car hop between them.
+    try:
+        _lot = spot_config.load_lot_region(args.config)
+    except Exception as exc:                       # noqa: BLE001
+        _lot = None
+        print(f"  lot_region ignored: {exc}", file=sys.stderr)
+    vehicle.set_lot_region(_lot)
+
     def _spots(path, shape=None, skip_bad=False):
         # No coordinate transform, on purpose.
         #

@@ -270,3 +270,26 @@ def save_spots(path: str, spots: List[Spot], shape: Optional[Tuple[int, int]] = 
         spots=section,
     )
     map_document.write(path, sections)
+
+def load_lot_region(path: str):
+    """The parking lot outline, or None when the file does not define one.
+
+    Four or more points, image coordinates, in order around the boundary. Named "lot_region" rather
+    than being derived from the bays: the bays are what to watch, this is where the camera may look
+    for the car, and the two are deliberately separate - a bay polygon is a slot, the lot is the
+    floor around it.
+    """
+    import json
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    points = raw.get("lot_region")
+    if not points or len(points) < 3:
+        return None
+    try:
+        return _as_polygon(points, f"{path}: lot_region")
+    except Exception:                                  # noqa: BLE001 - a bad region must not stop vision
+        return None
+
