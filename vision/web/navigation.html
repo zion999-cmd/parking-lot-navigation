@@ -624,6 +624,18 @@ function checkArrival() {
   }
 }
 
+function showEndedElsewhere(bay, target) {
+  showToast(`车辆已停入 ${bay || "其他车位"}，原 ${target || "目标"} 导航已结束`);
+}
+
+function showToast(text) {
+  document.getElementById("toastTxt").textContent = text;
+  const t = document.getElementById("toast");
+  t.classList.add("show");
+  clearTimeout(showToast._t);
+  showToast._t = setTimeout(() => t.classList.remove("show"), 4200);
+}
+
 function showArrived(id) {
   document.getElementById("toastTxt").textContent = `已到达 ${id} 号车位`;
   const t = document.getElementById("toast");
@@ -1234,6 +1246,23 @@ async function poll() {
       ROUTE = fileRoute;
     }
     checkArrival();
+    // The server ends a navigation on its own when the tracked car settles, including when this tab
+    // was closed at the time. Adopt that ending instead of sitting on a stale target.
+    if (PHASE === "NAVIGATING" && fileRoute &&
+        (fileRoute.ok === false || fileRoute.code === "navigation-ended")) {
+      const ending = fileRoute.ended || "";
+      const endedBay = fileRoute.ended_bay || null;
+      PHASE = "IDLE"; targetId = null; ROUTE = null;
+      document.body.classList.remove("navigating");
+      if (ending === "COMPLETED") {
+        showArrived(fileRoute.ended_target || endedBay || "");
+      } else if (ending === "ENDED_ELSEWHERE") {
+        showEndedElsewhere(endedBay, fileRoute.ended_target || "");
+      } else {
+        showToast(fileRoute.reason || "导航已结束");
+      }
+      updateHud();
+    }
     if (PHASE === "NAVIGATING" && shouldReplan(Date.now())) await requestRoute(false);
   }
 

@@ -42,6 +42,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import contract
+import nav_lifecycle                                            # noqa: E402
 import overview                                                 # noqa: E402
 import mag_baseline                                             # noqa: E402
 import qr_data                                                  # noqa: E402
@@ -302,6 +303,33 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(payload)
 
 
+def start_lifecycle(state_path: str, route_path: str, period: float = 0.5):
+    """End a navigation when the tracked vehicle settles, with or without a browser open.
+
+    The page does this itself while it is open, and did so before this existed - which is why the
+    target survived whenever nobody was looking at the navigation tab. Running it in the server makes
+    the ending independent of who is watching.
+
+    Returns the thread so a test can stop it.
+    """
+    lifecycle = nav_lifecycle.NavLifecycle(state_path, route_path)
+
+    def loop():
+        while True:
+            try:
+                outcome = lifecycle.step()
+                if outcome:
+                    sys.stderr.write("  nav ended: %s (%s)\n" % (outcome["ended"], outcome["reason"]))
+            except Exception as exc:                   # noqa: BLE001 - never take the server down
+                sys.stderr.write("  nav lifecycle: %s: %s\n" % (type(exc).__name__, exc))
+            time.sleep(period)
+
+    thread = threading.Thread(target=loop, daemon=True, name="nav-lifecycle")
+    thread.lifecycle = lifecycle
+    thread.start()
+    return thread
+
+
 def serve(port: int = 8010, root: str = ROOT, map_path: str = None,
           state_path: str = None, route_path: str = None,
           host: str = "127.0.0.1") -> ThreadingHTTPServer:
@@ -332,6 +360,7 @@ def main() -> int:
 
     server = serve(args.port, args.root, args.map_path, args.state_path, args.route_path,
                    args.host)
+    start_lifecycle(args.state_path, args.route_path)
     print(f"page     http://localhost:{args.port}/web/index.html")
     print(f"endpoint GET http://localhost:{args.port}{API_PATH}?spot=<bay id>")
     print(f"map      {args.map_path}")
