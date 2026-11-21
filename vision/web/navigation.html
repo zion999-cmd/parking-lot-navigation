@@ -788,6 +788,10 @@ function lerp(a, b, t) { return a + (b - a) * t; }
 const CAR_DEADBAND_PX = 3.0;
 const CAR_FOLLOW_K = 0.45;
 const CAR_SNAP_PX = 60.0;
+// How fast the icon closes the gap after a loss. The animation runs once per frame (~60/s), and
+// 1-(1-k)^n reaches 95% in n frames: 0.06 closes a 200 px gap in about a second, which reads as the
+// car having driven there rather than blinking. Not a tuning knob - it is the animation rate.
+const CAR_RECOVER_K = 0.06;
 
 function followAxis(cur, target, deadband, k, snap) {
   const d = target - cur;
@@ -1248,12 +1252,13 @@ function tick() {
       headingPending = null; headingPendingCount = 0;
       car.lost = false;
     } else if (car.lost) {
-      // Reacquired after a loss: take the new fix as it is. Gliding from the old position would draw
-      // a route the car never drove.
-      car.x = followAxis(car.x, v.x, CAR_DEADBAND_PX, 1.0, 0.0);
-      car.y = followAxis(car.y, v.y, CAR_DEADBAND_PX, 1.0, 0.0);
-      car.h = acceptHeading(car.h, th ?? car.h);
-      car.lost = false;
+      // Reacquired after a loss: glide to the new fix instead of teleporting. The car was driving the
+      // whole time it was hidden, so jumping makes the icon appear to blink to a new place; moving.
+      // there over about a second reads as the car having driven. This is display only - the live
+      // position, arrival checks and replanning all use the document, never this pose.
+      car.x = followAxis(car.x, v.x, 0, CAR_RECOVER_K, Infinity);
+      car.y = followAxis(car.y, v.y, 0, CAR_RECOVER_K, Infinity);
+      car.h = lerpAngle(car.h, acceptHeading(car.h, th ?? car.h), CAR_RECOVER_K);
     } else {
       // Measured at rest: the hero fix wanders up to ~2.3 px between updates and the state file is
       // written ~1.3 times a second. A plain lerp turns that into a slow glide - the car looked

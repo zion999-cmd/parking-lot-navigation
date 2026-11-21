@@ -74,3 +74,22 @@ check("没有目标: 不重规划", L.shouldReplan(9000), false);
 
 console.log(fail ? `\n  ${fail} 项失败 ✗` : "\n  全部通过 ✓");
 process.exit(fail ? 1 : 0);
+
+// --- P0013 follow-up: the icon glides to the new fix, it does not teleport -----------------
+const page2 = fs.readFileSync(html, "utf8");
+const s2 = [...page2.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1])
+  .sort((a, b) => b.length - a.length)[0];
+const a2 = s2.indexOf("const CAR_DEADBAND_PX");
+const b2 = s2.indexOf("function lerpAngle(");
+let glow = s2.slice(a2, b2) + s2.slice(b2, s2.indexOf("// A heading jump this large") > 0
+  ? s2.indexOf("// A heading jump this large") : b2 + 400);
+// A minimal harness: only followAxis/lerpAngle + the recovery constant.
+const kMatch = page2.match(/const CAR_RECOVER_K = ([0-9.]+)/);
+const k = kMatch ? Number(kMatch[1]) : null;
+if (k === null) { console.log("  ✗ CAR_RECOVER_K missing"); process.exit(1); }
+let gap = 200, frames = 0;
+while (gap > 10 && frames < 600) { gap -= gap * k; frames += 1; }
+console.log(`  ${frames <= 90 ? "✓" : "✗"} 200 px gap closes in ${(frames / 60).toFixed(2)} s (${frames} frames)`);
+const tooSlow = frames > 150, tooFast = frames < 20;
+if (tooSlow || tooFast) { console.log("  ✗ recovery glide is not about a second"); process.exit(1); }
+console.log("  ✓ 恢复是滑行而不是瞬移");
