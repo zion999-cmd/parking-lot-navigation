@@ -499,7 +499,10 @@ cmd_edit() {
     say "   When you quit, the background stack restarts by itself."
     say "  ---------------------------------------------------------------"
     say ""
-    "$PY_VISION" -u "$ROOT/vision/src/main.py" --source "$source" || true
+    # --window is not optional here: main.py stopped opening a window by default when it serves the
+    # board (the page became the window of record), so without this flag `start.sh edit` claimed to
+    # open the editor and then exited with no way to press e, r or q.
+    "$PY_VISION" -u "$ROOT/vision/src/main.py" --source "$source" --window || true
 
     say ""
     say "  editor closed - restarting the background stack"
