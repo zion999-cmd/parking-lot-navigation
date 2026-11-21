@@ -394,7 +394,9 @@ const Nav = {
 
   // ---- arrival ----------------------------------------------------------
   hasArrived(vehicle, target) {
-    if (!vehicle || !target) return false;
+    if (!target) return false;
+    // A stale fix is where the car was, not where it is: it must not complete a navigation.
+    if (!(vehicle && vehicle.visible !== false && !vehicle.position_stale)) return false;
     if (typeof vehicle.x !== "number" || typeof vehicle.y !== "number") return false;
     return this.pointInPoly(vehicle.x, vehicle.y, target.polygon);
   },
@@ -581,6 +583,14 @@ async function getJSON(url) {
 
 const vehicleOf = () => STATE?.vehicle ?? null;
 
+// One rule for "is this a position I may act on", used by every consumer in this file:
+// visible and not stale. position_stale means the detector is holding the last trusted fix while it
+// cannot confirm a new one, so the car may still be visible with a position that must not plan, arrive
+// or move the icon. The navigation lifecycle and the route planner already refuse it; the page did not,
+// which is the gap this closes.
+const trustedFix = (v) => !!v && v.visible !== false && !v.position_stale &&
+                          typeof v.x === "number" && typeof v.y === "number";
+
 // ============================================================ planning
 async function startNavigation(id) {
   targetId = String(id);
@@ -591,6 +601,22 @@ async function startNavigation(id) {
   updateHud();
 }
 
+let lastRefusalNote = null;
+
+  // The refusal codes the planner can return, in words a visitor can read. hero-position-stale is
+  // its own case: visible but holding the last trusted fix, which is not the same as not visible.
+  function whyOf(doc) {
+    const table = {
+      "spot-not-free": "车位已不是空的或还没看清",
+      "hero-not-visible": "暂时看不到小车",
+      "hero-position-stale": "定位暂时失效，正在等新的可信位置",
+      "no-route": "暂时规划不出路线",
+      "spot-has-no-access": "这个车位还没连到路上",
+      "no-such-spot": "没有这个车位",
+    };
+    return table[doc && doc.code] || (doc && doc.code) || "暂时无法规划";
+  }
+  
 async function requestRoute(manual) {
   const mine = ++replanSeq;
   let doc = null;
@@ -605,7 +631,13 @@ async function requestRoute(manual) {
       // A refusal does not end the navigation: the target stays, the previous route keeps being
       // drawn, and the reason is shown. Losing the target here is what made a change in lighting
       // look like the navigation being cancelled.
+    // Say it once per distinct reason, not once per request: the refusal repeats while the bay
+    // stays UNKNOWN, and a message that reappears every 1.5 s reads as a hung page.
+    const note = `${doc.code || "refused"}|${doc.kept_target}`;
+    if (note !== lastRefusalNote) {
+      lastRefusalNote = note;
       transient(`目标保留在 ${doc.kept_target}（${whyOf(doc)}）`, "!");
+    }
       lastPlan = { x: null, y: null, at: Date.now() };
       return;
   }
@@ -631,8 +663,7 @@ async function requestRoute(manual) {
     // camera still produced a route request every 1.5 s for the whole loss, and each refusal
     // flashed a message - a page that looked stuck while it was asking pointless questions.
     const v = vehicleOf();
-    if (!v || v.visible === false) return false;                  // no fix: nothing to replan
-    if (typeof v.x !== "number" || typeof v.y !== "number") return false;
+  if (!trustedFix(v)) return false;                    // no confirmed fix: nothing to replan
     if (!lastPlan || lastPlan.at == null) return true;            // nothing planned yet
     if (now - lastPlan.at >= REPLAN_AFTER_MS) return true;        // the parked safety net
   if (lastPlan.x == null || lastPlan.y == null) return true;    // a fix appeared where there was none
@@ -1278,7 +1309,7 @@ function roundRectPath(x, y, w, h, r) {
 function tick() {
   // ease the display car towards the last measured pose
   const v = vehicleOf();
-  if (v && v.visible !== false && typeof v.x === "number") {
+  if (trustedFix(v)) {
     const th = Nav.carHeading(v);
     if (car.x == null) {
       car.x = v.x; car.y = v.y; car.h = th ?? 0;

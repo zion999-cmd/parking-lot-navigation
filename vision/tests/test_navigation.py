@@ -482,6 +482,8 @@ def test_the_route_is_replanned_when_the_car_moves() -> None:
         "let PHASE='X', targetId=null, lastPlan={x:null,y:null,at:0};\n"
         "let HERO=null;\n"
         "const vehicleOf = () => HERO;\n"
+      "const trustedFix = (v) => !!v && v.visible !== false && !v.position_stale &&\n"
+      "                    typeof v.x === \"number\" && typeof v.y === \"number\";\n"
         "const REPLAN_MOVE_PX = 4, REPLAN_AFTER_MS = 1500;\n"
         f"{fn}\n"
         "const cs = JSON.parse(process.argv[2]);\n"

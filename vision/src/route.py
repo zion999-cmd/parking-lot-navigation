@@ -35,6 +35,7 @@ NO_SUCH_SPOT = "no-such-spot"
 NO_ACCESS = "spot-has-no-access"
 NOT_FREE = "spot-not-free"
 NO_HERO = "hero-not-visible"
+STALE_HERO = "hero-position-stale"   # visible, but the fix is the last trusted one, not a new one
 NO_ROUTE = "no-route"
 
 EMPTY = "EMPTY"
@@ -268,6 +269,12 @@ def plan(map_doc: Dict[str, Any], state_doc: Dict[str, Any],
     if not vehicle.get("visible"):
         return Route(spot_id, False, NO_HERO,
                      "the hero car is not visible, so there is nothing to route from")
+    if vehicle.get("position_stale"):
+        # The position is the last trusted one, held while the detector cannot confirm a new fix.
+        # Routing from it would plan a route from where the car used to be - the same reason the
+        # navigation lifecycle refuses it.
+        return Route(spot_id, False, STALE_HERO,
+                     "the hero position is stale, so there is nothing to route from yet")
 
     # Where the route starts. If the state says the car is standing in a bay, its own access point
     # is the honest start. Otherwise the car is on a road, and a bay's access point is a branch into

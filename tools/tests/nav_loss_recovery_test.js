@@ -17,6 +17,9 @@ let PHASE = "NAVIGATING", targetId = "B3", lastPlan = null, lastRefusalNote = nu
 const REPLAN_AFTER_MS = 1500, REPLAN_MOVE_PX = 4;
 let VEHICLE = null;
 const vehicleOf = () => VEHICLE;
+// The real page has this next to vehicleOf; shouldReplan calls it.
+const trustedFix = (v) => !!v && v.visible !== false && !v.position_stale &&
+                          typeof v.x === "number" && typeof v.y === "number";
 ${logic}
 module.exports = {
   setVehicle: v => { VEHICLE = v; },
@@ -56,8 +59,11 @@ L.setVehicle(lost); L.plan(300, 500, 1000);
 check("B Hero 不可见 + 超过 1.5 s: 不重规划", L.shouldReplan(9000), false);
 L.setVehicle(null); L.plan(300, 500, 1000);
 check("B 没有 vehicle 字段 + 超过 1.5 s: 不重规划", L.shouldReplan(9000), false);
+// P0013.1: reviewed - the page used to ask and rely on the server refusing. The server did not
+// check position_stale at all, so the request went out and could be planned from a stale fix. Now
+// both ends refuse it, and the page does not ask.
 L.setVehicle({ visible: true, x: 300, y: 500, position_stale: true });
-check("B 位置标记过期（但仍有坐标）: 由 server 拒绝，页面仍可询问", L.shouldReplan(9000), true);
+check("B 位置过期（visible=true 但 stale）: 不重规划", L.shouldReplan(9000), false);
 
 // C: recovered -> replanning resumes
 L.setVehicle(hero); L.plan(300, 500, 1000);
@@ -134,3 +140,50 @@ console.log(bad ? `  ${bad} 项吸附用例失败 ✗` : "  吸附用例全部�
 const total = fail + bad;
 console.log(total ? `\n  ${total} 项失败 ✗` : "\n  全部通过 ✓");
 process.exit(total ? 1 : 0);
+
+// --- P0013.1: position_stale is not a position -------------------------------------------
+const st2 = fs.readFileSync(html, "utf8");
+const s3 = [...st2.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1])
+  .sort((a, b) => b.length - a.length)[0];
+const tLines = s3.split("\n");
+const tStartLine = tLines.findIndex(l => l.includes("const trustedFix = (v) =>"));
+if (tStartLine < 0) { console.log("  ✗ trustedFix 抽取失败"); process.exit(1); }
+let tSrc = tLines[tStartLine] + "\n";
+if (!tSrc.includes(";")) tSrc += tLines[tStartLine + 1] + "\n";
+const tTmp = path.join(os.tmpdir(), "p131_trusted_" + process.pid + ".js");
+fs.writeFileSync(tTmp, tSrc + "\nmodule.exports = trustedFix;\n");
+const tf = require(tTmp);
+let bad2 = 0;
+const chk = (label, got, want) => {
+  if (got !== want) { console.log(`  ✗ ${label}: got ${got}, want ${want}`); bad2++; }
+  else console.log(`  ✓ ${label}`);
+};
+chk("visible+新鲜 → 可信", tf({ visible: true, x: 1, y: 2 }), true);
+chk("visible + position_stale → 不可信", tf({ visible: true, x: 1, y: 2, position_stale: true }), false);
+chk("visible=false → 不可信", tf({ visible: false, x: 1, y: 2 }), false);
+chk("没有坐标 → 不可信", tf({ visible: true }), false);
+chk("没有 vehicle → 不可信", tf(null), false);
+console.log(bad2 ? `  ${bad2} 项失败 ✗` : "  trustedFix 全部通过 ✓");
+process.exit(bad2 ? 1 : 0);
+
+// --- every identifier the page calls must exist -------------------------------------------
+// whyOf() was called from requestRoute's refusal branch and never defined anywhere: every refusal
+// threw a ReferenceError inside an async function, which is an unhandled rejection and a dead page.
+{
+  const full = fs.readFileSync(html, "utf8");
+  const js = [...full.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1])
+    .sort((a, b) => b.length - a.length)[0];
+  const called = new Set([...js.matchAll(/\b([a-zA-Z_$][\w$]*)\(/g)].map(m => m[1]));
+  const declared = new Set([
+    ...[...js.matchAll(/(?:function\s+|const\s+|let\s+|var\s+)([a-zA-Z_$][\w$]*)/g)].map(m => m[1]),
+    ...["if", "for", "while", "switch", "catch", "return", "typeof", "new", "Math", "JSON",
+        "Number", "String", "Array", "Object", "Set", "Map", "fetch", "require", "console",
+        "parseInt", "parseFloat", "isNaN", "setTimeout", "clearTimeout", "setInterval", "alert"],
+  ]);
+  const missing = [...called].filter(n => !declared.has(n) && !js.includes("." + n + "("));
+  if (missing.length) {
+    console.log(`  ✗ 调用但未定义: ${missing.join(", ")}`);
+    process.exit(1);
+  }
+  console.log("  ✓ 页面调用的函数都有定义");
+}
