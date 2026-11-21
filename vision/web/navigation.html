@@ -591,14 +591,18 @@ async function requestRoute(manual) {
 // When to ask for a new route. Same policy as board.html, deliberately: moving is the trigger while
 // the car is visible, and the timer is the safety net that still fires when it is not - a bay can
 // be taken by someone else while the hero is hidden, and that has to be noticed.
-function shouldReplan(now) {
-  if (PHASE !== "NAVIGATING" || targetId == null) return false;
-  if (!lastPlan || lastPlan.at == null) return true;              // nothing planned yet
-  if (now - lastPlan.at >= REPLAN_AFTER_MS) return true;          // the parked safety net
-  const v = vehicleOf();
-  if (!v || v.visible === false) return false;                    // no fix: nothing to compare against
-  if (typeof v.x !== "number" || typeof v.y !== "number") return false;
-  if (lastPlan.x == null || lastPlan.y == null) return true;      // a fix appeared where there was none
+  function shouldReplan(now) {
+    if (PHASE !== "NAVIGATING" || targetId == null) return false;
+    // Ask whether there is a fix BEFORE any timer: a route is planned from the car position, so
+    // without one there is nothing to plan. The timer used to come first, which meant a covered
+    // camera still produced a route request every 1.5 s for the whole loss, and each refusal
+    // flashed a message - a page that looked stuck while it was asking pointless questions.
+    const v = vehicleOf();
+    if (!v || v.visible === false) return false;                  // no fix: nothing to replan
+    if (typeof v.x !== "number" || typeof v.y !== "number") return false;
+    if (!lastPlan || lastPlan.at == null) return true;            // nothing planned yet
+    if (now - lastPlan.at >= REPLAN_AFTER_MS) return true;        // the parked safety net
+  if (lastPlan.x == null || lastPlan.y == null) return true;    // a fix appeared where there was none
   return Math.hypot(v.x - lastPlan.x, v.y - lastPlan.y) >= REPLAN_MOVE_PX;
 }
 
