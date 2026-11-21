@@ -50,6 +50,60 @@ import route                                                    # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 API_PATH = "/api/route"
+INDEX_HTML = """<!doctype html><meta charset=utf-8><title>parking lot</title>
+<style>
+ body{font:15px/1.6 -apple-system,"PingFang SC",system-ui;margin:2em;background:#0f1115;color:#e6e9ef;max-width:900px}
+ h1{font-size:19px;margin:0 0 2px} h2{font-size:14px;color:#93a0b4;margin:26px 0 6px;font-weight:600}
+ a{color:#66d9ff;text-decoration:none} a:hover{text-decoration:underline}
+ td{padding:3px 14px 3px 0;vertical-align:top} code{color:#d2a8ff}
+ .n{color:#93a0b4}
+</style>
+<h1>停车场车位导航</h1>
+<div class="n">三路感知：视觉 + 地磁 + RFID　·　本页是入口索引（文字可直接选中复制）</div>
+
+<h2>页面</h2>
+<table>
+<tr><td><a href="/web/overview.html">/web/overview.html</a></td><td>三路总览：B1–B4 视觉 vs 地磁、RFID 标签、链路新鲜度</td></tr>
+<tr><td><a href="/web/navigation.html">/web/navigation.html</a></td><td>车载导航：点空位出路线（手机可用）</td></tr>
+<tr><td><a href="/web/board.html">/web/board.html</a></td><td>展示用：分析画面 + 点车位规划</td></tr>
+<tr><td><a href="/web/index.html">/web/index.html</a></td><td>工程用：地图路线调试</td></tr>
+<tr><td><a href="/go">/go</a></td><td>短跳转，面板上的二维码就用它</td></tr>
+</table>
+
+<h2>实时画面（MJPEG）</h2>
+<table>
+<tr><td><a href="http://127.0.0.1:8020/">:8020</a></td><td>标注流：车位的框、差图、车辆位置</td></tr>
+<tr><td><a href="http://127.0.0.1:8021/">:8021</a></td><td>原始流：板子画面，未标注</td></tr>
+</table>
+<div class="n">手机看的话把 127.0.0.1 换成这台电脑的局域网地址。</div>
+
+<h2>接口</h2>
+<table>
+<tr><td><code>/api/overview</code></td><td>三路汇总 JSON（视觉 + 地磁 + RFID + 各源新鲜度）</td></tr>
+<tr><td><code>/api/route?spot=&lt;id&gt;</code></td><td>规划到某个车位；返回路线，灯带跟着黄灯</td></tr>
+<tr><td><code>/api/route?clear=1</code></td><td>停止导航，黄灯跟着灭</td></tr>
+<tr><td><code>/api/qr</code></td><td>当前导航地址的二维码矩阵（板子面板用）</td></tr>
+</table>
+
+<h2>板子直接接口（视觉/地磁/RFID 的原始数据）</h2>
+<table>
+<tr><td><code>GET /api/mag</code></td><td>4 颗地磁的 XYZ、field_ut、量程、reads/errors</td></tr>
+<tr><td><code>GET /api/rfid</code></td><td>EPC、RSSI、端口、读取次数、四端口统计</td></tr>
+<tr><td><code>GET /stream</code></td><td>摄像头 MJPEG（只允许一个客户端：用上面的 8020/8021 转播）</td></tr>
+<tr><td><code>POST /api/ota/check</code></td><td>触发一次固件升级检查</td></tr>
+</table>
+
+<h2>终端工具</h2>
+<table>
+<tr><td><code>./start.sh</code></td><td>起整栈（serve + vision + relay + beacon + ota），<code>status</code> / <code>stop --all</code></td></tr>
+<tr><td><code>./run.sh</code></td><td>手动跑 main.py（有窗口，可按 r 采参考图）</td></tr>
+<tr><td><code>./tools/rfid-test.sh</code></td><td>RFID 存在检测：当前读到哪些标签、PRESENT/ABSENT</td></tr>
+<tr><td><code>./tools/mag-test.sh</code></td><td>地磁测试页（:8040）：四路卡片、一键建 Baseline</td></tr>
+<tr><td><code>./tools/rfid/rssi_survey.py</code></td><td>RSSI 可分性测量（判断能不能靠 RSSI 分区）</td></tr>
+<tr><td><code>./tools/bench/mag_map.py</code></td><td>测车位→地磁通道映射（不假设 B1=CH0）</td></tr>
+</table>
+"""
+
 OVERVIEW_PATH = "/api/overview"
 OVERVIEW_PAGE = "/web/overview.html"
 MAG_BASELINE_PATH = os.path.join(ROOT, "data", "mag_baseline.json")
@@ -248,17 +302,14 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
 
     def _index(self) -> None:
-        """Two pages, one of which is for people. Say which is which rather than listing a dir."""
-        body = (b"<!doctype html><meta charset=utf-8><title>parking lot</title>"
-                b"<body style=\"font:16px system-ui;margin:2em;background:#0f1115;color:#e6e9ef\">"
-                b"<h1>\xe5\x81\x9c\xe8\xbd\xa6\xe5\x9c\xba\xe8\xbd\xa6\xe4\xbd\x8d\xe5\xaf\xbc\xe8\x88\xaa</h1>"
-                b"<p><a style=color:#66d9ff href=\"/web/navigation.html\">navigation.html</a>" b" &nbsp;\xe2\x80\x94\xe8\xbd\xa6\xe8\xbd\xbd\xef\xbc\x9a\xe7\x82\xb9\xe7\xa9\xba\xe4\xbd\x8d\xe5\x87\xba\xe8\xb7\xaf\xe7\xba\xbf</p>"
-                b"<p><a style=color:#66d9ff href=\"/web/board.html\">board.html</a>"
-                b" &nbsp;\xe2\x80\x94\xe5\xb1\x95\xe7\xa4\xba\xe7\x94\xa8\xef\xbc\x9a\xe5\x88\x86\xe6\x9e\x90\xe7\x94\xbb\xe9\x9d\xa2 + \xe7\x82\xb9\xe8\xbd\xa6\xe4\xbd\x8d\xe8\xa7\x84\xe5\x88\x92</p>"
-                b"<p><a style=color:#66d9ff href=\"/web/index.html\">index.html</a>"
-                b" &nbsp;\xe2\x80\x94\xe5\xb7\xa5\xe7\xa8\x8b\xe7\x94\xa8\xef\xbc\x9a\xe5\x9c\xb0\xe5\x9b\xbe\xe8\xb7\xaf\xe7\xba\xbf\xe8\xb0\x83\xe8\xaf\x95</p>"
-                b"<p style=color:#93a0b4>GET /api/route?spot=&lt;bay id&gt;</p>"
-        b"<p style=color:#93a0b4>GET /api/route?clear=1 &nbsp;\xe2\x80\x94\xe5\x81\x9c\xe6\xad\xa2\xe5\xaf\xbc\xe8\x88\xaa\xef\xbc\x8c\xe9\xbb\x84\xe7\x81\xaf\xe8\xb7\x9f\xe7\x9d\x80\xe7\x81\xad</p></body>")
+        """One page listing everything this server and its neighbours actually offer.
+
+        It drifts out of date the moment a feature is added somewhere else, which is what happened:
+        /web/overview.html and the two MJPEG relays existed but were only discoverable by reading
+        the code. Everything below is a real path, and the tools are named with the command that
+        runs them.
+        """
+        body = INDEX_HTML.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
