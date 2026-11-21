@@ -549,6 +549,52 @@ def capture_reference(frame: np.ndarray, path: str) -> bool:
     return True
 
 
+def claim_state_ownership(state_path: str) -> Optional[str]:
+    """Refuse to run a second copy that would write the same parking_state.json.
+
+    Two main.py processes do not conflict loudly: each writes the document on its own schedule and
+    the last one wins, so a page reading it sees the vehicle jump between the two views - measured
+    once at a median 190 px between updates, with the position alternating between (449,450) and
+    whatever the other instance detected. One of them was a stray launch with default arguments.
+    Nothing in the file says who wrote it, so the only reliable cure is not letting the second one
+    start.
+
+    Returns an error message when another live instance owns the file, None when this one may run.
+    """
+    pid_path = os.path.join(os.path.dirname(os.path.abspath(state_path)), "main.pid")
+    try:
+        with open(pid_path, encoding="utf-8") as handle:
+            other = int(handle.read().strip() or "0")
+    except (OSError, ValueError):
+        other = 0
+    if other and other != os.getpid():
+        alive = True
+        try:
+            os.kill(other, 0)
+        except OSError:
+            alive = False
+        if alive:
+            command = ""
+            try:
+                import subprocess
+                command = subprocess.run(["ps", "-o", "command=", "-p", str(other)],
+                                         capture_output=True, text=True, timeout=3).stdout.strip()
+            except Exception:                      # noqa: BLE001
+                pass
+            if "main.py" in command:
+                return (f"another main.py is already running (pid {other}) and writing {state_path}.\n"
+                        f"  {command}\n"
+                        "  Two of them alternate writes, which makes the vehicle jump on every page.\n"
+                        "  Stop it first: ./start.sh stop --all   (or kill that pid)")
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(pid_path)), exist_ok=True)
+        with open(pid_path, "w", encoding="utf-8") as handle:
+            handle.write(str(os.getpid()))
+    except OSError:
+        pass
+    return None
+
+
 def vehicle_state(pose: Optional[vehicle.VehiclePose],
                   location: Optional[dict] = None) -> Optional[dict]:
     """The car's entry for the contract, or None when it cannot be seen.
@@ -875,6 +921,11 @@ def main() -> int:
     ap.add_argument("--save-debug", metavar="PNG",
                     help="save one annotated frame with this path and exit")
     args = ap.parse_args()
+    # One writer per state file. Two copies alternate writes and the vehicle jumps between them.
+    refusal = claim_state_ownership(args.state_out)
+    if refusal:
+        print(refusal, file=sys.stderr)
+        return 2
 
     params = OccupancyParams(blur_ksize=args.blur,
                             pixel_threshold=args.pixel_threshold,

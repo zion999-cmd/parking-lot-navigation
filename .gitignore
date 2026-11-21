@@ -67,3 +67,6 @@ mag_bench.csv
 # Written at runtime by the test page and by tools/bench/mag_map.py. Machine- and venue-specific, and
 # tracked once by mistake - which let a git checkout silently erase the operator's mapping.
 vision/config/mag_bays.json
+
+# Which process owns parking_state.json (see claim_state_ownership in main.py).
+vision/out/main.pid
