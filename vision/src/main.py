@@ -585,7 +585,12 @@ def claim_state_ownership(state_path: str) -> Optional[str]:
                 return (f"another main.py is already running (pid {other}) and writing {state_path}.\n"
                         f"  {command}\n"
                         "  Two of them alternate writes, which makes the vehicle jump on every page.\n"
-                        "  Stop it first: ./start.sh stop --all   (or kill that pid)")
+                        "\n"
+                        "  To watch this one instead, use the stack's own handover - it stops the\n"
+                        "  background vision, opens the window (r = reference, e = edit bays), and\n"
+                        "  restarts the stack when you quit:\n"
+                        "      ./start.sh edit\n"
+                        "  Or do it by hand:  ./start.sh stop --all   then   ./run.sh")
     try:
         os.makedirs(os.path.dirname(os.path.abspath(pid_path)), exist_ok=True)
         with open(pid_path, "w", encoding="utf-8") as handle:
