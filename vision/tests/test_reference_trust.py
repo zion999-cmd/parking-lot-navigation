@@ -86,3 +86,35 @@ def test_untrusted_state_publishes_unknown_not_occupied():
     assert set(document["spots"]) == {"B1", "B2"}, "every bay is still listed"
     assert all(s["state"] == "UNKNOWN" for s in document["spots"].values())
     assert all("reference" in s.get("reason", "") for s in document["spots"].values())
+
+
+def test_trust_is_not_regained_on_a_single_good_check():
+    """The match rate sits near the threshold when the light is marginal; measured 62% then 71%.
+
+    Flipping the verdict on every three-second check made the strip blink between dark and coloured, so
+    trust is lost at once and regained only after two consecutive good checks.
+    """
+    import main
+
+    state = main._REFERENCE_HEALTH
+    saved = dict(state)
+    try:
+        state.update({"ok": False, "good": 0, "pct": 62.0, "at": 0.0, "ref": None,
+                      "detector": None, "frame": None})
+        # Walk the state machine the way reference_health does.
+        def step(pct):
+            state["at"] = 0.0
+            pct_seen = pct
+            good = pct_seen >= main.REFERENCE_TRUST_QUIET_PCT
+            state["good"] = state.get("good", 0) + 1 if good else 0
+            state["ok"] = good and (state["ok"] or state["good"] >= 2)
+            return state["ok"]
+
+        assert step(65) is False
+        assert step(71) is False, "one good check must not restore trust"
+        assert step(62) is False
+        assert step(71) is False
+        assert step(71) is True, "two consecutive good checks do restore it"
+        assert step(62) is False, "and one bad check drops it immediately"
+    finally:
+        state.update(saved)

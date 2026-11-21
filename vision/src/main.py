@@ -493,7 +493,16 @@ def reference_health(frame=None, force=False):
     except Exception as exc:                       # noqa: BLE001 - never stop the loop for a check
         print(f"  reference check failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return state["ok"], state["pct"]
-    trusted = pct >= REFERENCE_TRUST_QUIET_PCT
+    # Trust is lost at once but regained only after two consecutive good checks. The match rate sits
+    # near the threshold when the light is marginal - measured 62% then 71% within a minute - and
+    # flipping the verdict on every 3 s check made the strip blink between dark and coloured. No new
+    # percentage: the same 70% twice, which is the same rule the heading gate uses for a reversal.
+    good_now = pct >= REFERENCE_TRUST_QUIET_PCT
+    if good_now:
+        state["good"] = state.get("good", 0) + 1
+    else:
+        state["good"] = 0
+    trusted = good_now and (state["ok"] or state["good"] >= 2)
     if trusted != state["ok"]:
         print(("reference is usable again" if trusted else
                f"reference no longer matches the room ({pct:.0f}% of bays still match): publishing "
