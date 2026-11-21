@@ -85,7 +85,17 @@ class LiveView:
             "log_message": lambda *a, **k: None,
             "do_GET": _LiveHandler.do_GET,
         })
-        self._server = ThreadingHTTPServer((self.host, self.port), handler)
+        try:
+            self._server = ThreadingHTTPServer((self.host, self.port), handler)
+        except OSError:
+            # A relay port that is already taken must not take the vision loop with it. Measured
+            # today: something outside this project held 127.0.0.1:8021, so every main.py start died
+            # with "Address already in use" and the stack's supervisor restarted it forever - the
+            # camera was fine, the state document simply never appeared, and the reported symptom was
+            # "start.sh cannot start on this network, run.sh can".
+            self._server = ThreadingHTTPServer((self.host, 0), handler)
+            print(f"warning: port {self.port} was in use, relaying on "
+                  f"{self._server.server_address[1]} instead")
         self.port = self._server.server_address[1]          # 0 means "any free port"
         for target in (self._pump, self._serve):
             thread = threading.Thread(target=target, daemon=True, name=f"live-{target.__name__}")

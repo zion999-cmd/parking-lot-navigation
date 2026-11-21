@@ -536,6 +536,22 @@ cmd_start() {
         "$PY_VISION" -u "$ROOT/vision/src/serve.py" --host 0.0.0.0 --port "$VISION_PORT" || true
 
     local source="$OPT_SOURCE"
+    # Remember an explicit --source. Without this it only reached main.py while everything else
+    # kept reading the cached address: status printed "camera ... did not answer", the beacon
+    # unicast targets pointed at the old board, and /api/overview polled the old host - so a stack
+    # that was working looked like it thought the board was not on the network at all.
+    if [ -n "$source" ]; then
+        case "$source" in
+            http*)
+                    printf '%s' "$source" > "$RUN/camera.txt"
+                    info "camera: $source  (from --source)"
+                ;;
+            *)
+                    warn "--source is not an http URL: $source" >&2
+                    source=""
+                ;;
+        esac
+    fi
     if [ -z "$source" ]; then
         say "  finding the camera on the LAN ..."
         # find_camera writes exactly one URL to stdout; anything else in there is a bug, and it
