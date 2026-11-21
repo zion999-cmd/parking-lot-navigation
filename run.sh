@@ -92,6 +92,28 @@ if [ -n "$SOURCE" ]; then
     set -- --source "$SOURCE" "$@"
 fi
 
+# Same two relay ports the stack uses. board.html draws its live picture from :8020, so a manual run
+# without these leaves the page showing the last frame the browser cached - the hero box in that frame
+# is from a different moment, which reads as "the page has the hero in the wrong place" while the local
+# window is obviously right. Skipped if the caller passed their own.
+case " $* " in
+    *" --annotated-port "*) ;;
+    *) set -- --annotated-port 8020 "$@" ;;
+esac
+case " $* " in
+    *" --raw-port "*) ;;
+    *) set -- --raw-port 8021 "$@" ;;
+esac
+
+# Show the window. main.py defaults to no window unless --window is given (that default came from the
+# headless-first workflow of the stack), but a manual run is for watching the picture and pressing r,
+# so asking for the window here is the whole point. An explicit --headless still wins.
+case " $* " in
+    *" --headless "*) ;;
+    *" --window "*) ;;
+    *) set -- --window "$@" ;;
+esac
+
 if [ "$TAKE_OVER" = "1" ]; then
     # Not exec: replacing the shell would discard the trap, and the stack would stay down after
     # main.py exits - which is exactly what happened on the first version of this.
