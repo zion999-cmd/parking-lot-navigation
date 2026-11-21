@@ -217,7 +217,8 @@ class CalibrationApp:
         self._buttons = []
         x = 8
         for label, key, active in (("Parking Spots", "@spots", self.layer == "spots"),
-                                   ("Roads", "@roads", self.layer == "roads")):
+                                   ("Roads", "@roads", self.layer == "roads"),
+                                   ("Lot Region", "@lot", self.layer == "lot")):
             bw = 14 + len(label) * 9
             self._buttons.append((x, 6, bw, 24, label, key, active))
             x += bw + 6
@@ -226,11 +227,14 @@ class CalibrationApp:
         cv2.putText(canvas, header, (8, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 4)
         cv2.putText(canvas, header, (8, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.55, COL_TEXT, 1)
 
-        actions = (("Auto Detect", "a"), ("Gen Row", "g"), ("Save", "s"), ("Undo", "z"),
-                   ("Reset", "c")) if self.layer == "spots" else \
-                  (("New Road", "n"), ("Entrance", "k"), ("Save", "s"),
-                   ("Undo", "z"), ("Check", "p"))
-        x = 8
+        if self.layer == "lot":
+            actions = (("Save", "s"), ("Clear", "c"), ("Undo", "z"))
+        elif self.layer == "spots":
+            actions = (("Auto Detect", "a"), ("Gen Row", "g"), ("Save", "s"), ("Undo", "z"),
+                  ("Reset", "c"))
+        else:
+            actions = (("New Road", "n"), ("Entrance", "k"), ("Save", "s"),
+                  ("Undo", "z"), ("Check", "p"))
         for label, key in actions:
             bw = 12 + len(label) * 9
             self._buttons.append((x, h - BAR_H - 8, bw, BAR_H - 8, label, key, False))
@@ -799,7 +803,11 @@ class CalibrationApp:
         return True
 
     def switch_layer(self, layer: str) -> None:
-        self.layer = "roads" if layer == "roads" else "spots"
+        self.layer = layer if layer in ("spots", "roads", "lot") else "spots"
+        if self.layer == "lot":
+            self.ed._say(f"Lot Region layer - {len(self.lot)}/4 points, "
+                         "click four corners, s saves, c clears")
+            return
         if self.layer == "roads":
             if not self.road.net.nodes:
                 self.road._say("click on the image to draw where a car can drive")
