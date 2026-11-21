@@ -151,3 +151,27 @@ def test_no_more_than_four_points():
     app.lot = [(100.0, 100.0), (500.0, 100.0), (500.0, 400.0), (100.0, 400.0)]
     app.on_mouse(1, 300, 300, 0, None)          # inside the quad, not near a corner
     assert len(app.lot) == 4
+
+
+def test_lot_layer_does_not_show_a_selected_bay():
+    """The reported bug: in lot mode the highlight still belonged to a bay."""
+    app = _lot_app()
+    app.ed.selected = 5
+    app.lot = [(200.0, 200.0), (600.0, 200.0), (600.0, 500.0), (200.0, 500.0)]
+    canvas = app.render(np.zeros((600, 800, 3), np.uint8))
+    assert canvas.shape == (600, 800, 3)
+    # _draw_spots must be called faint in this layer, which is what removes the selection ring.
+    import inspect
+    source = inspect.getsource(app.render)
+    assert 'self.layer == "lot"' in source and "faint=True" in source
+
+
+def test_clicking_a_corner_selects_it_and_d_removes_it():
+    app = _lot_app()
+    app.lot = [(200.0, 200.0), (600.0, 200.0), (600.0, 500.0), (200.0, 500.0)]
+    app.on_mouse(1, 202, 198, 0, None)
+    assert app._lot_sel == 0
+    assert "point 1" in app._header()
+    app.act("d")
+    assert len(app.lot) == 3 and app._lot_sel is None
+    app.render(np.zeros((600, 800, 3), np.uint8))

@@ -172,6 +172,7 @@ class CalibrationApp:
         # calibrate, and an outline nobody can see in this window is an outline nobody trusts.
         self.lot = self._load_lot_region()
         self._lot_drag = None          # index of the point being dragged, or None
+        self._lot_sel = None           # index of the selected corner
         # Set while a bay's derived entrance is being dragged, so that drag is not taken for
         # moving a road point or for drawing a new one.
         self._access_drag: Optional[str] = None
@@ -377,6 +378,11 @@ class CalibrationApp:
             return self.road.stats(self.ed.spots)
         selected = (self.ed.spots[self.ed.selected].id
                     if self.ed.selected is not None else '-')
+        if self.layer == "lot":
+            picked = (f"point {self._lot_sel + 1}/{len(self.lot)} selected"
+                      if self._lot_sel is not None and self._lot_sel < len(self.lot)
+                      else f"{len(self.lot)}/4 points")
+            return f"LOT REGION   {picked}   click adds, drag moves, d removes, s saves"
         return (f"PARKING SPOTS   spots {len(self.ed.spots)}   selected {selected}   "
                 f"inner {self.ed.inner_scale:.2f}   "
                 f"{'*unsaved*' if self.ed.dirty else 'saved'}")
@@ -429,9 +435,13 @@ class CalibrationApp:
             cv2.addWeighted(overlay, 0.30, canvas, 0.70, 0, canvas)
         cv2.polylines(canvas, [pts], len(self.lot) == 4, colour, 2)
         for i, (x, y) in enumerate(self.lot):
-            cv2.circle(canvas, (int(x), int(y)), 5, colour, -1)
-            cv2.putText(canvas, str(i + 1), (int(x) + 7, int(y) - 7),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 1)
+            selected = (i == self._lot_sel) and not faint
+            point_colour = COL_SEL if selected else colour
+            cv2.circle(canvas, (int(x), int(y)), 9 if selected else 5, point_colour, -1)
+            if selected:
+                cv2.circle(canvas, (int(x), int(y)), 13, point_colour, 1)
+            cv2.putText(canvas, str(i + 1), (int(x) + 11, int(y) - 11),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6 if selected else 0.5, point_colour, 1)
 
     def _save_lot_region(self):
         try:
@@ -473,10 +483,12 @@ class CalibrationApp:
                 hit = self._lot_point_at(x, y)
                 if hit is not None:
                     self._lot_drag = hit          # grab an existing corner and move it
-                    self.ed.message = f"moving point {hit + 1}"
+                    self._lot_sel = hit
+                    self.ed.message = f"point {hit + 1} selected - drag to move, d removes it"
                 elif len(self.lot) < 4:
                     self.lot.append((float(x), float(y)))
                     self._lot_drag = len(self.lot) - 1
+                    self._lot_sel = self._lot_drag
                     self.ed.message = (f"lot region: {len(self.lot)}/4 points"
                                        + ("  -  Enter or s to save" if len(self.lot) == 4 else ""))
             elif event == cv2.EVENT_MOUSEMOVE and flags & cv2.EVENT_FLAG_LBUTTON:
@@ -763,6 +775,12 @@ class CalibrationApp:
                 self.lot = []
                 self._lot_drag = None
                 self.ed.message = "lot region cleared - click four corners"
+                return True
+            if key in ("d", "x") and self._lot_sel is not None and self._lot_sel < len(self.lot):
+                self.lot.pop(self._lot_sel)
+                self._lot_sel = None
+                self._lot_drag = None
+                self.ed.message = f"point removed - {len(self.lot)}/4 points"
                 return True
             if key == "z" and self.lot:
                 self.lot.pop()
