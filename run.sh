@@ -5,6 +5,9 @@
 #   ./run.sh                              # default camera, windowed
 #   ./run.sh --source http://192.168.3.118/stream
 #   ./run.sh --headless --duration 10     # no window, print the per-bay summary and exit
+#   ./run.sh --take-over                  # stop the background stack, run main.py in the
+#                                         # foreground, and bring the stack back when it exits
+#                                         # (same handover as ./start.sh edit)
 #   ./run.sh --help                       # every main.py flag
 #
 # This is the *manual* entry point: it runs main.py in the foreground, shows the OpenCV window, and
@@ -32,6 +35,28 @@ if [ ! -f "$MAIN" ]; then
     exit 1
 fi
 
+# --take-over: the stack holds the camera and writes the same state file, so it has to step aside
+# first. This is the one-command version of "stop the stack, run main.py yourself, start it again" -
+# ./start.sh edit does the same thing for the bay editor.
+TAKE_OVER=0
+ARGS=()
+for arg in "$@"; do
+    if [ "$arg" = "--take-over" ]; then TAKE_OVER=1; else ARGS+=("$arg"); fi
+done
+set -- ${ARGS+"${ARGS[@]}"}
+
+if [ "$TAKE_OVER" = "1" ]; then
+    echo "stopping the background stack so this instance can own the camera and the state file"
+    "$PROJECT/start.sh" stop --all >/dev/null 2>&1 || true
+    sleep 3
+    restore() {
+        echo
+        echo "main.py finished - restarting the background stack"
+        "$PROJECT/start.sh" >/dev/null 2>&1 || true
+    }
+    trap restore EXIT INT TERM
+fi
+
 # Default camera: whatever start.sh last found, else the board's usual address. An explicit
 # --source on the command line wins, because it comes after these.
 SOURCE="${PARKING_SOURCE:-}"
@@ -51,6 +76,13 @@ done
 
 cd "$PROJECT"
 if [ -n "$SOURCE" ]; then
-    exec "$VISION_PYTHON" "$MAIN" --source "$SOURCE" "$@"
+    set -- --source "$SOURCE" "$@"
 fi
-exec "$VISION_PYTHON" "$MAIN" "$@"
+
+if [ "$TAKE_OVER" = "1" ]; then
+    # Not exec: replacing the shell would discard the trap, and the stack would stay down after
+    # main.py exits - which is exactly what happened on the first version of this.
+    "$VISION_PYTHON" "$MAIN" "$@"
+else
+    exec "$VISION_PYTHON" "$MAIN" "$@"
+fi
