@@ -54,12 +54,17 @@ done
 set -- ${ARGS+"${ARGS[@]}"}
 
 if [ "$TAKE_OVER" = "1" ]; then
-    echo "look: stopping the background stack so this instance owns the camera and the state file"
-    "$PROJECT/start.sh" stop --all >/dev/null 2>&1 || true
-    sleep 3
+    # Only the background VISION has to step aside - it holds the camera and writes the state file.
+    # Stopping the whole stack also stopped serve.py, so /web/board.html could not be opened while a
+    # manual main.py was running, and the page kept showing the state from before the stop, which is
+    # why the hero looked wrong there while the local window was right.
+    #
+    # main.py's own guard already does exactly this (supervisor first, then the children), so there is
+    # nothing to stop here: it takes over on startup and says so.
+    echo "note: the background vision will step aside automatically; serve/beacon/ota keep running"
     restore() {
         echo
-        echo "main.py finished - restarting the background stack"
+        echo "main.py finished - bringing the background vision back"
         "$PROJECT/start.sh" >/dev/null 2>&1 || true
     }
     trap restore EXIT INT TERM
