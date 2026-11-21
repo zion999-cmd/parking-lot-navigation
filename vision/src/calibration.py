@@ -75,6 +75,7 @@ generate the rest of the row.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -166,6 +167,10 @@ class CalibrationApp:
         self.nudge_scope = "bay"
         # Two layers over one document: the camera's questions and the navigator's.
         self.layer = "spots"
+        # The parking-lot outline: up to four points, saved as "lot_region" in the same file. It is a
+        # layer here rather than only in tools/pick_region.py because this is where a person goes to
+        # calibrate, and an outline nobody can see in this window is an outline nobody trusts.
+        self.lot = self._load_lot_region()
         # Set while a bay's derived entrance is being dragged, so that drag is not taken for
         # moving a road point or for drawing a new one.
         self._access_drag: Optional[str] = None
@@ -200,6 +205,7 @@ class CalibrationApp:
 
         # Both layers are always drawn: the inactive one faintly, as context. In road mode
         # the bays are what the connection points have to land on, so they stay visible.
+        self._draw_lot_region(canvas, faint=(self.layer != "lot"))   # always visible, bright on its layer
         if self.layer == "roads":
             self._draw_spots(canvas, faint=True)
             self._draw_roads(canvas, faint=False)
@@ -378,6 +384,65 @@ class CalibrationApp:
                 return key
         return None
 
+
+    # -- parking lot outline ---------------------------------------------------------
+    def _load_lot_region(self):
+        try:
+            with open(self.out_path, encoding="utf-8") as handle:
+                points = json.load(handle).get("lot_region") or []
+            return [(float(p[0]), float(p[1])) for p in points][:4]
+        except (OSError, ValueError, TypeError, IndexError):
+            return []
+
+    @staticmethod
+    def _ordered_quad(points):
+        """Put four points in ring order around their own centre.
+
+        Clicks never arrive in a predictable order, and a crossed quad has no inside at all as far as
+        the hero filter is concerned - it would silently drop every candidate.
+        """
+        cx = sum(p[0] for p in points) / len(points)
+        cy = sum(p[1] for p in points) / len(points)
+        import math
+        return sorted(points, key=lambda p: math.atan2(p[1] - cy, p[0] - cx))
+
+    def _draw_lot_region(self, canvas, faint=False):
+        if len(self.lot) < 2:
+            return
+        colour = COL_DIM if faint else (0, 220, 255)
+        pts = np.array([[int(x), int(y)] for x, y in self.lot], np.int32).reshape(-1, 1, 2)
+        if len(self.lot) == 4 and not faint:
+            overlay = canvas.copy()
+            cv2.fillPoly(overlay, [pts], (0, 60, 80))
+            cv2.addWeighted(overlay, 0.30, canvas, 0.70, 0, canvas)
+        cv2.polylines(canvas, [pts], len(self.lot) == 4, colour, 2)
+        for i, (x, y) in enumerate(self.lot):
+            cv2.circle(canvas, (int(x), int(y)), 5, colour, -1)
+            cv2.putText(canvas, str(i + 1), (int(x) + 7, int(y) - 7),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 1)
+
+    def _save_lot_region(self):
+        try:
+            with open(self.out_path, encoding="utf-8") as handle:
+                document = json.load(handle)
+        except (OSError, ValueError):
+            self.ed.message = "cannot read the calibration file to save the lot region"
+            return
+        if self.lot:
+            document["lot_region"] = [[int(round(x)), int(round(y))] for x, y in self.lot]
+        else:
+            document.pop("lot_region", None)
+        tmp = self.out_path + ".writing"
+        try:
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump(document, handle, indent=1)
+                handle.write("\n")
+            os.replace(tmp, self.out_path)
+            self.ed.message = ("lot region saved - restart main.py to apply it"
+                               if self.lot else "lot region removed")
+        except OSError as exc:
+            self.ed.message = f"could not save the lot region: {exc}"
+
     def on_mouse(self, event, x, y, flags, param) -> None:
         self.cursor = (x, y)
         # A click ends a run of arrow-key nudges: the next one starts a new undo step.
@@ -385,6 +450,20 @@ class CalibrationApp:
 
         if self.layer == "roads":
             self._mouse_roads(event, x, y, flags)
+            return
+
+        if self.layer == "lot":
+            if event == cv2.EVENT_LBUTTONDOWN:
+                key = self._button_at(x, y)
+                if key is not None:
+                    self.act(key)
+                    return
+                if len(self.lot) < 4:
+                    self.lot.append((float(x), float(y)))
+                    self.ed.message = (f"lot region: {len(self.lot)}/4 points"
+                                       + ("  -  Enter or s to save" if len(self.lot) == 4 else ""))
+                    if len(self.lot) == 4:
+                        self.lot = self._ordered_quad(self.lot)
             return
 
         if event == cv2.EVENT_LBUTTONDOWN:
@@ -642,11 +721,25 @@ class CalibrationApp:
         self._fine_run = False
         # The layer tabs arrive as @spots / @roads: they are buttons, not keys. Whichever
         # layer is active decides where every other key and click goes.
-        if key in ("@spots", "@roads"):
-            self.switch_layer("roads" if key == "@roads" else "spots")
+        if key in ("@spots", "@roads", "@lot"):
+            self.switch_layer({"@roads": "roads", "@lot": "lot"}.get(key, "spots"))
             return True
         if key == "t":
-            self.switch_layer("roads" if self.layer == "spots" else "spots")
+            order = ("spots", "roads", "lot")
+            self.switch_layer(order[(order.index(self.layer) + 1) % len(order)])
+            return True
+        if self.layer == "lot":
+            if key in ("s", "\r", "\n"):
+                self._save_lot_region()
+                return True
+            if key == "c":
+                self.lot = []
+                self.ed.message = "lot region cleared - click four corners"
+                return True
+            if key == "z" and self.lot:
+                self.lot.pop()
+                self.ed.message = f"lot region: {len(self.lot)}/4 points"
+                return True
             return True
         if key in ("q", "\x1b"):
             self._save_all()
@@ -717,6 +810,8 @@ class CalibrationApp:
             self.ed._say("Parking Spots layer")
 
     def _save_all(self) -> None:
+        if self.lot:
+            self._save_lot_region()          # quitting must not lose the outline
         """Write the map document once, whichever layers changed.
 
         Neither write can destroy the other layer: save_spots() re-emits the road sections
