@@ -413,7 +413,7 @@ class CalibrationApp:
     def _draw_lot_region(self, canvas, faint=False):
         if len(self.lot) < 2:
             return
-        colour = COL_DIM if faint else (0, 220, 255)
+        colour = COL_BTN if faint else COL_DERIVED
         pts = np.array([[int(x), int(y)] for x, y in self.lot], np.int32).reshape(-1, 1, 2)
         if len(self.lot) == 4 and not faint:
             overlay = canvas.copy()

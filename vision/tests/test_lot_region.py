@@ -77,3 +77,26 @@ def test_missing_or_broken_region_is_none_not_an_error(tmp_path=None):
             json.dump({"spots": [], "lot_region": [[1, 2]]}, handle)   # fewer than 3 points
         assert spot_config.load_lot_region(path) is None
         assert spot_config.load_lot_region(os.path.join(directory, "nope.json")) is None
+
+
+def test_editor_renders_a_region_without_crashing():
+    """Regression: _draw_lot_region referenced a colour constant that does not exist.
+
+    It only fires once two points exist, so the editor worked, the first click worked, and the crash
+    arrived on the second point - after 'save' in the report, because the frame is redrawn after a save.
+    """
+    import calibration as C
+    import spot_editor
+
+    editor = spot_editor.SpotEditor((600, 800))
+    editor.load(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                             "config", "parking_spots.json"))
+    app = C.CalibrationApp(editor, os.path.join(os.path.dirname(os.path.abspath(
+        os.path.dirname(os.path.dirname(__file__)))), "vision", "config", "parking_spots.json"))
+    frame = np.zeros((600, 800, 3), np.uint8)
+    for count in (0, 1, 2, 3, 4):
+        app.lot = [(210, 120), (700, 120), (700, 520), (210, 520)][:count]
+        for layer in ("spots", "roads", "lot"):
+            app.switch_layer(layer)
+            canvas = app.render(frame)
+            assert canvas.shape == frame.shape
