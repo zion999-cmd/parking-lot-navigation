@@ -211,6 +211,12 @@ class CalibrationApp:
         if self.layer == "roads":
             self._draw_spots(canvas, faint=True)
             self._draw_roads(canvas, faint=False)
+        elif self.layer == "lot":
+            # Faint context only: no bay ring, no bright bay outline. This used to fall through to the
+            # else branch and draw the bays at full strength, so the purple bay selection stayed on
+            # screen while the lot layer was active.
+            self._draw_roads(canvas, faint=True)
+            self._draw_spots(canvas, faint=True)
         else:
             self._draw_roads(canvas, faint=True)
             self._draw_spots(canvas, faint=False)
@@ -765,6 +771,9 @@ class CalibrationApp:
             order = ("spots", "roads", "lot")
             self.switch_layer(order[(order.index(self.layer) + 1) % len(order)])
             return True
+        if key in ("q", "\x1b"):
+            self._save_all()
+            return False
         # The lot layer handles only its own keys and lets everything else through: swallowing the
         # whole keyboard here is why q could not leave the editor from this layer.
         if self.layer == "lot":
@@ -787,9 +796,10 @@ class CalibrationApp:
                 self._lot_drag = None
                 self.ed.message = f"lot region: {len(self.lot)}/4 points"
                 return True
-        if key in ("q", "\x1b"):
-            self._save_all()
-            return False
+            # Everything else belongs to the lot layer too. Not returning here let the arrow keys
+            # fall through to the bay nudging code, which is why they kept moving a bay.
+            return True
+
         if self.layer == "roads":
             return self._act_roads(key)
         if key == "a":

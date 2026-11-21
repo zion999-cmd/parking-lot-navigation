@@ -175,3 +175,39 @@ def test_clicking_a_corner_selects_it_and_d_removes_it():
     app.act("d")
     assert len(app.lot) == 3 and app._lot_sel is None
     app.render(np.zeros((600, 800, 3), np.uint8))
+
+
+def test_lot_layer_draws_no_bright_bays_and_no_selection_ring():
+    """The purple bay ring was still on screen in the lot layer.
+
+    render() had if roads / else, so the lot layer fell into the else branch and drew the bays at full
+    strength with the selection ring. Checked on pixels rather than by eye: COL_SEL is (255,0,255) in BGR
+    and COL_BAY is (0,255,255).
+    """
+    app = _lot_app()
+    app.ed.selected = 5
+    app.lot = [(200.0, 200.0), (600.0, 200.0), (600.0, 500.0), (200.0, 500.0)]
+    app._lot_sel = None
+    frame = np.full((600, 800, 3), 30, np.uint8)
+
+    app.switch_layer("lot")
+    lot_canvas = app.render(frame)
+    bay_yellow = int(((lot_canvas[:, :, 0] == 0) & (lot_canvas[:, :, 1] == 255)
+                      & (lot_canvas[:, :, 2] == 255)).sum())
+    assert bay_yellow == 0, f"{bay_yellow} bright bay pixels in the lot layer"
+
+    app.switch_layer("spots")
+    spots_canvas = app.render(frame)
+    assert int(((spots_canvas[:, :, 0] == 0) & (spots_canvas[:, :, 1] == 255)
+                & (spots_canvas[:, :, 2] == 255)).sum()) > 1000
+
+
+def test_arrows_do_not_move_a_bay_from_the_lot_layer():
+    app = _lot_app()
+    app.ed.selected = 5
+    app.lot = [(200.0, 200.0), (600.0, 200.0), (600.0, 500.0), (200.0, 500.0)]
+    before = [tuple(p) for p in app.ed.spots[5].polygon]
+    for key in ("2", "4", "6", "8"):
+        app.act(key)
+    assert before == [tuple(p) for p in app.ed.spots[5].polygon]
+    assert app.act("t") is True and app.layer == "spots"
