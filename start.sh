@@ -316,6 +316,11 @@ start_one() {
     fi
 
     say "  starting $name -> $log"
+    # The log is appended across restarts, so anything older than this start is history.
+    # Reading the tail without that anchor once reported the previous run's "Address already
+    # in use" as if it were happening now.
+    local log_from=0
+    [ -f "$log" ] && log_from="$(wc -l < "$log" 2>/dev/null | tr -d ' ')"
     # shellcheck disable=SC2086
     nohup "$@" >>"$log" 2>&1 &
     printf '%s' "$!" > "$(pidfile "$name")"
@@ -334,6 +339,27 @@ start_one() {
                 rm -f "$(pidfile "$name")"
                 return 1
             fi
+            # The supervisor survives main.py exiting, so "pid is alive" is not progress. If the log
+            # already says the camera could not be opened, waiting the full forty seconds only hides
+            # the reason behind a spinner.
+            # A port still held by the previous instance, or a camera that does not answer: both are
+            # terminal for this start, and neither gets better by waiting another 250 ms.
+            local fresh=""
+            if [ -f "$log" ]; then
+                fresh="$(tail -n "+$((log_from + 1))" "$log" 2>/dev/null | tail -20)"
+            fi
+            if printf '%s' "$fresh" | grep -q "Address already in use"; then
+                warn "$name cannot start: $(printf '%s' "$fresh" | grep -m1 "Address already in use" | cut -c1-100)"
+                warn "  a previous instance still holds its port - stop the stack and wait a moment:"
+                warn "  ./start.sh stop --all; sleep 3; ./start.sh"
+                return 1
+            fi
+            if [ "$name" = "vision" ] && printf '%s' "$fresh" | grep -q "could not open"; then
+                warn "vision cannot start: $(printf '%s' "$fresh" | grep -m1 "could not open" | cut -c1-110)"
+                warn "  the camera in --source is not answering - check it, or pass the right one:"
+                warn "  ./start.sh --source http://<board-ip>/stream"
+                return 1
+            fi
             sleep 0.25
             i=$((i + 1))
         done
@@ -348,14 +374,16 @@ start_one() {
 # not the same as "the strip has data" - that difference is what made a freshly
 # started stack look broken.
 state_fresh() {
-    local r
-    r="$("$PY_SYS" -c 'import json, time, urllib.request
-try:
-    d = json.load(urllib.request.urlopen("http://127.0.0.1:8010/out/parking_state.json", timeout=3))
-    print("yes" if time.time() - int(d.get("timestamp", 0)) < 5 else "no")
-except Exception:
-    print("no")' 2>/dev/null || true)"
-    [ "$r" = "yes" ]
+    # curl and arithmetic, not a python3 -c: this runs inside the readiness loop every 250 ms, and
+    # a process whose name changes the terminal title twice a second for forty seconds looks like a
+    # script stuck in a loop, which is exactly how it was reported.
+    local doc ts now
+    doc="$(curl -sf --max-time 3 "http://127.0.0.1:8010/out/parking_state.json" 2>/dev/null || true)"
+    [ -n "$doc" ] || return 1
+    ts="$(printf '%s' "$doc" | sed -n 's/.*"timestamp"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)"
+    [ -n "$ts" ] || return 1
+    now="$(date +%s)"
+    [ $((now - ts)) -lt 5 ]
 }
 
 port_answers() {                            # ready-check for the HTTP services
