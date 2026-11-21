@@ -304,6 +304,39 @@ const Nav = {
   // conversion. Leaving it raw pointed the car 90 degrees off - and a test fixture that supplied
   // an already-converted angle hid it, which is why the fixture below now builds what the camera
   // really emits.
+  // The hero is a car, and a car on the map belongs on a road. When the detector places it on the
+  // tabletop - pushed beside a lane, or drifting while it turns - the icon is drawn on the nearest
+  // lane instead, the way a navigation app does.
+  //
+  // No thresholds of my own: the document already says where the hero is (vehicle.location.kind is
+  // "road", "spot" or "floor"). In a bay it is drawn where it is, so parking stays visible; on the
+  // floor it is snapped to the nearest lane centre. The decision is a word, not an invented number.
+  nearestLanePoint(chains, loops, x, y) {
+    let best = null, bestD = Infinity;
+    const consider = (pts, closed) => {
+      const n = closed ? pts.length : pts.length - 1;
+      for (let i = 0; i < n; i++) {
+        const a = pts[i], b = pts[(i + 1) % pts.length];
+        const dx = b[0] - a[0], dy = b[1] - a[1];
+        const len2 = dx * dx + dy * dy;
+        const t = len2 ? Math.max(0, Math.min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / len2)) : 0;
+        const px = a[0] + t * dx, py = a[1] + t * dy;
+        const d = Math.hypot(px - x, py - y);
+        if (d < bestD) { bestD = d; best = [px, py]; }
+      }
+    };
+    for (const chain of chains || []) if (chain.length >= 2) consider(chain, false);
+    for (const loop of loops || []) if (loop.length >= 3) consider(loop, true);
+    return best;
+  },
+  
+  displayPoint(vehicle, chains, loops) {
+    if (!vehicle || typeof vehicle.x !== "number" || typeof vehicle.y !== "number") return null;
+    const kind = (vehicle.location || {}).kind;
+    if (kind !== "floor") return [vehicle.x, vehicle.y];   // in a bay, or already on a lane
+    return this.nearestLanePoint(chains, loops, vehicle.x, vehicle.y) || [vehicle.x, vehicle.y];
+  },
+  
   carHeading(vehicle) {
     if (!vehicle) return null;
     if (vehicle.front_is_known && typeof vehicle.front_heading === "number")
@@ -1256,16 +1289,18 @@ function tick() {
       // whole time it was hidden, so jumping makes the icon appear to blink to a new place; moving.
       // there over about a second reads as the car having driven. This is display only - the live
       // position, arrival checks and replanning all use the document, never this pose.
-      car.x = followAxis(car.x, v.x, 0, CAR_RECOVER_K, Infinity);
-      car.y = followAxis(car.y, v.y, 0, CAR_RECOVER_K, Infinity);
+      const back = Nav.displayPoint(v, CHAINS, LOOPS) || [v.x, v.y];
+      car.x = followAxis(car.x, back[0], 0, CAR_RECOVER_K, Infinity);
+      car.y = followAxis(car.y, back[1], 0, CAR_RECOVER_K, Infinity);
       car.h = lerpAngle(car.h, acceptHeading(car.h, th ?? car.h), CAR_RECOVER_K);
     } else {
       // Measured at rest: the hero fix wanders up to ~2.3 px between updates and the state file is
       // written ~1.3 times a second. A plain lerp turns that into a slow glide - the car looked
       // like it was floating. So: ignore movement inside the measured noise band, and catch up
       // proportionally outside it, snapping when the jump is far too big to be driving.
-      car.x = followAxis(car.x, v.x, CAR_DEADBAND_PX, CAR_FOLLOW_K, CAR_SNAP_PX);
-      car.y = followAxis(car.y, v.y, CAR_DEADBAND_PX, CAR_FOLLOW_K, CAR_SNAP_PX);
+      const shown = Nav.displayPoint(v, CHAINS, LOOPS) || [v.x, v.y];
+      car.x = followAxis(car.x, shown[0], CAR_DEADBAND_PX, CAR_FOLLOW_K, CAR_SNAP_PX);
+      car.y = followAxis(car.y, shown[1], CAR_DEADBAND_PX, CAR_FOLLOW_K, CAR_SNAP_PX);
       car.h = lerpAngle(car.h, acceptHeading(car.h, th ?? car.h), 0.35);
     }
     car.visible = true;
