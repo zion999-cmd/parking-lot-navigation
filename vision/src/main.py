@@ -694,8 +694,14 @@ def claim_state_ownership(state_path: str) -> Optional[str]:
     return None
 
 
+# Below this the tracker is guessing. A starting value from one session with an empty sandbox -
+# change it with --hero-min-confidence rather than editing here.
+HERO_MIN_CONFIDENCE = 0.60
+
+
 def vehicle_state(pose: Optional[vehicle.VehiclePose],
-                  location: Optional[dict] = None) -> Optional[dict]:
+                  location: Optional[dict] = None,
+                  min_confidence: Optional[float] = None) -> Optional[dict]:
     """The car's entry for the contract, or None when it cannot be seen.
 
     None rather than a stale position: the same rule that makes an unseen bay UNKNOWN. A
@@ -715,6 +721,13 @@ def vehicle_state(pose: Optional[vehicle.VehiclePose],
         out["confidence"] = round(float(verdict["confidence"]), 3)
     if "state" in verdict:
         out["state"] = verdict["state"]
+    # A position the tracker itself does not believe is not a position. Publishing it puts a red
+    # box on a page and a navigator would route to it; measured with nothing on the sandbox, the
+    # belief reported 0.25-0.49 for red things that were not the car while its settled readings
+    # were 0.65-0.86. Below the limit the car is simply not visible.
+    limit = HERO_MIN_CONFIDENCE if min_confidence is None else min_confidence
+    if "confidence" in out and float(out["confidence"]) < limit:
+        return None
     return out
 
 
@@ -1344,7 +1357,7 @@ def main() -> int:
 
             wrote = write_state(args, results, spots, have_reference, stall,
                                 state_written[0],
-                                vehicle_state(pose, location) if pose else None,
+                                vehicle_state(pose, location, args.hero_min_confidence) if pose else None,
                                 state_written[1])
             if wrote is not None:
                 state_written[0], state_written[1] = wrote

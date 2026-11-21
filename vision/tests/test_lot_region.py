@@ -315,3 +315,33 @@ def test_recovery_candidates_are_also_confined_to_the_lot():
     finally:
         vehicle.red_arrow.detect, vehicle.aruco_hero.detect = real_arrow, real_aruco
         vehicle.set_lot_region(None)
+
+
+def test_a_low_confidence_position_is_not_published():
+    """The headline request: do not invent a detection.
+
+    vehicle_state is where a pose becomes a published position. Below the confidence limit it must
+    return None, which makes the state document say visible=false, which is what every consumer
+    already handles.
+    """
+    import main
+
+    class Pose:
+        def as_dict(self):
+            return {"id": "hero", "x": 400.0, "y": 500.0, "heading": 0.0, "visible": True}
+
+    class Vehicle:
+        last_verdict = {"confidence": 0.30, "state": "TRACKING"}
+
+    real = main.vehicle
+    main.vehicle = Vehicle()
+    try:
+        assert main.vehicle_state(Pose(), None, 0.60) is None
+        Vehicle.last_verdict = {"confidence": 0.85, "state": "TRACKING"}
+        out = main.vehicle_state(Pose(), None, 0.60)
+        assert out is not None and out["confidence"] == 0.85
+        # No verdict at all (first frames): do not refuse on missing evidence.
+        Vehicle.last_verdict = {}
+        assert main.vehicle_state(Pose(), None, 0.60) is not None
+    finally:
+        main.vehicle = real
