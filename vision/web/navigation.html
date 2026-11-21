@@ -568,6 +568,14 @@ async function requestRoute(manual) {
     doc = null;
   }
   if (mine !== replanSeq) return;
+  if (doc && doc.ok === false && doc.kept_target) {
+      // A refusal does not end the navigation: the target stays, the previous route keeps being
+      // drawn, and the reason is shown. Losing the target here is what made a change in lighting
+      // look like the navigation being cancelled.
+      transient(`目标保留在 ${doc.kept_target}（${whyOf(doc)}）`, "!");
+      lastPlan = { x: null, y: null, at: Date.now() };
+      return;
+  }
   if (doc) {
     ROUTE = doc;
     const v = vehicleOf();

@@ -345,6 +345,19 @@ class Handler(SimpleHTTPRequestHandler):
         # are, with their own codes.
         planned = route.plan(map_doc, state_doc, spot)
         document = planned.as_document()
+        if document.get("ok") is False:
+            # A refusal is an answer, not a new target. This used to be written over route.json, and
+            # that is how an active navigation lost its target: the page replans on a timer, the
+            # target bay reads OCCUPIED rather than EMPTY - which a change in lighting is enough to
+            # cause - the replan is refused with spot-not-free, and the refusal replaced the route.
+            # The yellow light went out with the target still nominally set. Only an explicit clear,
+            # an arrival or a stop elsewhere may end a target now.
+            kept = route.load_document(self.route_path) or {}
+            document["kept_target"] = kept.get("target_spot") if kept.get("ok") else None
+            if document["kept_target"]:
+                sys.stderr.write("  route refused (%s); keeping the target %s\n"
+                                 % (document.get("code"), document["kept_target"]))
+            return self._json(200, document)
         try:
             contract.write_json(self.route_path, document)
         except OSError as exc:
