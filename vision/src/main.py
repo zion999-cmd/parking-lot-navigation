@@ -34,6 +34,7 @@ import urllib.request
 import math
 import os
 import shutil
+import signal
 import sys
 import threading
 import time
@@ -549,6 +550,20 @@ def capture_reference(frame: np.ndarray, path: str) -> bool:
     return True
 
 
+def _parent_command(pid: int) -> str:
+    """The command line of `pid`'s parent, or "" - used to tell the stack's vision from a stray."""
+    try:
+        import subprocess
+        ppid = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)],
+                              capture_output=True, text=True, timeout=3).stdout.strip()
+        if not ppid:
+            return ""
+        return subprocess.run(["ps", "-o", "command=", "-p", ppid],
+                              capture_output=True, text=True, timeout=3).stdout.strip()
+    except Exception:                                  # noqa: BLE001
+        return ""
+
+
 def claim_state_ownership(state_path: str) -> Optional[str]:
     """Refuse to run a second copy that would write the same parking_state.json.
 
@@ -582,15 +597,49 @@ def claim_state_ownership(state_path: str) -> Optional[str]:
             except Exception:                      # noqa: BLE001
                 pass
             if "main.py" in command:
-                return (f"another main.py is already running (pid {other}) and writing {state_path}.\n"
-                        f"  {command}\n"
-                        "  Two of them alternate writes, which makes the vehicle jump on every page.\n"
-                        "\n"
-                        "  To watch this one instead, use the stack's own handover - it stops the\n"
-                        "  background vision, opens the window (r = reference, e = edit bays), and\n"
-                        "  restarts the stack when you quit:\n"
-                        "      ./start.sh edit\n"
-                        "  Or do it by hand:  ./start.sh stop --all   then   ./run.sh")
+                # If the other copy is the one the stack supervises, step it aside rather than
+                # refusing. That is what someone typing `python vision/src/main.py` wants, and it was
+                # the only command they kept typing: the refusal was correct and useless, four times
+                # in a row. Only this project's own supervised vision is stopped - serve, beacon and
+                # the OTA server are untouched, and a foreign or duplicate manual copy still refuses.
+                parent = _parent_command(other)
+                if "run-vision.sh" in parent:
+                    print(f"stopping the background vision (pid {other}) so this instance can own\n"
+                          f"  the camera and {state_path}\n"
+                          "  serve / beacon / ota are left running; the stack's vision stays down\n"
+                          "  until you run ./start.sh again", file=sys.stderr)
+                    try:
+                        os.kill(other, signal.SIGTERM)
+                        supervis = int(open(f"/proc/{other}/stat").read().split()[3])  # not macOS
+                    except Exception:                   # noqa: BLE001
+                        supervis = None
+                    if supervis is None:
+                        # macOS: find the supervisor by asking ps for the parent of `other`.
+                        try:
+                            import subprocess
+                            ppid = subprocess.run(["ps", "-o", "ppid=", "-p", str(other)],
+                                                  capture_output=True, text=True,
+                                                  timeout=3).stdout.strip()
+                            supervis = int(ppid) if ppid else None
+                        except Exception:               # noqa: BLE001
+                            supervis = None
+                    if supervis:
+                        try:
+                            os.kill(supervis, signal.SIGTERM)
+                        except OSError:
+                            pass
+                    for _ in range(30):
+                        try:
+                            os.kill(other, 0)
+                        except OSError:
+                            break
+                        time.sleep(0.1)
+                    other = 0                       # it is gone; carry on
+                else:
+                    return (f"another main.py is already running (pid {other}) and writing "
+                            f"{state_path}.\n  {command}\n"
+                            "  Two of them alternate writes, which makes the vehicle jump on every "
+                            "page.\n  Stop it first: ./start.sh stop --all")
     try:
         os.makedirs(os.path.dirname(os.path.abspath(pid_path)), exist_ok=True)
         with open(pid_path, "w", encoding="utf-8") as handle:
