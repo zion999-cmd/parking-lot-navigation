@@ -435,7 +435,10 @@ class CalibrationApp:
             return
         colour = COL_BTN if faint else COL_DERIVED
         pts = np.array([[int(x), int(y)] for x, y in self.lot], np.int32).reshape(-1, 1, 2)
-        if len(self.lot) == 4 and not faint:
+        # The translucent fill costs a full-frame copy and blend (measured: the most expensive part of
+        # this overlay). While a corner is being dragged the outline moves every frame, so skip the
+        # fill and draw only the boundary - the fill is not what you are aiming with.
+        if len(self.lot) == 4 and not faint and self._lot_drag is None:
             overlay = canvas.copy()
             cv2.fillPoly(overlay, [pts], (0, 60, 80))
             cv2.addWeighted(overlay, 0.30, canvas, 0.70, 0, canvas)
@@ -727,6 +730,17 @@ class CalibrationApp:
         """
         ed = self.ed
         guessed = f"  [arrow code {arrow_code}, guessed]" if arrow_code is not None else ""
+        if self.layer == "lot":
+            # The lot layer nudge: the selected corner, not a bay. Without this branch the arrows
+            # fell through to _act_spots and moved a bay while the lot layer was active.
+            if self._lot_sel is None or self._lot_sel >= len(self.lot):
+                ed._say("select a lot corner first (click it)", "warn")
+                return
+            x, y = self.lot[self._lot_sel]
+            self.lot[self._lot_sel] = (x + sx * self.FINE_PX, y + sy * self.FINE_PX)
+            nx, ny = self.lot[self._lot_sel]
+            ed._say(f"point {self._lot_sel + 1} -> ({nx:.1f}, {ny:.1f}){guessed}")
+            return
         if self.layer == "roads":
             if self.road.nudge(sx * self.FINE_PX, sy * self.FINE_PX, coalesce=self._fine_run):
                 node = self.road.selected_node()

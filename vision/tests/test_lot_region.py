@@ -211,3 +211,44 @@ def test_arrows_do_not_move_a_bay_from_the_lot_layer():
         app.act(key)
     assert before == [tuple(p) for p in app.ed.spots[5].polygon]
     assert app.act("t") is True and app.layer == "spots"
+
+
+def test_arrow_keys_move_the_selected_lot_corner_not_a_bay():
+    """Arrows reached the bay nudge code because _fine_nudge had no lot branch."""
+    app = _lot_app()
+    app.ed.selected = 5
+    app.lot = [(200.0, 200.0), (600.0, 200.0), (600.0, 500.0), (200.0, 500.0)]
+    bay_before = [tuple(p) for p in app.ed.spots[5].polygon]
+
+    app.act_code(app.ARROW_CODES and list(app.ARROW_CODES)[0])       # no selection yet
+    assert app.lot[0] == (200.0, 200.0), "nothing should move without a selected corner"
+
+    app._lot_sel = 0
+    up = list(app.ARROW_CODES)[0]
+    for _ in range(4):
+        app.act_code(up)
+    assert app.lot[0][1] < 200.0, app.lot[0]
+    assert app.lot[0][0] == 200.0
+    assert bay_before == [tuple(p) for p in app.ed.spots[5].polygon]
+
+
+def test_dragging_skips_the_full_frame_blend():
+    """The translucent fill costs a full-frame copy; while dragging it is skipped."""
+    import time
+
+    app = _lot_app()
+    app.lot = [(200.0, 200.0), (600.0, 200.0), (600.0, 500.0), (200.0, 500.0)]
+    frame = np.full((600, 800, 3), 30, np.uint8)
+
+    def cost(n=30):
+        start = time.perf_counter()
+        for _ in range(n):
+            app.render(frame)
+        return (time.perf_counter() - start) / n * 1000
+
+    app._lot_drag = None
+    still = cost()
+    app._lot_drag = 0
+    dragging = cost()
+    app._lot_drag = None
+    assert dragging <= still * 1.1, (still, dragging)
