@@ -26,6 +26,22 @@
 
 ---
 
+## 1b. ~~headless 掉线即退出~~ ⇒ ✅ 已修（`msg106`）
+
+**现象**：板子掉线时日志出现 `Host is down` → `Connection refused` → `no frames for 20 s`，
+然后 **headless 模式直接退出** ✗。
+
+**为什么看起来像"hero 又跳回错误位置"**：进程退出后 `start.sh` 监管的 vision 接管 ✓
+→ 那是**另一个进程** ✓ **空 profile** ✓ → 找到的 hero 位置不同 ✓ ✓
+—— 不是修好的东西回归了 ✗，是**持有 profile 的那个进程没了** ✗。
+
+**修法**：`MJPEGStream` 本来就会自动重连（`camera.py` docstring 原文：
+"the node rebooting (or an OTA) must not kill the viewer"）✓
+→ "20 秒无帧"**不表示**源头没了 ✓，只表示读者线程正在重连 ✓
+→ headless 现在**只警告一次、继续等** ✓（和窗口模式一致 ✓）。
+
+---
+
 ## 2. 识别层的数据抖动（**未解决，页面只能掩盖**）
 
 **现象**：纸车在阈值边缘时，`parking_state.json` 的 `vehicle.visible` 每秒翻几次。
