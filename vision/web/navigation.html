@@ -934,12 +934,16 @@ function updateCamera() {
 
   // The turn comes first: the route fit below is measured in screen axes, and the rotation is
   // what defines them. Eased along the short way round, so 359 degrees goes forward by two.
-  const heading = Nav.carHeading(v);
-  // North up, always. The page used to rotate the world to the car's heading, so losing the hero
-  // (heading unavailable) turned the whole map back to north and the next fix turned it again - the
-  // view spun while nothing on the sandbox had moved. A parked lot reads better north-up, and it makes
-  // a loss purely a matter of the icon.
-  cam.rot = 0;
+  // this read as a navigator rather than a lot plan. It is driven by car.h - the display pose - and not
+  // by the live document, because the document's heading vanishes when the hero is briefly lost. Reading
+  // it directly is what spun the view earlier: heading gone meant rotation 0, so the whole map snapped
+  // back to north and turned again on the next fix. car.h holds its last trusted value through a loss, so
+  // a loss now leaves the view exactly where it is, which is the whole point of an eased rotation.
+  // Idle -> north up; navigating -> car up, and a loss keeps car.h so the view does not swing. The
+  // map only returns to north when the navigation ends, which is what PHASE says.
+  const heading = useFollow ? car.h : null;
+  const wantRot = (heading != null) ? Nav.worldRotation(heading) : 0;
+  cam.rot = lerpRad(cam.rot ?? 0, wantRot, 0.12);
 
   if (useFollow) {
     // Driving: the car is the focal point and sits at the anchor - middle horizontally, a third

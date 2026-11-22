@@ -616,19 +616,31 @@ def test_camera_is_clamped_inside_the_lot() -> None:
     assert got[3]["cx"] == 400 and got[3]["cy"] == 300, got[3]
 
 
-def test_the_renderer_keeps_north_up() -> None:
-    """The projection can support rotation while the page decides never to use it.
+def test_the_renderer_turns_the_map_with_the_car() -> None:
+    """Navigation turns the map so the car points up; the lot does not.
 
-    The map used to turn to the car's heading, eased into place. Two things were wrong with that here: a
-    parked lot is easier to read north-up, and losing the hero made the heading unavailable, which turned
-    the whole map back to north and then turned it again on the next fix - the view spun while nothing on
-    the sandbox had moved. Rotation is now pinned, so a loss is purely a matter of the icon.
+    The turn must be driven by the display pose, not the live document: the document's heading disappears
+    when the hero is briefly lost, and reading it directly rotated the map back to north and then back
+    again on the next fix - the view spun while nothing had moved. car.h holds its last trusted value
+    through a loss, so a loss leaves the view where it is and only the icon dims.
     """
     html = open(PAGE, encoding="utf-8").read()
-    assert "cam.rot = 0;" in html, "the camera rotation must be pinned to north"
-    assert "Nav.worldRotation(heading)" not in html, "nothing may ask for the map to be turned"
+    assert "Nav.worldRotation(heading)" in html, "nothing asks for the map to be turned"
+    assert "const heading = useFollow ? car.h : null;" in html, \
+        "the turn must come from the display pose, which survives a loss"
+    assert "lerpRad(cam.rot" in html, "the turn is not eased"
     assert "Nav.applyCamera(ctx, viewW0, viewH0, cam, cam.rot)" in html, \
-        "the renderer must still apply the camera it was given"
+        "the renderer must apply the camera rotation"
+
+
+def test_the_turn_is_not_read_from_the_live_document() -> None:
+    """Pinned: the crash-and-spin regression. Using Nav.carHeading(v) here zeroes the rotation on every
+    missed poll, which is exactly the flicker this page was reported for."""
+    html = open(PAGE, encoding="utf-8").read()
+    start = html.index("function updateCamera()")
+    body = html[start:html.index("\nfunction ", start + 10)]
+    assert "Nav.carHeading(v)" not in body, "the camera reads the live heading, which vanishes on a miss"
+    assert "car.h" in body
 
 def test_page_shows_no_camera_or_internal_terms() -> None:
     html = open(PAGE, encoding="utf-8").read()
