@@ -816,6 +816,14 @@ def vehicle_state(pose: Optional[vehicle.VehiclePose],
         out["confidence"] = round(confidence, 3)
     if "state" in verdict:
         out["state"] = verdict["state"]
+    # The appearance profile the tracker has learned, and whether it is locked. A long-running process
+    # that has locked onto the wrong look keeps preferring it, which is why a fresh main.py can find a
+    # car this one cannot: the restart is not a fix, it is an empty profile.
+    profile = getattr(vehicle, "_belief", None)
+    if profile is not None:
+        out["profile_updates"] = getattr(profile, "profile_updates", None)
+        out["profile_locked"] = bool(getattr(profile, "profile_updates", 0)
+                                     >= getattr(profile, "lock_after", 10 ** 9))
     # A position the tracker itself does not believe is not a position: the state document says
     # visible=false, the page draws no car, and nothing routes to a colour blob.
     limit = HERO_MIN_CONFIDENCE if min_confidence is None else min_confidence
