@@ -1159,7 +1159,12 @@ def main() -> int:
     refusal = claim_state_ownership(args.state_out)
     if refusal:
         print(refusal, file=sys.stderr)
-        return 2
+        # 3, not 2: 2 means "could not open the camera", which the supervisor treats as the board still
+        # booting and retries every 3 s. Reusing it here made the supervisor retry a copy that can never
+        # start - 55577 "Address already in use" lines in one log - and every retry opened the camera,
+        # which starved the instance that was legitimately running. Retryable and permanent are different
+        # answers and the supervisor needs to be able to tell them apart.
+        return 3
 
     params = OccupancyParams(blur_ksize=args.blur,
                             pixel_threshold=args.pixel_threshold,

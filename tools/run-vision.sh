@@ -49,6 +49,17 @@ while true; do
     rc=$?
     child=""
     ran=$(( $(date +%s) - started ))
+    # rc=3 is main.py's "another instance already owns the state file". That is not a transient
+    # condition: retrying cannot fix it, and every retry opens the camera, which is what starved the
+    # instance that legitimately held it (measured: one extra client took the stream from 12 fps to 3.5,
+    # and 55577 "Address already in use" lines accumulated while a manual main.py was running). Stop and
+    # say why, instead of fighting over the camera.
+    if [ "$rc" = "3" ]; then
+        printf -- '--- main.py refused to start (rc=3): another instance owns parking_state.json.\n'
+        printf -- '    Stop it first (or stop this stack: ./start.sh stop), then run ./start.sh again.\n'
+        printf -- '    Not restarting in a loop: each attempt would take the camera from it.\n'
+        exit 0
+    fi
     # rc=2 is main.py's "could not open the camera": the board is still booting, or its single
     # stream slot is still held by the connection that just went away. Both are normal for a few
     # seconds and neither is a reason to wait a minute. Measured before this: the loop sat at
