@@ -1425,12 +1425,16 @@ def main() -> int:
             # windowed mode it now says so and carries on.
             stall = time.time() - last_frame_at
             if stall > 20.0:
-                if args.headless:
-                    print(f"error: no frames for {stall:.0f} s", file=sys.stderr)
-                    break
+                # Headless used to exit here, and that is what made the hero "jump to the wrong place after
+                # a while": the board dropped off the network (measured: "Host is down", then "Connection
+                # refused", then "no frames for 20 s"), this process ended, and start.sh's supervised vision
+                # took over - a new process with nothing learned, so the hero it found was somewhere else.
+                # MJPEGStream already reconnects by itself (that is its documented purpose), so the right
+                # thing here is to keep waiting and let the reader thread do its job.
                 if not stall_warned:
-                    print(f"WARNING: no new frame for {stall:.0f} s - the camera or Wi-Fi "
-                          f"is not delivering. Still listening; press q to quit.")
+                    print(f"WARNING: no frames for {stall:.0f} s - the camera or Wi-Fi is not "
+                          f"delivering. Still listening (the reader reconnects); Ctrl-C to stop.",
+                          file=sys.stderr)
                     stall_warned = True
 
             if declared_size is not None and frame.shape[:2] != declared_size \
