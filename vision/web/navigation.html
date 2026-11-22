@@ -782,12 +782,10 @@ function el(id) { return document.getElementById(id); }
 // view (its own refusal, or no vehicle at all) is "waiting for a fix"; a route that cannot be
 // given for any other reason is "finding a new route". The codes are handled here and never shown.
 function routeSituation(v, routeDoc) {
-  // "Relocating" is for when there is nothing to drive along. A brief loss with a valid route is
-  // still a navigation - the driver keeps the route on screen - so the status does not flicker
-  // between the two on alternate polls.
-  const noFix = ((!v && !car.visible) || car.lost) && !(routeDoc && routeDoc.ok);
-  if (noFix)
-    return { status: "定位等待…", icon: "•", text: "正在重新定位车辆…" };
+  // The status line is the interaction layer: it says what the navigation is doing, not what the
+  // detector is doing. A brief loss of the hero is shown where it belongs - the icon goes translucent
+  // in place (P0011) - and is not promoted to "relocating the vehicle" here, which flickered the text
+  // against the camera's own zoom and told the driver about a sub-second hiccup.
   if (routeDoc?.ok)
     return { status: "导航中", ...Nav.maneuver(v, routeDoc, NODES) };
   return { status: "重新规划中…", icon: "•", text: "正在重新规划路线…" };
