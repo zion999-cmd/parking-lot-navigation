@@ -333,7 +333,12 @@ const Nav = {
   displayPoint(vehicle, chains, loops) {
     if (!vehicle || typeof vehicle.x !== "number" || typeof vehicle.y !== "number") return null;
     const kind = (vehicle.location || {}).kind;
-    if (kind !== "floor") return [vehicle.x, vehicle.y];   // in a bay, or already on a lane
+    // On the tarmac: the icon rides the lane centreline, not wherever the colour blob's centre landed.
+    // "road" is the kind a car driving between bays actually gets - the guard used to look for "floor"
+    // only, so the snap never ran on a moving car and it drifted in the lane. Measured live: kind
+    // "road", snapped point identical to the raw fix, meaning the projection was never applied.
+    // "spot" is a parked car and "unknown" has no business being pulled anywhere near a lane.
+    if (kind !== "road" && kind !== "floor") return [vehicle.x, vehicle.y];
     return this.nearestLanePoint(chains, loops, vehicle.x, vehicle.y) || [vehicle.x, vehicle.y];
   },
   

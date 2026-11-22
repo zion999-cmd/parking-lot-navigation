@@ -130,8 +130,10 @@ const eq = (label, got, want) => {
 eq("floor: 吸附到车道 (250,150) → (250,100)", N2.displayPoint({ x: 250, y: 150, location: { kind: "floor" } }, [chain], []), [250, 100]);
 // 在车位里（spot）→ 画实际位置 ✓
 eq("spot: 不吸附", N2.displayPoint({ x: 250, y: 150, location: { kind: "spot", id: "B3" } }, [chain], []), [250, 150]);
-// 已经在路上（road）→ 画实际位置 ✓
-eq("road: 不吸附", N2.displayPoint({ x: 250, y: 150, location: { kind: "road" } }, [chain], []), [250, 150]);
+// 已经在路上（road）→ **也吸附** ✓
+// 这是被实测推翻的一条 ✓：车辆在路上时 location.kind 就是 "road" ✗ 不是 "floor" ✗，
+// 所以旧判断让吸附在车辆行驶时从不生效 ✗ → 图标在车道里飘 ✗ ✓
+eq("road: 吸附到车道中心", N2.displayPoint({ x: 250, y: 150, location: { kind: "road" } }, [chain], []), [250, 100]);
 // 没有 location 字段 → 画实际位置 ✓（不猜 ✓）
 eq("无 location: 不吸附", N2.displayPoint({ x: 250, y: 150 }, [chain], []), [250, 150]);
 // 闭环也支持 ✓
@@ -186,4 +188,47 @@ process.exit(bad2 ? 1 : 0);
     process.exit(1);
   }
   console.log("  ✓ 页面调用的函数都有定义");
+}
+
+// --- displayPoint: a car on the tarmac rides the lane centreline -------------------------------
+// Measured live: location.kind was "road", the guard only accepted "floor", so the projection never ran
+// and the icon drifted inside the lane instead of sitting on it.
+{
+  const html2 = fs.readFileSync(path.join(ROOT, "vision", "web", "navigation.html"), "utf8");
+  const a = html2.indexOf("displayPoint(vehicle, chains, loops) {");
+  const b = html2.indexOf("carHeading(vehicle)", a);
+  const h = `
+const Nav = {
+  nearestLanePoint(chains, loops, x, y) {
+    let best = null, bestD = Infinity;
+    for (const pts of chains || []) {
+      for (let i = 0; i < pts.length - 1; i++) {
+        const p0 = pts[i], p1 = pts[i + 1];
+        const dx = p1[0] - p0[0], dy = p1[1] - p0[1], l2 = dx * dx + dy * dy;
+        const t = l2 ? Math.max(0, Math.min(1, ((x - p0[0]) * dx + (y - p0[1]) * dy) / l2)) : 0;
+        const px = p0[0] + t * dx, py = p0[1] + t * dy;
+        const d = Math.hypot(px - x, py - y);
+        if (d < bestD) { bestD = d; best = [px, py]; }
+      }
+    }
+    return best;
+  },
+  ${html2.slice(a, b).replace("this.nearestLanePoint", "Nav.nearestLanePoint")}
+};
+module.exports = (kind, x, y) => Nav.displayPoint({ x, y, location: { kind } }, [[[0, 0], [100, 0]]], []);
+`;
+  const f = path.join(os.tmpdir(), "disp_" + process.pid + ".js");
+  fs.writeFileSync(f, h);
+  const dp = require(f);
+  let bad = 0;
+  const check = (name, got, want) => {
+    const ok = JSON.stringify(got) === JSON.stringify(want);
+    console.log(`  ${ok ? "✓" : "✗"} ${name}: ${JSON.stringify(got)}`);
+    if (!ok) bad++;
+  };
+  check("road → 车道中心 (y=0)", dp("road", 50, 12), [50, 0]);
+  check("floor → 车道中心", dp("floor", 50, -9), [50, 0]);
+  check("spot → 原位不动", dp("spot", 50, 12), [50, 12]);
+  check("unknown → 原位不动", dp("unknown", 50, 12), [50, 12]);
+  process.exit(bad ? 1 : 0);
 }
