@@ -616,25 +616,19 @@ def test_camera_is_clamped_inside_the_lot() -> None:
     assert got[3]["cx"] == 400 and got[3]["cy"] == 300, got[3]
 
 
-def test_the_renderer_actually_applies_the_turn() -> None:
-    """A pure function nobody calls is not a feature.
+def test_the_renderer_keeps_north_up() -> None:
+    """The projection can support rotation while the page decides never to use it.
 
-    The projection above can be perfect while the renderer still draws a north-up map, so the
-    shipped page is read for the three things that make the turn real: the camera transform with
-    a rotation, a rotation that is eased towards the car's heading, and labels counter-rotated so
-    bay numbers stay readable while the map turns.
+    The map used to turn to the car's heading, eased into place. Two things were wrong with that here: a
+    parked lot is easier to read north-up, and losing the hero made the heading unavailable, which turned
+    the whole map back to north and then turned it again on the next fix - the view spun while nothing on
+    the sandbox had moved. Rotation is now pinned, so a loss is purely a matter of the icon.
     """
     html = open(PAGE, encoding="utf-8").read()
+    assert "cam.rot = 0;" in html, "the camera rotation must be pinned to north"
+    assert "Nav.worldRotation(heading)" not in html, "nothing may ask for the map to be turned"
     assert "Nav.applyCamera(ctx, viewW0, viewH0, cam, cam.rot)" in html, \
-        "the renderer does not apply the camera rotation"
-    assert "Nav.worldRotation(heading)" in html, "nothing asks for the map to be turned"
-    assert "lerpRad(cam.rot" in html, "the turn is not eased"
-    label = html[html.index("function label("):html.index("function drawCar(")]
-    assert "ctx.rotate(-(cam.rot" in label, "labels would turn with the map and become unreadable"
-    # and clicking must be the inverse, or a turned map picks the wrong bay
-    assert "Nav.screenToWorld(viewW0, viewH0, cam, cam.rot" in html, \
-        "clicks do not undo the rotation"
-
+        "the renderer must still apply the camera it was given"
 
 def test_page_shows_no_camera_or_internal_terms() -> None:
     html = open(PAGE, encoding="utf-8").read()

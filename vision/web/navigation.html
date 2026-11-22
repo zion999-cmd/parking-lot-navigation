@@ -554,6 +554,8 @@ let waitingNote = 0;
 // The smoothly animated car: we render every frame and lerp this display pose towards the last
 // reported pose, so the icon glides instead of jumping on each 250 ms poll.
 const car = { x: null, y: null, h: null, visible: false, lost: false };
+let lostPolls = 0;                 // consecutive polls with no trusted fix (display only)
+let carDim = 0;                    // 0 = live, 1 = fully dimmed; a quarter per frame
 let cam = { scale: 1, cx: 400, cy: 300, rot: 0 };
 let CHAINS = [];        // open road runs, worked out once per map
 let LOOPS = [];        // closed road loops (the ring), drawn as one closed path
@@ -857,6 +859,7 @@ function lerp(a, b, t) { return a + (b - a) * t; }
 
 // Deadband 3 px covers the measured +-2.3 px wander of a parked car; the proportional term keeps a
 // moving car in step without ever looking like it is sliding; a jump beyond 60 px is a hand move.
+const CAR_LOST_POLLS = 2;         // consecutive polls without a trusted fix before the icon dims
 const CAR_DEADBAND_PX = 3.0;
 const CAR_FOLLOW_K = 0.45;
 const CAR_SNAP_PX = 60.0;
@@ -927,8 +930,11 @@ function updateCamera() {
   // The turn comes first: the route fit below is measured in screen axes, and the rotation is
   // what defines them. Eased along the short way round, so 359 degrees goes forward by two.
   const heading = Nav.carHeading(v);
-  const wantRot = (useFollow && heading != null) ? Nav.worldRotation(heading) : 0;
-  cam.rot = lerpRad(cam.rot ?? 0, wantRot, 0.12);
+  // North up, always. The page used to rotate the world to the car's heading, so losing the hero
+  // (heading unavailable) turned the whole map back to north and the next fix turned it again - the
+  // view spun while nothing on the sandbox had moved. A parked lot reads better north-up, and it makes
+  // a loss purely a matter of the icon.
+  cam.rot = 0;
 
   if (useFollow) {
     // Driving: the car is the focal point and sits at the anchor - middle horizontally, a third
@@ -1039,14 +1045,13 @@ function drawWorld() {
   drawTarget();
   drawEntrances();
   if (car.visible && car.x != null) {
-    if (car.lost) {
-      ctx.save();
-      ctx.globalAlpha = 0.35;         // obviously not live, still where it was
-      drawCar(car.x, car.y, car.h ?? 0);
-      ctx.restore();
-    } else {
-      drawCar(car.x, car.y, car.h ?? 0);
-    }
+    // The loss is shown as translucency, and translucency is eased rather than switched. The detector
+    // hesitates several times a second while the paper car is marginal, and snapping between two alpha
+    // values made the icon flicker although its position never moved.
+    ctx.save();
+    ctx.globalAlpha = 1 - 0.65 * carDim;
+    drawCar(car.x, car.y, car.h ?? 0);
+    ctx.restore();
   }
 
   ctx.restore();
@@ -1325,6 +1330,7 @@ function tick() {
     if (car.x == null) {
       car.x = v.x; car.y = v.y; car.h = th ?? 0;
       headingPending = null; headingPendingCount = 0;
+    lostPolls = 0;
       car.lost = false;
     } else if (car.lost) {
       // Reacquired after a loss: glide to the new fix instead of teleporting. The car was driving the
@@ -1346,16 +1352,24 @@ function tick() {
       car.h = lerpAngle(car.h, acceptHeading(car.h, th ?? car.h), 0.35);
     }
     car.visible = true;
+    lostPolls = 0;
     car.lost = false;
   } else if (car.x != null) {
     // No trusted position this poll. Keep the last trusted pose on screen, marked lost: deleting the
     // icon and re-creating it is what made a brief loss look like the car driving off the map. The
     // pose is frozen and is a display artefact only - nothing downstream may read it as a position.
-    car.lost = true;
+    // One missing poll is the detector hesitating, not a loss: the document flips visible on and off
+    // several times a second while the paper car is marginal. Dimming on the first miss made the icon
+    // blink. The pose is already frozen here, so waiting one more poll costs nothing.
+    lostPolls += 1;
+    car.lost = lostPolls >= CAR_LOST_POLLS;
   } else {
     car.visible = false;              // never seen since the page opened
   }
 
+  // Eased a quarter per frame (~66 ms to finish). Same reason as the icon's alpha: the loss state itself
+  // flickers several times a second while the car is marginal, and switching it hard makes that visible.
+  carDim = car.lost ? Math.min(1, carDim + 0.25) : Math.max(0, carDim - 0.25);
   updateCamera();
   drawWorld();
   requestAnimationFrame(tick);
