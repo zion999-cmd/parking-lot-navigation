@@ -342,6 +342,25 @@ const Nav = {
     return this.nearestLanePoint(chains, loops, vehicle.x, vehicle.y) || [vehicle.x, vehicle.y];
   },
   
+  // The point on the route the car should be drawn at. drawRoute strokes exactly these points, so a car
+  // placed here is on the blue line by construction - no second geometry that can disagree with it.
+  // Measured: the lane-chain snap put the icon 18.9 px off the drawn route while sitting 0.2 px from a
+  // chain centreline, because the two are not the same polyline.
+  routePoint(routeDoc, nodes, x, y) {
+    const { points } = this.routePoints(routeDoc, nodes);
+    let best = null, bestD = Infinity;
+    for (let i = 0; i < points.length - 1; i++) {
+      const a = points[i], b = points[i + 1];
+      const dx = b[0] - a[0], dy = b[1] - a[1];
+      const len2 = dx * dx + dy * dy;
+      const t = len2 ? Math.max(0, Math.min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / len2)) : 0;
+      const px = a[0] + t * dx, py = a[1] + t * dy;
+      const d = Math.hypot(px - x, py - y);
+      if (d < bestD) { bestD = d; best = [px, py]; }
+    }
+    return best;
+  },
+
   carHeading(vehicle) {
     if (!vehicle) return null;
     if (vehicle.front_is_known && typeof vehicle.front_heading === "number")
@@ -1346,7 +1365,11 @@ function tick() {
       // whole time it was hidden, so jumping makes the icon appear to blink to a new place; moving.
       // there over about a second reads as the car having driven. This is display only - the live
       // position, arrival checks and replanning all use the document, never this pose.
-      const back = Nav.displayPoint(v, CHAINS, LOOPS) || [v.x, v.y];
+      // While a route is up the icon rides the line the driver is being told to follow; without one it
+      // falls back to the lane chains, which is what an idle page has.
+      const onRouteBack = (typeof v.x === "number" && ROUTE?.ok)
+        ? Nav.routePoint(ROUTE, NODES, v.x, v.y) : null;
+      const back = onRouteBack || Nav.displayPoint(v, CHAINS, LOOPS) || [v.x, v.y];
       car.x = followAxis(car.x, back[0], 0, CAR_RECOVER_K, Infinity);
       car.y = followAxis(car.y, back[1], 0, CAR_RECOVER_K, Infinity);
       car.h = lerpAngle(car.h, acceptHeading(car.h, th ?? car.h), CAR_RECOVER_K);
@@ -1355,7 +1378,9 @@ function tick() {
       // written ~1.3 times a second. A plain lerp turns that into a slow glide - the car looked
       // like it was floating. So: ignore movement inside the measured noise band, and catch up
       // proportionally outside it, snapping when the jump is far too big to be driving.
-      const shown = Nav.displayPoint(v, CHAINS, LOOPS) || [v.x, v.y];
+      const onRoute = (typeof v.x === "number" && ROUTE?.ok)
+        ? Nav.routePoint(ROUTE, NODES, v.x, v.y) : null;
+      const shown = onRoute || Nav.displayPoint(v, CHAINS, LOOPS) || [v.x, v.y];
       car.x = followAxis(car.x, shown[0], CAR_DEADBAND_PX, CAR_FOLLOW_K, CAR_SNAP_PX);
       car.y = followAxis(car.y, shown[1], CAR_DEADBAND_PX, CAR_FOLLOW_K, CAR_SNAP_PX);
       car.h = lerpAngle(car.h, acceptHeading(car.h, th ?? car.h), 0.35);

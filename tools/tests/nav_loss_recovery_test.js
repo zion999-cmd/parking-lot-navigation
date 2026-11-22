@@ -232,3 +232,36 @@ module.exports = (kind, x, y) => Nav.displayPoint({ x, y, location: { kind } }, 
   check("unknown → 原位不动", dp("unknown", 50, 12), [50, 12]);
   process.exit(bad ? 1 : 0);
 }
+
+// --- the icon must ride the drawn route, not a lane it merely resembles ------------------------
+// Measured live: 18.9 px from the blue line while 0.2 px from a lane-chain centreline. The two are not
+// the same polyline, so the icon looked offset from the navigation line the driver was told to follow.
+{
+  const html3 = fs.readFileSync(path.join(ROOT, "vision", "web", "navigation.html"), "utf8");
+  const a3 = html3.indexOf("routePoint(routeDoc, nodes, x, y) {");
+  const b3 = html3.indexOf("carHeading(vehicle)", a3);
+  const h3 = `
+const Nav = {
+  routePoints(routeDoc, nodes) {
+    const ids = (routeDoc?.ok && routeDoc.nodes) || [];
+    return { points: ids.filter(i => nodes[i]).map(i => [nodes[i].x, nodes[i].y]) };
+  },
+  ${html3.slice(a3, b3)}
+};
+const nodes = { A: { x: 0, y: 100 }, B: { x: 200, y: 100 }, C: { x: 200, y: 300 } };
+module.exports = (x, y) => Nav.routePoint({ ok: true, nodes: ["A", "B", "C"] }, nodes, x, y);
+`;
+  const f3 = path.join(os.tmpdir(), "routept_" + process.pid + ".js");
+  fs.writeFileSync(f3, h3);
+  const rp = require(f3);
+  let bad3 = 0;
+  const ck = (name, got, want) => {
+    const ok = Math.abs(got[0] - want[0]) < 0.001 && Math.abs(got[1] - want[1]) < 0.001;
+    console.log(`  ${ok ? "✓" : "✗"} ${name}: ${got.map(n => n.toFixed(1))} vs ${want}`);
+    if (!ok) bad3++;
+  };
+  ck("偏离 18 px → 投到蓝线上", rp(50, 118), [50, 100]);
+  ck("拐角外侧 → 投到最近一段", rp(210, 110), [200, 110]);
+  ck("已在线上 → 不动", rp(100, 100), [100, 100]);
+  process.exit(bad3 ? 1 : 0);
+}
