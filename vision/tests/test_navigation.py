@@ -656,8 +656,12 @@ def test_every_planner_refusal_has_a_non_technical_handling() -> None:
     # the shipped guard names the hero-not-visible branch and collapses every other refusal to
     # the rerouting fallback, so it only has to recognise the one code it treats differently.
     assert '"hero-not-visible"' in html and "routeSituation" in html
-    for human in ("正在重新规划路线", "正在重新定位车辆"):
-        assert human in html, human
+    # A refusal the driver cannot act on becomes the rerouting phrase. There used to be a second phrase,
+    # "正在重新定位车辆", for a brief hero loss - agreed out of the page: a sub-second loss is shown on the
+    # icon (translucent, in place) and must not be promoted into the interaction layer, where it made the
+    # status flicker and the camera zoom with it.
+    assert "正在重新规划路线" in html
+    assert "正在重新定位车辆" not in html, "a brief loss belongs on the icon, not in the status line"
     body_only = re.sub(r"//.*", "", html)
     assert "ROUTE.code" not in body_only        # never print the raw code to a driver
 
