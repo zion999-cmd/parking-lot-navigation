@@ -628,7 +628,7 @@ async function requestRoute(manual) {
     doc = null;
   }
   if (mine !== replanSeq) return;
-  if (doc && doc.ok === false && doc.kept_target) {
+  if (doc && doc.ok === false) {
       // A refusal does not end the navigation: the target stays, the previous route keeps being
       // drawn, and the reason is shown. Losing the target here is what made a change in lighting
       // look like the navigation being cancelled.
@@ -637,7 +637,8 @@ async function requestRoute(manual) {
     const note = `${doc.code || "refused"}|${doc.kept_target}`;
     if (note !== lastRefusalNote) {
       lastRefusalNote = note;
-      transient(`目标保留在 ${doc.kept_target}（${whyOf(doc)}）`, "!");
+      const where = doc.kept_target ? `目标保留在 ${doc.kept_target}` : "目标仍在";
+      transient(`${where}（${whyOf(doc)}）`, "!");
     }
       lastPlan = { x: null, y: null, at: Date.now() };
       return;
@@ -781,7 +782,10 @@ function el(id) { return document.getElementById(id); }
 // view (its own refusal, or no vehicle at all) is "waiting for a fix"; a route that cannot be
 // given for any other reason is "finding a new route". The codes are handled here and never shown.
 function routeSituation(v, routeDoc) {
-  const noFix = !v || v.visible === false || routeDoc?.code === "hero-not-visible";
+  // "Relocating" is for when there is nothing to drive along. A brief loss with a valid route is
+  // still a navigation - the driver keeps the route on screen - so the status does not flicker
+  // between the two on alternate polls.
+  const noFix = ((!v && !car.visible) || car.lost) && !(routeDoc && routeDoc.ok);
   if (noFix)
     return { status: "定位等待…", icon: "•", text: "正在重新定位车辆…" };
   if (routeDoc?.ok)
@@ -915,8 +919,11 @@ function updateCamera() {
   const v = vehicleOf();
   // Arriving must not yank the view back to the whole lot: the last thing a driver looked at
   // was the bay they were aiming for, so the camera keeps following the stopped car.
-  const useFollow = (PHASE === "NAVIGATING" || PHASE === "ARRIVED") &&
-                    v && v.visible !== false && car.x != null;
+    // Follow the DISPLAY pose, not the raw flag. The state document flips visible on and off while the
+    // detector hesitates - measured 18 flips in 20 s - and following that flapped the zoom between the
+    // car and the whole lot. car holds through a brief loss by design (P0011), so the view stays put.
+    const useFollow = (PHASE === "NAVIGATING" || PHASE === "ARRIVED") &&
+                      car.visible && car.x != null;
   const sheetInset = sheetHeight();
 
   // The turn comes first: the route fit below is measured in screen axes, and the rotation is
