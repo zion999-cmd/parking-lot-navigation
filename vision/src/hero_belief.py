@@ -488,6 +488,28 @@ class HeroBelief:
             "stable_frames": self.stable_frames,
         }
 
+    def reset_profile(self) -> None:
+        """Forget what the tracker has learned about the car's appearance, keep where it is.
+
+        The profile is learned from accepted candidates and locks after `lock_after` updates, after
+        which it keeps preferring the look it learned. A long run therefore holds on to whatever it was
+        first taught - measured 9830 updates on a running instance whose car it then could not find,
+        while a fresh process found it immediately. This is the difference, exposed as a method: the
+        scene changed, the geometry is still good, so only the appearance is thrown away.
+        """
+        # The learned appearance lives in these fields - there is no single "profile" object - so all of
+        # them go back to None, which is what a fresh process starts with.
+        self.area = None
+        self.width = None
+        self.height = None
+        self.aspect = None
+        self.shape = None
+        self.sat = None
+        self.val = None
+        self.hue = None
+        self.profile_updates = 0
+        self.learning_skipped = 0
+
     def metrics(self) -> dict:
         return {
             "hero_state": self.state,

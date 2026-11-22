@@ -91,6 +91,8 @@ _LOT_REGION = None
 # The last belief verdict, so main.py can publish its confidence in the state document instead of the
 # consumer having to guess whether a position is trustworthy.
 last_verdict = None
+_last_takeovers = 0
+_profile_resets = 0
 
 
 def set_lot_region(polygon) -> None:
@@ -1064,6 +1066,20 @@ def locate_all(frame: np.ndarray, min_area: int = DEFAULT_MIN_AREA,
                                      max_shape=None, region=_LOT_REGION)
 
     verdict = _belief.update(pool, dt)
+    # A takeover is the tracker jumping to a different place with persistent support: either the car was
+    # really moved, or the appearance profile has been captured by something that is not the car. In the
+    # second case nothing else notices - it keeps tracking the wrong object happily - so the profile is
+    # thrown away and re-learned from the next accepted frames. Measured live: 9830 profile updates and a
+    # locked profile on a car the tracker had stopped following, fixed by restarting the process, which is
+    # exactly what this does without a restart.
+    global _last_takeovers, _profile_resets
+    takeovers = _belief.metrics().get("hero_takeovers", 0)
+    if takeovers > _last_takeovers:
+        _last_takeovers = takeovers
+        _profile_resets += 1
+        _belief.reset_profile()
+        print(f"  hero: profile reset after takeover #{takeovers} "
+              f"({_profile_resets} reset(s) this run)", file=sys.stderr)
     global last_verdict
     last_verdict = verdict
 
